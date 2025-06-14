@@ -2,16 +2,21 @@
 
 #### USER DEFINED VARIABLES SECTION ####
 DEBUG=false
+K8S_DNS_UTILITY=false
+DOCKER_UTILITY=false
+DOCKER_BRIDGE_CIDR=172.30.0.1/16
+ZIP_UTILITY=true
+JQ_UTILITY=true
 
-# RKE2 Install Parameters
+# RKE2 Install Parameters (If INSTALL_INGRESS=false, then Metallb LoadBalancer will be installed)
 AIRGAPPED=false
 RKE2_VERSION=v1.30.13+rke2r1
 CNI_TYPE=canal
 CLUSTER_CIDR=172.28.175.0/24
 SERVICE_CIDR=172.28.176.0/24
 INSTALL_INGRESS=false
-INSTALL_LOCALPATH_STORAGE=true
 METALLB_VERSION=v0.15.2
+INSTALL_LOCALPATH_STORAGE=true
 HELM_VERION=v3.12.3
 
 # Helm Chart Parameters (Helm runs as "helm upgrade --install $CHART_NAME $OCI_URL --version $CHART_VERSION -n $NAMESPACE $CHART_INSTALL_ARGS")
@@ -92,6 +97,69 @@ function install_helm_chart() {
 
 
 ### OTHER FUNCTIONS
+
+function run_utilities() {
+  if [ $K8S_DNS_UTILITY == true ]; then
+    echo "Installing K8s DNS Utility pod in default namespace..."
+    debug_run install_k8s_dns_utility
+    check_namespace_pods_ready default
+    echo "Completed..."
+    kubectl exec -i -t dnsutils -- nslookup kube-dns.kube-system.svc.cluster.local
+    echo "Usage example: kubectl exec -i -t dnsutils -- nslookup <FQDN>"
+  fi
+  if [ $DOCKER_UTILITY == true ]; then
+    echo "Installing Docker Utility..."
+    debug_run install_docker_utility
+    echo "Completed..."
+    echo "Reload the shell to enable docker cli access or run as sudo/root user"
+  fi
+  if [ $ZIP_UTILITY == true ]; then
+    echo "Installing zip utility..."
+    debug_run "apt_get_install zip"
+    echo "Completed..."
+  fi
+  if [ $JQ_UTILITY == true ]; then
+    echo "Installing jq utility..."
+    debug_run "apt_get_install jq"
+    echo "Completed..."
+  fi
+}
+
+function install_k8s_dns_utiliy() {
+  kubectl apply -f https://k8s.io/examples/admin/dns/dnsutils.yaml
+}
+
+function install_docker_utility() {
+  install -m 0755 -d /etc/apt/keyrings
+  curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+  chmod a+r /etc/apt/keyrings/docker.asc
+  echo \
+    "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu \
+    $(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}") stable" | \
+    sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+  apt-get update
+  create_bridge_json
+  echo "" | DEBIAN_FRONTEND=noninteractive apt-get -y -qq docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+  usermod -aG docker $user
+}
+
+function create_bridge_json () {
+  echo "pre-creating docker bridge json..."
+  mkdir -p /etc/docker
+  cat <<EOF | tee /etc/docker/daemon.json > /dev/null
+{
+  "bip": "$DOCKER_BRIDGE_CIDR"
+}
+EOF
+  echo "Created /etc/docker/daemon.json with bip: $DOCKER_BRIDGE_CIDR"
+}
+
+function apt_get_install() {
+  echo "Installing $1..."
+  apt-get update
+  echo "" | DEBIAN_FRONTEND=noninteractive apt-get -y -qq install $1
+}
+
 function set_prereqs() {
   mkdir -p /etc/rancher/rke2
   mkdir -p /var/lib/rancher/rke2/server/manifests
@@ -132,7 +200,7 @@ function start_rke2_server() {
 
 function apply_services(){
   if [ $INSTALL_LOCALPATH_STORAGE == true ]; then
-    kubectl apply -f https://raw.githubusercontent.com/rancher/local-path-provisioner/master/deploy/local-path-storage.yaml
+    kubectl apply -f $base_dir/rke2-install-files/local-path-storage.yaml
   fi
   if [ $INSTALL_INGRESS == false ]; then
     kubectl apply -f https://raw.githubusercontent.com/metallb/metallb/$METALLB_VERSION/config/manifests/metallb-native.yaml
@@ -315,6 +383,173 @@ spec:
   - default
   interfaces:
   - $mgmt_if
+EOF
+}
+
+function gen_localpath_storage(){
+  cat > $base_dir/rke2-install-files/local-path-storage.yaml <<EOF
+edgeuser@rke2-eo:~$ cat local-path-storage.yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: local-path-storage
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: local-path-provisioner-service-account
+  namespace: local-path-storage
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: local-path-provisioner-role
+  namespace: local-path-storage
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: local-path-provisioner-role
+rules:
+  - apiGroups: [""]
+    resources: ["nodes", "persistentvolumeclaims", "configmaps", "pods", "pods/log"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses"]
+    verbs: ["get", "list", "watch"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: local-path-provisioner-bind
+  namespace: local-path-storage
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: local-path-provisioner-role
+subjects:
+  - kind: ServiceAccount
+    name: local-path-provisioner-service-account
+    namespace: local-path-storage
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: local-path-provisioner-bind
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: local-path-provisioner-role
+subjects:
+  - kind: ServiceAccount
+    name: local-path-provisioner-service-account
+    namespace: local-path-storage
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: local-path-provisioner
+  namespace: local-path-storage
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: local-path-provisioner
+  template:
+    metadata:
+      labels:
+        app: local-path-provisioner
+    spec:
+      serviceAccountName: local-path-provisioner-service-account
+      containers:
+        - name: local-path-provisioner
+          image: rancher/local-path-provisioner:v0.0.31
+          imagePullPolicy: IfNotPresent
+          command:
+            - local-path-provisioner
+            - --debug
+            - start
+            - --config
+            - /etc/config/config.json
+          volumeMounts:
+            - name: config-volume
+              mountPath: /etc/config/
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: CONFIG_MOUNT_PATH
+              value: /etc/config/
+      volumes:
+        - name: config-volume
+          configMap:
+            name: local-path-config
+
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: local-path
+provisioner: rancher.io/local-path
+volumeBindingMode: WaitForFirstConsumer
+reclaimPolicy: Delete
+
+---
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: local-path-config
+  namespace: local-path-storage
+data:
+  config.json: |-
+    {
+            "nodePathMap":[
+            {
+                    "node":"DEFAULT_PATH_FOR_NON_LISTED_NODES",
+                    "paths":["/opt/local-path-provisioner"]
+            }
+            ]
+    }
+  setup: |-
+    #!/bin/sh
+    set -eu
+    mkdir -m 0777 -p "\$VOL_DIR"
+  teardown: |-
+    #!/bin/sh
+    set -eu
+    rm -rf "\$VOL_DIR"
+  helperPod.yaml: |-
+    apiVersion: v1
+    kind: Pod
+    metadata:
+      name: helper-pod
+    spec:
+      priorityClassName: system-node-critical
+      tolerations:
+        - key: node.kubernetes.io/disk-pressure
+          operator: Exists
+          effect: NoSchedule
+      containers:
+      - name: helper-pod
+        image: quay.io/busybox/busybox
+        imagePullPolicy: IfNotPresent
 EOF
 }
 
