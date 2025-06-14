@@ -1,7 +1,9 @@
 #!/bin/bash
 
-# USER DEFINED VARIABLES
+#### USER DEFINED VARIABLES SECTION ####
 DEBUG=false
+
+# RKE2 Install Parameters
 AIRGAPPED=false
 RKE2_VERSION=v1.30.13+rke2r1
 CNI_TYPE=canal
@@ -9,17 +11,22 @@ CLUSTER_CIDR=172.28.175.0/24
 SERVICE_CIDR=172.28.176.0/24
 INSTALL_INGRESS=false
 INSTALL_LOCALPATH_STORAGE=true
-
 METALLB_VERSION=v0.15.2
 HELM_VERION=v3.12.3
-NAMESPACE=dell-automation
+
+# Helm Chart Parameters (Helm runs as "helm upgrade --install $CHART_NAME $OCI_URL --version $CHART_VERSION -n $NAMESPACE $CHART_INSTALL_ARGS")
 CHART_NAME=native-edge-orchestrator
 OCI_URL=oci://public.ecr.aws/dell/nativeedge/native-edge-orchestrator
 CHART_VERSION=3.1.0-0-58
-INGRESS_FQDN=$(hostname).local.edge
-TIMEOUT=60m
+NAMESPACE=dell-automation
+CHART_INSTALL_ARGS="--set global.ingress.fqdn=CHANGEME --wait --timeout 60m"
+post_helm_install_cmds=(
+  "echo 'Dell Orchestrator URL: https://$INGRESS_FQDN'"
+  "echo 'Dell Orchestrator Username: administrator'"
+  "echo 'Dell Orchesator default password: $(kubectl -n $NAMESPACE get secret keycloak-secret -o jsonpath="{.data.security-admin-usr-pwd}" | base64 --decode)'"
+  )
 
-# INTERNAL VARIABLES (do not edit)
+############### INTERNAL VARIABLES (do not edit) ####################
 base_dir=$(pwd)
 os_release_version=$(lsb_release -ds |tail -1)
 os_release_version_short=$(lsb_release -rs |tail -1)
@@ -28,7 +35,10 @@ mgmt_if=$(ip a |grep "$(hostname -I |awk '{print $1}')" | awk '{print $NF}')
 user_name=$SUDO_USER
 offline_prep_done=false
 
-# FUNCTIONS
+############################# FUNCTIONS #############################
+
+
+## MENU FUNCTIONS
 function install_rke2() {
   check_os_version
   if [ "$AIRGAPPED" = "true" ]; then
@@ -53,6 +63,8 @@ function install_rke2() {
   echo "Displaying cluster status..."
   kubectl get nodes -o wide
   kubectl get pods -A
+  echo ""
+  echo "Type: 'source ~/.bashrc' to enable kubectl in this shell session"
   #  add function to generate server join token and/or kube auth credentials
 }
 
@@ -73,9 +85,13 @@ function install_helm_chart() {
   echo "Installing Helm chart $CHART_NAME version $CHART_VERSION under namespace $NAMESPACE"
   create_namespace
   start_helm_chart
-  check_namespace_pods_ready $NAMESPACE
-  get_dell_orch_details
+  echo "Helm Chart finished, listing pods..."
+  kubectl get pods -n $NAMESPACE
+  run_helm_post_install_cmds "${post_helm_install_cmds[@]}"
 }
+
+
+### OTHER FUNCTIONS
 function set_prereqs() {
   mkdir -p /etc/rancher/rke2
   mkdir -p /var/lib/rancher/rke2/server/manifests
@@ -83,6 +99,7 @@ function set_prereqs() {
   gen_modules_params
   gen_k8s_params
   gen_rke2_cis_params
+  # gen_dell_orch_params increase fs.inotify settings needed for large kuberentes deployments like Dell Automation Platform
   gen_dell_orch_params
   gen_rke2_bootstrap
   gen_rke2_coredns_helmchartconfig
@@ -107,9 +124,9 @@ function start_rke2_server() {
   cp /etc/rancher/rke2/rke2.yaml /home/$user_name/.kube/config && cp /etc/rancher/rke2/rke2.yaml /root/.kube/config
   chown $user_name:$user_name /home/$user_name/.kube/config
   chmod 600 /home/$user_name/.kube/config && chmod 600 /root/.kube/config
-  echo "export KUBECONFIG=/home/$user_name/.kube/config" >> /home/$user_name/.bashrc
-  echo 'export PATH=$PATH:/var/lib/rancher/rke2/bin' >> /home/$user_name/.bashrc
-  source /home/$user_name/.bashrc
+  echo "export KUBECONFIG=~/.kube/config" >> ~/.bashrc
+  echo 'export PATH=$PATH:/var/lib/rancher/rke2/bin' >> ~/.bashrc
+  source ~/.bashrc
   echo 'Defaults secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/var/lib/rancher/rke2/bin"' | sudo tee /etc/sudoers.d/rke2-path
 }
 
@@ -144,50 +161,22 @@ function create_namespace() {
 }
 
 function start_helm_chart() {
-  local helm_cmd="upgrade --install $CHART_NAME $OCI_URL --version $CHART_VERSION -n $NAMESPACE --set global.ingress.fqdn=$ORCHESTRATOR_FQDN --wait --timeout $TIMEOUT"
+  local helm_cmd="upgrade --install $CHART_NAME $OCI_URL --version $CHART_VERSION -n $NAMESPACE $CHART_INSTALL_ARGS"
   echo "Helm Command:"
   echo "helm $helm_cmd"
   helm $helm_cmd
+  helm list -n $NAMESPACE
 }
 
-function get_dell_orch_details() {
-  local default_passwd=$(kubectl -n $NAMESPACE get secret keycloak-secret -o jsonpath="{.data.security-admin-usr-pwd}" | base64 --decode)
-  local dell_orch_url="https://$INGRESS_FQDN"
-  helm list -n $NAMESPACE  
-  echo "Dell Orchestrator URL: $dell_orch_url"
-  echo "Default Password: $default_passwd"
-}
-
-function check_namespace_pods_ready() {
-  local timeout_seconds=120
-  local start_time=$(date +%s)
-  local ns=$1
-  if [ -z "$1" ]; then
-    local ns="kube-system"
-  fi
-  while true; do
-    local completed_pods=$(kubectl get pods -n $ns --field-selector status.phase=Succeeded -o name)
-    echo "Checking pod status and removing Completed pods in $ns namespace..."
-    for pod_name in $completed_pods; do
-      kubectl delete -n $ns "$pod_name"
-    done
-    local current_pods_not_ready=$(kubectl get pods -n $ns --no-headers | awk '{print $2}' | awk -F'/' '{if ($1 != $2) print $0}' | wc -l)
-    local elapsed_time=$(($(date +%s) - start_time))
-    if [ "$elapsed_time" -ge "$timeout_seconds" ]; then
-      echo "Error: Timeout reached after $timeout_seconds seconds. Not all pods are ready." >&2
-      kubectl get pods -A
-      return 1
-    fi
-    if [ "$current_pods_not_ready" -eq 0 ]; then
-      break
-    fi
-    echo "Wating on $current_pods_not_ready pods..."
-    echo "Elapsed: ${elapsed_time}s/${timeout_seconds}s"
-    sleep 10
+function run_helm_post_install_cmds() {
+  echo "Running post install commands..."
+  for cmd in "$@"; do
+    eval "$cmd"
   done
-  echo "All pods are ready in $ns namespace!"
-  return 0
+  echo "Completed..."
 }
+
+## FILE GENERATION FUNCTIONS
 
 function gen_modules_params() {
   cat > /etc/modules-load.d/k8s.conf <<EOF
@@ -327,6 +316,40 @@ spec:
   interfaces:
   - $mgmt_if
 EOF
+}
+
+
+### GENERIC HELPER FUNCTIONS
+
+function check_namespace_pods_ready() {
+  local timeout_seconds=120
+  local start_time=$(date +%s)
+  local ns=$1
+  if [ -z "$1" ]; then
+    local ns="kube-system"
+  fi
+  while true; do
+    local completed_pods=$(kubectl get pods -n $ns --field-selector status.phase=Succeeded -o name)
+    echo "Checking pod status and removing Completed pods in $ns namespace..."
+    for pod_name in $completed_pods; do
+      kubectl delete -n $ns "$pod_name"
+    done
+    local current_pods_not_ready=$(kubectl get pods -n $ns --no-headers | awk '{print $2}' | awk -F'/' '{if ($1 != $2) print $0}' | wc -l)
+    local elapsed_time=$(($(date +%s) - start_time))
+    if [ "$elapsed_time" -ge "$timeout_seconds" ]; then
+      echo "Error: Timeout reached after $timeout_seconds seconds. Not all pods are ready." >&2
+      kubectl get pods -A
+      return 1
+    fi
+    if [ "$current_pods_not_ready" -eq 0 ]; then
+      break
+    fi
+    echo "Wating on $current_pods_not_ready pods..."
+    echo "Elapsed: ${elapsed_time}s/${timeout_seconds}s"
+    sleep 10
+  done
+  echo "All pods are ready in $ns namespace!"
+  return 0
 }
 
 function check_os_version() {
