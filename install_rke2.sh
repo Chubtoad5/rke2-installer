@@ -1,34 +1,35 @@
 #!/bin/bash
 
 #### USER DEFINED VARIABLES SECTION ####
-DEBUG=false
-K8S_DNS_UTILITY=false
-DOCKER_UTILITY=false
+DEBUG=true
+K8S_DNS_UTILITY=true
+DOCKER_UTILITY=true
 DOCKER_BRIDGE_CIDR=172.30.0.1/16
 ZIP_UTILITY=true
 JQ_UTILITY=true
 
 # RKE2 Install Parameters (If INSTALL_INGRESS=false, then Metallb LoadBalancer will be installed)
 AIRGAPPED=false
-RKE2_VERSION=v1.30.13+rke2r1
+RKE2_VERSION=v1.33.1+rke2r1
 CNI_TYPE=canal
 CLUSTER_CIDR=172.28.175.0/24
 SERVICE_CIDR=172.28.176.0/24
 INSTALL_INGRESS=false
 METALLB_VERSION=v0.15.2
 INSTALL_LOCALPATH_STORAGE=true
-HELM_VERION=v3.12.3
+HELM_VERION=v3.18.2
 
 # Helm Chart Parameters (Helm runs as "helm upgrade --install $CHART_NAME $OCI_URL --version $CHART_VERSION -n $NAMESPACE $CHART_INSTALL_ARGS")
 CHART_NAME=native-edge-orchestrator
 OCI_URL=oci://public.ecr.aws/dell/nativeedge/native-edge-orchestrator
 CHART_VERSION=3.1.0-0-58
 NAMESPACE=dell-automation
-CHART_INSTALL_ARGS="--set global.ingress.fqdn=CHANGEME --wait --timeout 60m"
+INGRESS_FQDN=rke2.local.edge
+CHART_INSTALL_ARGS="--set global.ingress.fqdn=$INGRESS_FQDN --wait --timeout 60m"
 post_helm_install_cmds=(
   "echo 'Dell Orchestrator URL: https://$INGRESS_FQDN'"
   "echo 'Dell Orchestrator Username: administrator'"
-  "echo 'Dell Orchesator default password: $(kubectl -n $NAMESPACE get secret keycloak-secret -o jsonpath="{.data.security-admin-usr-pwd}" | base64 --decode)'"
+  "echo 'Dell Orchesator default password:' \$(kubectl -n \"$NAMESPACE\" get secret keycloak-secret -o jsonpath=\"{.data.security-admin-usr-pwd}\" | base64 --decode)"
   )
 
 ############### INTERNAL VARIABLES (do not edit) ####################
@@ -39,6 +40,9 @@ mgmt_ip=$(hostname -I | awk '{print $1}')
 mgmt_if=$(ip a |grep "$(hostname -I |awk '{print $1}')" | awk '{print $NF}')
 user_name=$SUDO_USER
 offline_prep_done=false
+
+export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
+export PATH=$PATH:/var/lib/rancher/rke2/bin
 
 ############################# FUNCTIONS #############################
 
@@ -64,6 +68,7 @@ function install_rke2() {
   fi
   debug_run set_service_config
   debug_run install_helm
+  run_utilities
   echo "RKE2 installation workflow completed..."
   echo "Displaying cluster status..."
   kubectl get nodes -o wide
@@ -79,6 +84,11 @@ function uninstall_rke2() {
   rm -rf $base_dir/rke2-install-files
   rm -rf $base_dir/.kube
   rm -rf /root/.kube
+  # Clean up the KUBECONFIG and PATH from the global environment if they were set here
+  unset KUBECONFIG
+  # Restore original PATH if possible, or just remove the RKE2 bin path
+  PATH=$(echo $PATH | sed -e "s|:/var/lib/rancher/rke2/bin||g")
+  echo "Completed..."
   echo "Completed..."
 }
 
@@ -89,13 +99,12 @@ function rke2_offline_prep() {
 function install_helm_chart() {
   echo "Installing Helm chart $CHART_NAME version $CHART_VERSION under namespace $NAMESPACE"
   create_namespace
-  start_helm_chart
+  debug_run start_helm_chart
   echo "Helm Chart finished, listing pods..."
   kubectl get pods -n $NAMESPACE
-  run_helm_post_install_cmds "${post_helm_install_cmds[@]}"
+  local install_cmds=$post_helm_install_cmds
+  run_helm_post_install_cmds "${install_cmds[@]}"
 }
-
-
 ### OTHER FUNCTIONS
 
 function run_utilities() {
@@ -115,18 +124,31 @@ function run_utilities() {
   fi
   if [ $ZIP_UTILITY == true ]; then
     echo "Installing zip utility..."
-    debug_run "apt_get_install zip"
+    debug_run apt_get_install zip
     echo "Completed..."
   fi
   if [ $JQ_UTILITY == true ]; then
     echo "Installing jq utility..."
-    debug_run "apt_get_install jq"
+    debug_run apt_get_install jq
     echo "Completed..."
   fi
 }
 
-function install_k8s_dns_utiliy() {
-  kubectl apply -f https://k8s.io/examples/admin/dns/dnsutils.yaml
+function install_k8s_dns_utility() {
+cat > $base_dir/rke2-install-files/dnsutils.yaml <<EOF
+apiVersion: v1
+kind: Pod
+metadata:
+  name: dnsutils
+  namespace: default
+spec:
+  containers:
+  - name: dnsutils
+    image: registry.k8s.io/e2e-test-images/agnhost:2.39
+    imagePullPolicy: IfNotPresent
+  restartPolicy: Always
+EOF
+kubectl apply -f $base_dir/rke2-install-files/dnsutils.yaml
 }
 
 function install_docker_utility() {
@@ -139,8 +161,8 @@ function install_docker_utility() {
     sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
   apt-get update
   create_bridge_json
-  echo "" | DEBIAN_FRONTEND=noninteractive apt-get -y -qq docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-  usermod -aG docker $user
+  echo "" | DEBIAN_FRONTEND=noninteractive apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+  usermod -aG docker $user_name
 }
 
 function create_bridge_json () {
@@ -157,7 +179,19 @@ EOF
 function apt_get_install() {
   echo "Installing $1..."
   apt-get update
-  echo "" | DEBIAN_FRONTEND=noninteractive apt-get -y -qq install $1
+  # Add a check for successful update before installing
+  if [ $? -ne 0 ]; then
+    echo "ERROR: apt-get update failed."
+    return 1 # Indicate failure
+  fi
+  echo "" | DEBIAN_FRONTEND=noninteractive apt-get -y -qq install "$1"
+  # Check for successful install
+  if [ $? -ne 0 ]; then
+    echo "ERROR: Failed to install $1."
+    return 1 # Indicate failure
+  fi
+  echo "$1 installed successfully."
+  return 0 # Indicate success
 }
 
 function set_prereqs() {
@@ -182,24 +216,25 @@ function set_prereqs() {
 }
 
 function start_rke2_server() {
+  echo "Installing RKE2 version $RKE2_VERSION..."
   curl -sfL https://get.rke2.io | sudo -E INSTALL_RKE2_VERSION="$RKE2_VERSION" sh -
+  echo "Enabling and starting rke2-server service..."
   systemctl enable rke2-server.service
-  echo "Starting rke2-server service..."
   systemctl start rke2-server.service
   echo "Waiting for pods to start..."
-  sleep 15
+  sleep 15 
   mkdir -p /home/$user_name/.kube && mkdir -p /root/.kube
   cp /etc/rancher/rke2/rke2.yaml /home/$user_name/.kube/config && cp /etc/rancher/rke2/rke2.yaml /root/.kube/config
   chown $user_name:$user_name /home/$user_name/.kube/config
-  chmod 600 /home/$user_name/.kube/config && chmod 600 /root/.kube/config
-  echo "export KUBECONFIG=~/.kube/config" >> ~/.bashrc
-  echo 'export PATH=$PATH:/var/lib/rancher/rke2/bin' >> ~/.bashrc
-  source ~/.bashrc
+  chmod 600 /home/$user_name/.kube/config &&chmod 600 /root/.kube/config
+  echo "export KUBECONFIG=/home/$user_name/.kube/config" >> /home/$user_name/.bashrc
+  echo "export PATH=\$PATH:/var/lib/rancher/rke2/bin" >> /home/$user_name/.bashrc
   echo 'Defaults secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/var/lib/rancher/rke2/bin"' | sudo tee /etc/sudoers.d/rke2-path
 }
 
 function apply_services(){
   if [ $INSTALL_LOCALPATH_STORAGE == true ]; then
+    gen_localpath_storage
     kubectl apply -f $base_dir/rke2-install-files/local-path-storage.yaml
   fi
   if [ $INSTALL_INGRESS == false ]; then
@@ -238,7 +273,7 @@ function start_helm_chart() {
 
 function run_helm_post_install_cmds() {
   echo "Running post install commands..."
-  for cmd in "$@"; do
+  for cmd in "${post_helm_install_cmds[@]}"; do
     eval "$cmd"
   done
   echo "Completed..."
@@ -254,6 +289,7 @@ EOF
 }
 
 function gen_k8s_params() {
+  echo "Generating /etc/sysctl.d/k8s.conf"
   cat > /etc/sysctl.d/k8s.conf <<EOF
 net.bridge.bridge-nf-call-ip6tables = 1
 net.bridge.bridge-nf-call-iptables = 1
@@ -262,6 +298,7 @@ EOF
 }
 
 function gen_rke2_cis_params() {
+  echo "Generating /etc/sysctl.d/rke2-cis.conf"
   cat > /etc/sysctl.d/rke2-cis.conf <<EOF
 net.ipv4.tcp_syncookies = 1
 net.ipv6.conf.all.accept_ra = 0
@@ -285,6 +322,7 @@ EOF
 }
 
 function gen_dell_orch_params() {
+  echo "Generating /etc/sysctl.d/dell-orchestrator.conf"
   cat > /etc/sysctl.d/dell-orchestrator.conf <<EOF
 fs.inotify.max_queued_events = 32768
 fs.inotify.max_user_instances = 1024
@@ -292,6 +330,7 @@ fs.inotify.max_user_watches = 1048576
 EOF
 }
 function gen_rke2_bootstrap() {
+  echo "Generating /etc/rancher/rke2/config.yaml"
   cat > /etc/rancher/rke2/config.yaml <<EOF
 cni: "$CNI_TYPE"
 write-kubeconfig-mode: "0600"
@@ -320,6 +359,7 @@ fi
 }
 
 function gen_rke2_coredns_helmchartconfig() {
+  echo "Generating /var/lib/rancher/rke2/server/manifests/rke2-coredns-helmchartconfig.yaml"
   cat > /var/lib/rancher/rke2/server/manifests/rke2-coredns-helmchartconfig.yaml <<EOF
 apiVersion: helm.cattle.io/v1
 kind: HelmChartConfig
@@ -359,6 +399,7 @@ EOF
 }
 
 function gen_metallb_ipaddresspool() {
+  echo "Generating $base_dir/rke2-install-files/metallb-ipaddresspool.yaml"
   cat > $base_dir/rke2-install-files/metallb-ipaddresspool.yaml <<EOF
 apiVersion: metallb.io/v1beta1
 kind: IPAddressPool
@@ -372,6 +413,7 @@ EOF
 }
 
 function gen_metallb_l2advertisement() {
+  echo "Generating $base_dir/rke2-install-files/metallb-l2advertisement.yaml"
   cat > $base_dir/rke2-install-files/metallb-l2advertisement.yaml <<EOF
 apiVersion: metallb.io/v1beta1
 kind: L2Advertisement
@@ -387,8 +429,8 @@ EOF
 }
 
 function gen_localpath_storage(){
+  echo "Generating $base_dir/rke2-install-files/local-path-storage.yaml"
   cat > $base_dir/rke2-install-files/local-path-storage.yaml <<EOF
-edgeuser@rke2-eo:~$ cat local-path-storage.yaml
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -548,7 +590,7 @@ data:
           effect: NoSchedule
       containers:
       - name: helper-pod
-        image: quay.io/busybox/busybox
+        image: quay.io/prometheus/busybox
         imagePullPolicy: IfNotPresent
 EOF
 }
