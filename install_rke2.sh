@@ -32,6 +32,10 @@ post_helm_install_cmds=(
   "echo 'Dell Orchesator default password:' \$(kubectl -n \"$NAMESPACE\" get secret keycloak-secret -o jsonpath=\"{.data.security-admin-usr-pwd}\" | base64 --decode)"
   )
 
+  # Offline Prep Parameters
+
+  OFFLINE_APT_PACKAGES="zip jq open-iscsi zstd docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin"
+
 ############### INTERNAL VARIABLES (do not edit) ####################
 base_dir=$(pwd)
 os_release_version=$(lsb_release -ds |tail -1)
@@ -94,6 +98,9 @@ function uninstall_rke2() {
 
 function rke2_offline_prep() {
   echo "Preparing an offline package"
+  debug_run apt_get_install dpkg-dev
+  debug_run apt_download_packs $OFFLINE_APT_PACKAGES
+  # check images: /var/lib/rancher/rke2/bin/ctr --address /run/k3s/containerd/containerd.sock --namespace k8s.io images ls
 }
 
 function install_helm_chart() {
@@ -105,7 +112,7 @@ function install_helm_chart() {
   local install_cmds=$post_helm_install_cmds
   run_helm_post_install_cmds "${install_cmds[@]}"
 }
-### OTHER FUNCTIONS
+### Installation functions
 
 function run_utilities() {
   if [ $K8S_DNS_UTILITY == true ]; then
@@ -174,24 +181,6 @@ function create_bridge_json () {
 }
 EOF
   echo "Created /etc/docker/daemon.json with bip: $DOCKER_BRIDGE_CIDR"
-}
-
-function apt_get_install() {
-  echo "Installing $1..."
-  apt-get update
-  # Add a check for successful update before installing
-  if [ $? -ne 0 ]; then
-    echo "ERROR: apt-get update failed."
-    return 1 # Indicate failure
-  fi
-  echo "" | DEBIAN_FRONTEND=noninteractive apt-get -y -qq install "$1"
-  # Check for successful install
-  if [ $? -ne 0 ]; then
-    echo "ERROR: Failed to install $1."
-    return 1 # Indicate failure
-  fi
-  echo "$1 installed successfully."
-  return 0 # Indicate success
 }
 
 function set_prereqs() {
@@ -277,6 +266,127 @@ function run_helm_post_install_cmds() {
     eval "$cmd"
   done
   echo "Completed..."
+}
+
+## Offline Prep functions
+
+function apt_download_packs () {
+    echo "Downloading $OFFLINE_APT_PACKAGES ..."
+    apt-get download $(apt-cache depends --recurse --no-recommends --no-suggests --no-conflicts --no-breaks --no-replaces --no-enhances --no-pre-depends ${OFFLINE_APT_PACKAGES} | grep "^\w")
+    dpkg-scanpackages -m . > Packages
+    echo "Completed downloading..."
+}
+
+function download_service_images() {
+  # metallb
+  # local-path-storage
+  # dnsutils
+}
+
+function download_rke2_zst() {
+  echo "Downloading RKE2 air-gapped package..."
+  # v1.33.1%2Brke2r1 | v1.33.1+rke2r1
+  local translated_version=$(echo $RKE2_VERSION | sed 's/+/%2B/')
+  wget https://github.com/rancher/rke2/releases/download/$translated_version/rke2-images-core.linux-amd64.tar.zst
+  wget https://github.com/rancher/rke2/releases/download/$translated_version/rke2-images-core.linux-amd64.txt
+  # if cni = cannal
+  wget https://github.com/rancher/rke2/releases/download/$translated_version/rke2-images-canal.linux-amd64.tar.zst
+  wget https://github.com/rancher/rke2/releases/download/$translated_version/rke2-images-canal.linux-amd64.txt
+  # if cni = calico
+  wget https://github.com/rancher/rke2/releases/download/$translated_version/rke2-images-calico.linux-amd64.tar.zst
+  wget https://github.com/rancher/rke2/releases/download/$translated_version/rke2-images-calico.linux-amd64.txt
+}
+
+function prepare_offline_pacakge() {
+  # compress everything here
+}
+
+## GENERIC HELPER FUNCTIONS
+
+function apt_get_install() {
+  echo "Installing $1..."
+  apt-get update
+  # Add a check for successful update before installing
+  if [ $? -ne 0 ]; then
+    echo "ERROR: apt-get update failed."
+    return 1 # Indicate failure
+  fi
+  echo "" | DEBIAN_FRONTEND=noninteractive apt-get -y -qq install "$1"
+  # Check for successful install
+  if [ $? -ne 0 ]; then
+    echo "ERROR: Failed to install $1."
+    return 1 # Indicate failure
+  fi
+  echo "$1 installed successfully."
+  return 0 # Indicate success
+}
+
+function check_namespace_pods_ready() {
+  local timeout_seconds=120
+  local start_time=$(date +%s)
+  local ns=$1
+  if [ -z "$1" ]; then
+    local ns="kube-system"
+  fi
+  while true; do
+    local completed_pods=$(kubectl get pods -n $ns --field-selector status.phase=Succeeded -o name)
+    echo "Checking pod status and removing Completed pods in $ns namespace..."
+    for pod_name in $completed_pods; do
+      kubectl delete -n $ns "$pod_name"
+    done
+    local current_pods_not_ready=$(kubectl get pods -n $ns --no-headers | awk '{print $2}' | awk -F'/' '{if ($1 != $2) print $0}' | wc -l)
+    local elapsed_time=$(($(date +%s) - start_time))
+    if [ "$elapsed_time" -ge "$timeout_seconds" ]; then
+      echo "Error: Timeout reached after $timeout_seconds seconds. Not all pods are ready." >&2
+      kubectl get pods -A
+      return 1
+    fi
+    if [ "$current_pods_not_ready" -eq 0 ]; then
+      break
+    fi
+    echo "Wating on $current_pods_not_ready pods..."
+    echo "Elapsed: ${elapsed_time}s/${timeout_seconds}s"
+    sleep 10
+  done
+  echo "All pods are ready in $ns namespace!"
+  return 0
+}
+
+function check_os_version() {
+  if [[ $os_release_version_short = "22.04" || $os_release_version_short = "24.04" ]]; then
+    return 0
+  else
+    echo "This script is only compatible with Ubuntu 22.04 and 24.04 server LTS."
+    exit 1
+  fi
+}
+
+function check_root_privileges() {
+  if [[ $EUID != 0 ]]; then
+    echo "This script must be run with sudo or as the root user."
+    exit 1
+  fi
+}
+
+
+function debug_run() {
+  # Check the value of the global DEBUG variable
+  if [ "$DEBUG" = "true" ]; then
+    # If DEBUG is true, execute the command/function normally.
+    # All stdout and stderr will be displayed to the console.
+    echo "--- DEBUG: Running '$*' ---"
+    "$@"
+    local status=$? # Capture the exit status of the executed command
+    echo "--- DEBUG: Finished '$*' with status $status ---"
+    return $status # Return the original command's exit status
+  else
+    echo "Running '$*'..."
+    # If DEBUG is false, execute the command/function and redirect
+    # all standard output (1) and standard error (2) to /dev/null.
+    # This effectively suppresses all output.
+    "$@" > /dev/null 2>&1
+    return $? # Return the original command's exit status
+  fi
 }
 
 ## FILE GENERATION FUNCTIONS
@@ -590,81 +700,13 @@ data:
           effect: NoSchedule
       containers:
       - name: helper-pod
-        image: quay.io/prometheus/busybox
+        image: public.ecr.aws/docker/library/busybox:stable
         imagePullPolicy: IfNotPresent
 EOF
 }
 
 
-### GENERIC HELPER FUNCTIONS
-
-function check_namespace_pods_ready() {
-  local timeout_seconds=120
-  local start_time=$(date +%s)
-  local ns=$1
-  if [ -z "$1" ]; then
-    local ns="kube-system"
-  fi
-  while true; do
-    local completed_pods=$(kubectl get pods -n $ns --field-selector status.phase=Succeeded -o name)
-    echo "Checking pod status and removing Completed pods in $ns namespace..."
-    for pod_name in $completed_pods; do
-      kubectl delete -n $ns "$pod_name"
-    done
-    local current_pods_not_ready=$(kubectl get pods -n $ns --no-headers | awk '{print $2}' | awk -F'/' '{if ($1 != $2) print $0}' | wc -l)
-    local elapsed_time=$(($(date +%s) - start_time))
-    if [ "$elapsed_time" -ge "$timeout_seconds" ]; then
-      echo "Error: Timeout reached after $timeout_seconds seconds. Not all pods are ready." >&2
-      kubectl get pods -A
-      return 1
-    fi
-    if [ "$current_pods_not_ready" -eq 0 ]; then
-      break
-    fi
-    echo "Wating on $current_pods_not_ready pods..."
-    echo "Elapsed: ${elapsed_time}s/${timeout_seconds}s"
-    sleep 10
-  done
-  echo "All pods are ready in $ns namespace!"
-  return 0
-}
-
-function check_os_version() {
-  if [[ $os_release_version_short = "22.04" || $os_release_version_short = "24.04" ]]; then
-    return 0
-  else
-    echo "This script is only compatible with Ubuntu 22.04 and 24.04 server LTS."
-    exit 1
-  fi
-}
-
-function check_root_privileges() {
-  if [[ $EUID != 0 ]]; then
-    echo "This script must be run with sudo or as the root user."
-    exit 1
-  fi
-}
-
-
-function debug_run() {
-  # Check the value of the global DEBUG variable
-  if [ "$DEBUG" = "true" ]; then
-    # If DEBUG is true, execute the command/function normally.
-    # All stdout and stderr will be displayed to the console.
-    echo "--- DEBUG: Running '$*' ---"
-    "$@"
-    local status=$? # Capture the exit status of the executed command
-    echo "--- DEBUG: Finished '$*' with status $status ---"
-    return $status # Return the original command's exit status
-  else
-    echo "Running '$*'..."
-    # If DEBUG is false, execute the command/function and redirect
-    # all standard output (1) and standard error (2) to /dev/null.
-    # This effectively suppresses all output.
-    "$@" > /dev/null 2>&1
-    return $? # Return the original command's exit status
-  fi
-}
+# Menu function
 
 function help {
   echo "########################################################################"
