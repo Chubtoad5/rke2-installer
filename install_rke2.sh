@@ -50,8 +50,7 @@ export PATH=$PATH:/var/lib/rancher/rke2/bin
 
 ############################# FUNCTIONS #############################
 
-
-## MENU FUNCTIONS
+################### MENU FUNCTIONS ####################
 function install_rke2() {
   check_os_version
   if [ "$AIRGAPPED" = "true" ]; then
@@ -112,7 +111,9 @@ function install_helm_chart() {
   local install_cmds=$post_helm_install_cmds
   run_helm_post_install_cmds "${install_cmds[@]}"
 }
-### Installation functions
+
+
+#################### Installation functions ####################
 
 function run_utilities() {
   if [ $K8S_DNS_UTILITY == true ]; then
@@ -268,7 +269,7 @@ function run_helm_post_install_cmds() {
   echo "Completed..."
 }
 
-## Offline Prep functions
+############# Offline Prep functions ############
 
 function apt_download_packs () {
     echo "Downloading $OFFLINE_APT_PACKAGES ..."
@@ -278,6 +279,7 @@ function apt_download_packs () {
 }
 
 function download_service_images() {
+  echo "coming soon.."
   # metallb
   # local-path-storage
   # dnsutils
@@ -301,7 +303,7 @@ function prepare_offline_pacakge() {
   # compress everything here
 }
 
-## GENERIC HELPER FUNCTIONS
+############ GENERIC HELPER FUNCTIONS ############
 
 function apt_get_install() {
   echo "Installing $1..."
@@ -389,7 +391,7 @@ function debug_run() {
   fi
 }
 
-## FILE GENERATION FUNCTIONS
+########## FILE GENERATION FUNCTIONS ##########
 
 function gen_modules_params() {
   cat > /etc/modules-load.d/k8s.conf <<EOF
@@ -706,7 +708,7 @@ EOF
 }
 
 
-# Menu function
+# Main Menu function
 
 function help {
   echo "########################################################################"
@@ -716,13 +718,13 @@ function help {
   echo ""
   echo "[Parameters]            | [Description]"                   
   echo "help                    | Display this help message"
-  echo "install-server          | Installs RKE2 from the internet"
+  echo "install-server          | Installs RKE2 from the internet or offline package"
   echo "uninstall-server        | Uninstalls RKE2"
   echo "offline-prep            | Prepares an offline package"
   echo "install-helm-chart      | Installs helm chart from variables"
 }
 
-#Start CLI Wrapper
+# Start CLI Wrapper
 while [[ $# -gt 0 ]]; do
   case "$1" in
     help)
@@ -772,4 +774,4 @@ while [[ $# -gt 0 ]]; do
 done
 
 help
-#End CLI Wrapper
+# End CLI Wrapper
