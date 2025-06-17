@@ -300,6 +300,7 @@ function download_rke2_zst() {
 }
 
 function prepare_offline_pacakge() {
+  echo "coming soon..."
   # compress everything here
 }
 
