@@ -26,6 +26,10 @@ CHART_VERSION=3.1.0-0-58
 NAMESPACE=dell-automation
 INGRESS_FQDN=rke2.local.edge
 CHART_INSTALL_ARGS="--set global.ingress.fqdn=$INGRESS_FQDN --wait --timeout 60m"
+pre_helm_install_cmds=(
+  "kubectl create namespace $NAMESPACE"
+  "kubectl label namespace $NAMESPACE hzp.iam.webhook/active="true" --overwrite"
+)
 post_helm_install_cmds=(
   "echo 'Dell Orchestrator URL: https://$INGRESS_FQDN'"
   "echo 'Dell Orchestrator Username: administrator'"
@@ -104,12 +108,13 @@ function rke2_offline_prep() {
 
 function install_helm_chart() {
   echo "Installing Helm chart $CHART_NAME version $CHART_VERSION under namespace $NAMESPACE"
-  create_namespace
+  local pre_install_cmds=$pre_helm_install_cmds
+  run_helm_pre_install_cmds "${pre_install_cmds[@]}"
   debug_run start_helm_chart
   echo "Helm Chart finished, listing pods..."
   kubectl get pods -n $NAMESPACE
-  local install_cmds=$post_helm_install_cmds
-  run_helm_post_install_cmds "${install_cmds[@]}"
+  local post_install_cmds=$post_helm_install_cmds
+  run_helm_post_install_cmds "${post_install_cmds[@]}"
 }
 
 
@@ -250,7 +255,7 @@ function install_helm() {
 
 function create_namespace() {
   kubectl create namespace $NAMESPACE
-  kubectl label namespace $NAMESPACE $NAMESPACE.iam.webhook/active="true" --overwrite
+  kubectl label namespace $NAMESPACE hzp.iam.webhook/active="true" --overwrite
 }
 
 function start_helm_chart() {
@@ -259,6 +264,14 @@ function start_helm_chart() {
   echo "helm $helm_cmd"
   helm $helm_cmd
   helm list -n $NAMESPACE
+}
+
+function run_helm_pre_install_cmds() {
+  echo "Running post install commands..."
+  for cmd in "${pre_helm_install_cmds[@]}"; do
+    eval "$cmd"
+  done
+  echo "Completed..."
 }
 
 function run_helm_post_install_cmds() {
