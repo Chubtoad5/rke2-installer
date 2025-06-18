@@ -8,10 +8,18 @@ DOCKER_BRIDGE_CIDR=172.30.0.1/16
 ZIP_UTILITY=true
 JQ_UTILITY=true
 
+# Supply extra sysctl parameters if required by your application, note that standard kubernetes are already applied, including CIS if enabled
+EXTRA_SYSCTL_PARAMS= (
+  "fs.inotify.max_queued_events = 32768"
+  "fs.inotify.max_user_instances = 1024"
+  "fs.inotify.max_user_watches = 1048576"
+)
+
 # RKE2 Install Parameters (If INSTALL_INGRESS=false, then Metallb LoadBalancer will be installed)
 AIRGAPPED=false
 RKE2_VERSION=v1.33.1+rke2r1
 CNI_TYPE=canal
+ENABLE_CIS=false
 CLUSTER_CIDR=172.28.175.0/24
 SERVICE_CIDR=172.28.176.0/24
 INSTALL_INGRESS=false
@@ -195,15 +203,24 @@ function set_prereqs() {
   mkdir -p $base_dir/rke2-install-files
   gen_modules_params
   gen_k8s_params
-  gen_rke2_cis_params
-  # gen_dell_orch_params increase fs.inotify settings needed for large kuberentes deployments like Dell Automation Platform
-  gen_dell_orch_params
+  gen_rke2_params
+  gen_extra_sysctl_params
   gen_rke2_bootstrap
   gen_rke2_coredns_helmchartconfig
   gen_metallb_ipaddresspool
   gen_metallb_l2advertisement
+  if [ $ENABLE_CIS == true ]; then
+    cp -f /usr/local/share/rke2/rke2-cis-sysctl.conf /etc/sysctl.d/60-rke2-cis.conf
+    useradd -r -c "etcd user" -s /sbin/nologin -M etcd -U
+  fi
   modprobe -a overlay br_netfilter
-  sysctl --system
+  systemctl restart systemd-sysctl
+  if [ $? -ne 0 ]; then
+    echo "Error: systemd-sysctl.service failed to restart. Exiting script."
+    exit 1 
+  else
+    echo "systemd-sysctl.service restarted successfully."
+  fi
   swapoff -a
   sed -i -e '/swap/d' /etc/fstab
   systemctl stop ufw
@@ -216,6 +233,12 @@ function start_rke2_server() {
   echo "Enabling and starting rke2-server service..."
   systemctl enable rke2-server.service
   systemctl start rke2-server.service
+  if [ $? -ne 0 ]; then
+    echo "Error: rke2-server.service failed to start. Exiting script."
+    exit 1 
+  else
+    echo "rke2-server.service started successfully."
+  fi
   echo "Waiting for pods to start..."
   sleep 15 
   mkdir -p /home/$user_name/.kube && mkdir -p /root/.kube
@@ -267,11 +290,16 @@ function start_helm_chart() {
 }
 
 function run_helm_pre_install_cmds() {
-  echo "Running post install commands..."
+  echo "Running pre install commands..."   
   for cmd in "${pre_helm_install_cmds[@]}"; do
     eval "$cmd"
   done
-  echo "Completed..."
+  if [ $ENABLE_CIS == true ]; then
+    gen_cis_account_update
+    echo "Running CIS service account patch for default account..."
+    kubectl patch serviceaccount default -n $NAMESPACE -p "$(cat $base_dir/rke2-install-files/account_update.yaml)"
+    echo "Completed..."
+  fi
 }
 
 function run_helm_post_install_cmds() {
@@ -293,23 +321,46 @@ function apt_download_packs () {
 
 function download_service_images() {
   echo "coming soon.."
+  # images: 
+    # rancher/local-path-provisioner:v0.0.31
+    # public.ecr.aws/docker/library/busybox:stable
+    # quay.io/metallb/speaker:v0.15.2
+    # quay.io/metallb/controller:v0.15.2
+    # registry.k8s.io/e2e-test-images/agnhost:2.39
+  # /var/lib/rancher/rke2/bin/ctr --address /run/k3s/containerd/containerd.sock --namespace k8s.io images ls
   # metallb
   # local-path-storage
   # dnsutils
 }
 
+function download_extra_binaries() {
+  # helm curl https://get.helm.sh/helm-$HELM_VERION-linux-amd64.tar.gz
+}
+
 function download_rke2_zst() {
   echo "Downloading RKE2 air-gapped package..."
+  if [[ $CNI != "canal" && $CNI != "calico" ]]; then
+    echo "CNI must be either canal or calico"
+    exit 1
+  fi
   # v1.33.1%2Brke2r1 | v1.33.1+rke2r1
   local translated_version=$(echo $RKE2_VERSION | sed 's/+/%2B/')
-  wget https://github.com/rancher/rke2/releases/download/$translated_version/rke2-images-core.linux-amd64.tar.zst
-  wget https://github.com/rancher/rke2/releases/download/$translated_version/rke2-images-core.linux-amd64.txt
+  curl -L https://github.com/rancher/rke2/releases/download/$translated_version/rke2-images-core.linux-amd64.tar.zst
+  curl -L https://github.com/rancher/rke2/releases/download/$translated_version/rke2-images-core.linux-amd64.txt
+  curl -L https://github.com/rancher/rke2/releases/download/$translated_version/rke2.linux-amd64
+  curl -L https://github.com/rancher/rke2/releases/download/$translated_version/sha256sum-amd64.txt
   # if cni = cannal
-  wget https://github.com/rancher/rke2/releases/download/$translated_version/rke2-images-canal.linux-amd64.tar.zst
-  wget https://github.com/rancher/rke2/releases/download/$translated_version/rke2-images-canal.linux-amd64.txt
+  if [[ $CNI == "canal" ]]; then
+    curl -L https://github.com/rancher/rke2/releases/download/$translated_version/rke2-images-canal.linux-amd64.tar.zst
+    curl -L https://github.com/rancher/rke2/releases/download/$translated_version/rke2-images-canal.linux-amd64.txt
+  fi
   # if cni = calico
-  wget https://github.com/rancher/rke2/releases/download/$translated_version/rke2-images-calico.linux-amd64.tar.zst
-  wget https://github.com/rancher/rke2/releases/download/$translated_version/rke2-images-calico.linux-amd64.txt
+  if [[ $CNI == "calico" ]]; then
+    curl -L https://github.com/rancher/rke2/releases/download/$translated_version/rke2-images-calico.linux-amd64.tar.zst
+    curl -L https://github.com/rancher/rke2/releases/download/$translated_version/rke2-images-calico.linux-amd64.txt
+  fi
+  # copy tar.zstto /var/lib/rancher/rke2/agent/images/
+
 }
 
 function prepare_offline_pacakge() {
@@ -408,14 +459,14 @@ function debug_run() {
 ########## FILE GENERATION FUNCTIONS ##########
 
 function gen_modules_params() {
-  cat > /etc/modules-load.d/k8s.conf <<EOF
+  cat > /etc/modules-load.d/40-k8s.conf <<EOF
 overlay
 br_netfilter
 EOF
 }
 
 function gen_k8s_params() {
-  echo "Generating /etc/sysctl.d/k8s.conf"
+  echo "Generating /etc/sysctl.d/40-k8s.conf"
   cat > /etc/sysctl.d/k8s.conf <<EOF
 net.bridge.bridge-nf-call-ip6tables = 1
 net.bridge.bridge-nf-call-iptables = 1
@@ -423,8 +474,8 @@ net.ipv4.ip_forward = 1
 EOF
 }
 
-function gen_rke2_cis_params() {
-  echo "Generating /etc/sysctl.d/rke2-cis.conf"
+function gen_rke2_params() {
+  echo "Generating /etc/sysctl.d/50-rke2-config.conf"
   cat > /etc/sysctl.d/rke2-cis.conf <<EOF
 net.ipv4.tcp_syncookies = 1
 net.ipv6.conf.all.accept_ra = 0
@@ -447,14 +498,22 @@ kernel.printk = 3 4 1 3
 EOF
 }
 
-function gen_dell_orch_params() {
-  echo "Generating /etc/sysctl.d/dell-orchestrator.conf"
-  cat > /etc/sysctl.d/dell-orchestrator.conf <<EOF
-fs.inotify.max_queued_events = 32768
-fs.inotify.max_user_instances = 1024
-fs.inotify.max_user_watches = 1048576
-EOF
+
+function gen_extra_sysctl_params() {
+    echo "Checking global EXTRA_SYSCTL_PARAMS list..."
+    # Check if the global list is empty
+    if [ ${#EXTRA_SYSCTL_PARAMS[@]} -eq 0 ]; then
+        echo "Global EXTRA_SYSCTL_PARAMS list is empty. No configuration file will be generated."
+        return 0 # Return 0 for success as it's an expected condition
+    fi
+    local config_file="/etc/sysctl.d/30-extra.conf"
+    echo "Generating ${config_file}"
+    # Loop through each parameter in the global array and append to the file
+    for param in "${EXTRA_SYSCTL_PARAMS[@]}"; do
+        echo "$param" >> "${config_file}"
+    done
 }
+
 function gen_rke2_bootstrap() {
   echo "Generating /etc/rancher/rke2/config.yaml"
   cat > /etc/rancher/rke2/config.yaml <<EOF
@@ -481,7 +540,22 @@ if [ $INSTALL_INGRESS == false ]; then
 disable:
   - rke2-ingress-nginx
 EOF
+if [ $ENABLE_CIS == true ]; then
+  cat >> /etc/rancher/rke2/config.yaml <<EOF
+profile: "cis"
+EOF
 fi
+}
+
+function gen_cis_account_update() {
+  echo "Generating $base_dir/rke2-install-files/account_update.yaml"
+  cat > $base_dir/rke2-install-files/account_update.yaml <<EOF
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: default
+automountServiceAccountToken: false
+EOF
 }
 
 function gen_rke2_coredns_helmchartconfig() {
