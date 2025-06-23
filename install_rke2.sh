@@ -1,6 +1,6 @@
 #!/bin/bash
 
-#### USER DEFINED VARIABLES SECTION ####
+# --- USER DEFINED VARIABLES SECTION --- #
 DEBUG=true
 K8S_DNS_UTILITY=true
 DOCKER_UTILITY=true
@@ -9,7 +9,7 @@ ZIP_UTILITY=true
 JQ_UTILITY=true
 
 # Supply extra sysctl parameters if required by your application, note that standard kubernetes are already applied, including CIS if enabled
-EXTRA_SYSCTL_PARAMS= (
+EXTRA_SYSCTL_PARAMS=(
   "fs.inotify.max_queued_events = 32768"
   "fs.inotify.max_user_instances = 1024"
   "fs.inotify.max_user_watches = 1048576"
@@ -42,13 +42,13 @@ post_helm_install_cmds=(
   "echo 'Dell Orchestrator URL: https://$INGRESS_FQDN'"
   "echo 'Dell Orchestrator Username: administrator'"
   "echo 'Dell Orchesator default password:' \$(kubectl -n \"$NAMESPACE\" get secret keycloak-secret -o jsonpath=\"{.data.security-admin-usr-pwd}\" | base64 --decode)"
-  )
+)
 
-  # Offline Prep Parameters
+# Offline Prep Parameters
 
-  OFFLINE_APT_PACKAGES="zip jq open-iscsi zstd docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin"
+OFFLINE_APT_PACKAGES="zip jq open-iscsi zstd docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin"
 
-############### INTERNAL VARIABLES (do not edit) ####################
+# --- INTERNAL VARIABLES (do not edit) --- #
 base_dir=$(pwd)
 os_release_version=$(lsb_release -ds |tail -1)
 os_release_version_short=$(lsb_release -rs |tail -1)
@@ -60,9 +60,9 @@ offline_prep_done=false
 export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
 export PATH=$PATH:/var/lib/rancher/rke2/bin
 
-############################# FUNCTIONS #############################
+# --- FUNCTIONS --- #
 
-################### MENU FUNCTIONS ####################
+# MENU FUNCTIONS #
 function install_rke2() {
   check_os_version
   if [ "$AIRGAPPED" = "true" ]; then
@@ -70,6 +70,9 @@ function install_rke2() {
     echo "Installing RKE2 from airgapped packages"
   else
     echo "Installing RKE2 from the internet"
+  fi
+  if [ $ENABLE_CIS == true ]; then
+    echo "Installing RKE2 with CIS profile enabled"
   fi
   debug_run set_prereqs
   debug_run start_rke2_server
@@ -126,7 +129,7 @@ function install_helm_chart() {
 }
 
 
-#################### Installation functions ####################
+# --- Installation functions --- #
 
 function run_utilities() {
   if [ $K8S_DNS_UTILITY == true ]; then
@@ -210,6 +213,7 @@ function set_prereqs() {
   gen_metallb_ipaddresspool
   gen_metallb_l2advertisement
   if [ $ENABLE_CIS == true ]; then
+    echo "Copying CIS sysctl file to /etc/sysctl.d/60-rke2-cis.conf"
     cp -f /usr/local/share/rke2/rke2-cis-sysctl.conf /etc/sysctl.d/60-rke2-cis.conf
     useradd -r -c "etcd user" -s /sbin/nologin -M etcd -U
   fi
@@ -310,7 +314,7 @@ function run_helm_post_install_cmds() {
   echo "Completed..."
 }
 
-############# Offline Prep functions ############
+# --- Offline Prep functions --- #
 
 function apt_download_packs () {
     echo "Downloading $OFFLINE_APT_PACKAGES ..."
@@ -334,7 +338,8 @@ function download_service_images() {
 }
 
 function download_extra_binaries() {
-  # helm curl https://get.helm.sh/helm-$HELM_VERION-linux-amd64.tar.gz
+  echo "coming soon..."
+  # helm curl -OL https://get.helm.sh/helm-$HELM_VERION-linux-amd64.tar.gz
 }
 
 function download_rke2_zst() {
@@ -345,21 +350,21 @@ function download_rke2_zst() {
   fi
   # v1.33.1%2Brke2r1 | v1.33.1+rke2r1
   local translated_version=$(echo $RKE2_VERSION | sed 's/+/%2B/')
-  curl -L https://github.com/rancher/rke2/releases/download/$translated_version/rke2-images-core.linux-amd64.tar.zst
-  curl -L https://github.com/rancher/rke2/releases/download/$translated_version/rke2-images-core.linux-amd64.txt
-  curl -L https://github.com/rancher/rke2/releases/download/$translated_version/rke2.linux-amd64
-  curl -L https://github.com/rancher/rke2/releases/download/$translated_version/sha256sum-amd64.txt
+  curl -OL https://github.com/rancher/rke2/releases/download/$translated_version/rke2-images-core.linux-amd64.tar.zst
+  curl -OL https://github.com/rancher/rke2/releases/download/$translated_version/rke2-images-core.linux-amd64.txt
+  curl -OL https://github.com/rancher/rke2/releases/download/$translated_version/rke2.linux-amd64
+  curl -OL https://github.com/rancher/rke2/releases/download/$translated_version/sha256sum-amd64.txt
   # if cni = cannal
   if [[ $CNI == "canal" ]]; then
-    curl -L https://github.com/rancher/rke2/releases/download/$translated_version/rke2-images-canal.linux-amd64.tar.zst
-    curl -L https://github.com/rancher/rke2/releases/download/$translated_version/rke2-images-canal.linux-amd64.txt
+    curl -OL https://github.com/rancher/rke2/releases/download/$translated_version/rke2-images-canal.linux-amd64.tar.zst
+    curl -OL https://github.com/rancher/rke2/releases/download/$translated_version/rke2-images-canal.linux-amd64.txt
   fi
   # if cni = calico
   if [[ $CNI == "calico" ]]; then
-    curl -L https://github.com/rancher/rke2/releases/download/$translated_version/rke2-images-calico.linux-amd64.tar.zst
-    curl -L https://github.com/rancher/rke2/releases/download/$translated_version/rke2-images-calico.linux-amd64.txt
+    curl -OL https://github.com/rancher/rke2/releases/download/$translated_version/rke2-images-calico.linux-amd64.tar.zst
+    curl -OL https://github.com/rancher/rke2/releases/download/$translated_version/rke2-images-calico.linux-amd64.txt
   fi
-  # copy tar.zstto /var/lib/rancher/rke2/agent/images/
+  # copy tar.zst to /var/lib/rancher/rke2/agent/images/
 
 }
 
@@ -368,7 +373,7 @@ function prepare_offline_pacakge() {
   # compress everything here
 }
 
-############ GENERIC HELPER FUNCTIONS ############
+# --- GENERIC HELPER FUNCTIONS --- #
 
 function apt_get_install() {
   echo "Installing $1..."
@@ -456,7 +461,7 @@ function debug_run() {
   fi
 }
 
-########## FILE GENERATION FUNCTIONS ##########
+# --- FILE GENERATION FUNCTIONS --- #
 
 function gen_modules_params() {
   cat > /etc/modules-load.d/40-k8s.conf <<EOF
@@ -540,6 +545,7 @@ if [ $INSTALL_INGRESS == false ]; then
 disable:
   - rke2-ingress-nginx
 EOF
+fi
 if [ $ENABLE_CIS == true ]; then
   cat >> /etc/rancher/rke2/config.yaml <<EOF
 profile: "cis"
@@ -796,7 +802,7 @@ EOF
 }
 
 
-# Main Menu function
+# --- Main Menu function --- #
 
 function help {
   echo "########################################################################"
