@@ -16,7 +16,6 @@ EXTRA_SYSCTL_PARAMS=(
 )
 
 # RKE2 Install Parameters (If INSTALL_INGRESS=false, then Metallb LoadBalancer will be installed)
-AIRGAPPED=false
 RKE2_VERSION=v1.33.1+rke2r1
 CNI_TYPE=canal
 ENABLE_CIS=false
@@ -46,7 +45,7 @@ post_helm_install_cmds=(
 
 # Offline Prep Parameters
 
-OFFLINE_APT_PACKAGES="zip jq open-iscsi zstd docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin"
+OFFLINE_APT_PACKAGES=(zip jq open-iscsi zstd docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin)
 
 # --- INTERNAL VARIABLES (do not edit) --- #
 base_dir=$(pwd)
@@ -65,25 +64,15 @@ export PATH=$PATH:/var/lib/rancher/rke2/bin
 # MENU FUNCTIONS #
 function install_rke2() {
   check_os_version
-  if [ "$AIRGAPPED" = "true" ]; then
-    # add check for airgapped packages
-    echo "Installing RKE2 from airgapped packages"
-  else
-    echo "Installing RKE2 from the internet"
-  fi
-  if [ $ENABLE_CIS == true ]; then
-    echo "Installing RKE2 with CIS profile enabled"
-  fi
+  [ ! -f $base_dir/rke2-install-files/VERSION.txt ] || echo "Installing from offline package..."
+  [ $ENABLE_CIS == false ] || echo "Installing RKE2 with CIS profile enabled"
   debug_run set_prereqs
   debug_run start_rke2_server
   check_namespace_pods_ready
+  debug_run load_extra_images
   debug_run apply_services
-  if [ $INSTALL_LOCALPATH_STORAGE == true ]; then
-    check_namespace_pods_ready
-  fi
-  if [ $INSTALL_INGRESS == false ]; then
-      check_namespace_pods_ready metallb-system
-  fi
+  [ $INSTALL_LOCALPATH_STORAGE == false ] || check_namespace_pods_ready
+  [ $INSTALL_INGRESS == true ] || check_namespace_pods_ready metallb-system
   debug_run set_service_config
   debug_run install_helm
   run_utilities
@@ -107,14 +96,21 @@ function uninstall_rke2() {
   # Restore original PATH if possible, or just remove the RKE2 bin path
   PATH=$(echo $PATH | sed -e "s|:/var/lib/rancher/rke2/bin||g")
   echo "Completed..."
-  echo "Completed..."
 }
 
 function rke2_offline_prep() {
   echo "Preparing an offline package"
+  [ -d "$base_dir/rke2-install-files/apt-packages" ] || mkdir -p "$base_dir/rke2-install-files/apt-packages"
   debug_run apt_get_install dpkg-dev
-  debug_run apt_download_packs $OFFLINE_APT_PACKAGES
-  # check images: /var/lib/rancher/rke2/bin/ctr --address /run/k3s/containerd/containerd.sock --namespace k8s.io images ls
+  debug_run install_docker_utility
+  cd $base_dir/rke2-install-files/apt-packages
+  debug_run apt_download_packs
+  debug_run download_service_images
+  debug_run download_extra_binaries
+  debug_run download_rke2_zst
+  debug_run prepare_offline_package
+  echo "Offline package generation completed..."
+  echo "Upload rke2-offline-package.tar.gz to your airgapped system running $os_release_version"
 }
 
 function install_helm_chart() {
@@ -131,6 +127,15 @@ function install_helm_chart() {
 
 # --- Installation functions --- #
 
+function load_extra_images() {
+  if [ ! -f $base_dir/rke2-install-files/VERSION.txt ]; then
+    return
+  fi
+  echo "Loading utility and service images from offline package..."
+  /var/lib/rancher/rke2/bin/ctr --address /run/k3s/containerd/containerd.sock --namespace k8s.io image import $base_dir/rke2-install-files/utility-images/utility_images.tar.gz
+
+}
+
 function run_utilities() {
   if [ $K8S_DNS_UTILITY == true ]; then
     echo "Installing K8s DNS Utility pod in default namespace..."
@@ -139,6 +144,12 @@ function run_utilities() {
     echo "Completed..."
     kubectl exec -i -t dnsutils -- nslookup kube-dns.kube-system.svc.cluster.local
     echo "Usage example: kubectl exec -i -t dnsutils -- nslookup <FQDN>"
+  fi
+  if [ -f $base_dir/rke2-install-files/VERSION.txt ]; then
+    echo "deb [trusted=yes] file:$base_dir/rke2-install-files/apt-packages ./" | tee -a /etc/apt/sources.list.d/extra-packages.list
+    mv /etc/apt/sources.list /etc/apt/sources.list.bak
+    [ $os_release_version_short = "22.04" ] || mv /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list.d/ubuntu.sources.bak
+    [ ! -f /etc/apt/sources.list.d/docker.list ] || mv /etc/apt/sources.list.d/docker.list /etc/apt/sources.list.d/docker.list.bak
   fi
   if [ $DOCKER_UTILITY == true ]; then
     echo "Installing Docker Utility..."
@@ -155,6 +166,13 @@ function run_utilities() {
     echo "Installing jq utility..."
     debug_run apt_get_install jq
     echo "Completed..."
+  fi
+  if [ -f $base_dir/rke2-install-files/VERSION.txt ]; then
+    echo "Reverting sources.list..."
+    mv /etc/apt/sources.list.bak /etc/apt/sources.list
+    [ $os_release_version_short = "22.04" ] || mv /etc/apt/sources.list.d/ubuntu.sources.bak /etc/apt/sources.list.d/ubuntu.sources
+    [ ! -f /etc/apt/sources.list.d/docker.list.bak ] || mv /etc/apt/sources.list.d/docker.list.bak /etc/apt/sources.list.d/docker.list
+    rm /etc/apt/sources.list.d/extra-packages.list
   fi
 }
 
@@ -176,6 +194,7 @@ kubectl apply -f $base_dir/rke2-install-files/dnsutils.yaml
 }
 
 function install_docker_utility() {
+  if [ ! -f $base_dir/rke2-install-files/VERSION.txt ]; then
   install -m 0755 -d /etc/apt/keyrings
   curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
   chmod a+r /etc/apt/keyrings/docker.asc
@@ -183,6 +202,7 @@ function install_docker_utility() {
     "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu \
     $(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}") stable" | \
     sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+  fi
   apt-get update
   create_bridge_json
   echo "" | DEBIAN_FRONTEND=noninteractive apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
@@ -203,7 +223,7 @@ EOF
 function set_prereqs() {
   mkdir -p /etc/rancher/rke2
   mkdir -p /var/lib/rancher/rke2/server/manifests
-  mkdir -p $base_dir/rke2-install-files
+  [ -d "$base_dir/rke2-install-files" ] || mkdir -p "$base_dir/rke2-install-files"
   gen_modules_params
   gen_k8s_params
   gen_rke2_params
@@ -212,11 +232,6 @@ function set_prereqs() {
   gen_rke2_coredns_helmchartconfig
   gen_metallb_ipaddresspool
   gen_metallb_l2advertisement
-  if [ $ENABLE_CIS == true ]; then
-    echo "Copying CIS sysctl file to /etc/sysctl.d/60-rke2-cis.conf"
-    cp -f /usr/local/share/rke2/rke2-cis-sysctl.conf /etc/sysctl.d/60-rke2-cis.conf
-    useradd -r -c "etcd user" -s /sbin/nologin -M etcd -U
-  fi
   modprobe -a overlay br_netfilter
   systemctl restart systemd-sysctl
   if [ $? -ne 0 ]; then
@@ -233,7 +248,23 @@ function set_prereqs() {
 
 function start_rke2_server() {
   echo "Installing RKE2 version $RKE2_VERSION..."
-  curl -sfL https://get.rke2.io | sudo -E INSTALL_RKE2_VERSION="$RKE2_VERSION" sh -
+  if [ -f $base_dir/rke2-install-files/VERSION.txt ]; then
+    INSTALL_RKE2_ARTIFACT_PATH=$base_dir/rke2-install-files sh $base_dir/rke2-install-files/install.sh
+  else
+    curl -sfL https://get.rke2.io | sudo -E INSTALL_RKE2_VERSION="$RKE2_VERSION" sh -
+  fi
+  if [ $ENABLE_CIS == true ]; then
+    echo "Copying CIS sysctl file to /etc/sysctl.d/60-rke2-cis.conf"
+    cp -f /usr/local/share/rke2/rke2-cis-sysctl.conf /etc/sysctl.d/60-rke2-cis.conf
+    useradd -r -c "etcd user" -s /sbin/nologin -M etcd -U
+    systemctl restart systemd-sysctl
+    if [ $? -ne 0 ]; then
+      echo "Error: systemd-sysctl.service failed to restart. Exiting script."
+      exit 1 
+    else
+      echo "systemd-sysctl.service restarted successfully."
+    fi
+  fi
   echo "Enabling and starting rke2-server service..."
   systemctl enable rke2-server.service
   systemctl start rke2-server.service
@@ -260,7 +291,11 @@ function apply_services(){
     kubectl apply -f $base_dir/rke2-install-files/local-path-storage.yaml
   fi
   if [ $INSTALL_INGRESS == false ]; then
-    kubectl apply -f https://raw.githubusercontent.com/metallb/metallb/$METALLB_VERSION/config/manifests/metallb-native.yaml
+    if [ -f $base_dir/rke2-install-files/VERSION.txt ]; then
+      kubectl apply -f $base_dir/rke2-install-files/extra-binaries/metallb-native.yaml
+    else
+      kubectl apply -f https://raw.githubusercontent.com/metallb/metallb/$METALLB_VERSION/config/manifests/metallb-native.yaml
+    fi
   fi
 }
 
@@ -275,9 +310,14 @@ function set_service_config() {
 }
 
 function install_helm() {
-  curl https://get.helm.sh/helm-$HELM_VERION-linux-amd64.tar.gz -o $base_dir/rke2-install-files/helm-$HELM_VERION-linux-amd64.tar.gz
-  tar xzvf $base_dir/rke2-install-files/helm-$HELM_VERION-linux-amd64.tar.gz -C $base_dir/rke2-install-files/
-  cp $base_dir/rke2-install-files/linux-amd64/helm /usr/local/bin/helm
+  if [ -f $base_dir/rke2-install-files/VERSION.txt ]; then
+    tar xzvf $base_dir/rke2-install-files/extra-binaries/helm-$HELM_VERION-linux-amd64.tar.gz -C $base_dir/rke2-install-files/extra-binaries/
+  else
+    mkdir -p $base_dir/rke2-install-files/extra-binaries
+    curl https://get.helm.sh/helm-$HELM_VERION-linux-amd64.tar.gz -o $base_dir/rke2-install-files/extra-binaries/helm-$HELM_VERION-linux-amd64.tar.gz
+    tar xzvf $base_dir/rke2-install-files/extra-binaries/helm-$HELM_VERION-linux-amd64.tar.gz -C $base_dir/rke2-install-files/extra-binaries/
+  fi
+  cp $base_dir/rke2-install-files/extra-binaries/linux-amd64/helm /usr/local/bin/helm
 }
 
 function create_namespace() {
@@ -317,60 +357,89 @@ function run_helm_post_install_cmds() {
 # --- Offline Prep functions --- #
 
 function apt_download_packs () {
-    echo "Downloading $OFFLINE_APT_PACKAGES ..."
-    apt-get download $(apt-cache depends --recurse --no-recommends --no-suggests --no-conflicts --no-breaks --no-replaces --no-enhances --no-pre-depends ${OFFLINE_APT_PACKAGES} | grep "^\w")
+    echo "Downloading "${OFFLINE_APT_PACKAGES[*]}" ..."
+    apt-get download $(apt-cache depends --recurse --no-recommends --no-suggests --no-conflicts --no-breaks --no-replaces --no-enhances --no-pre-depends ${OFFLINE_APT_PACKAGES[*]} | grep "^\w")
     dpkg-scanpackages -m . > Packages
     echo "Completed downloading..."
 }
 
 function download_service_images() {
-  echo "coming soon.."
-  # images: 
-    # rancher/local-path-provisioner:v0.0.31
-    # public.ecr.aws/docker/library/busybox:stable
-    # quay.io/metallb/speaker:v0.15.2
-    # quay.io/metallb/controller:v0.15.2
-    # registry.k8s.io/e2e-test-images/agnhost:2.39
-  # /var/lib/rancher/rke2/bin/ctr --address /run/k3s/containerd/containerd.sock --namespace k8s.io images ls
-  # metallb
-  # local-path-storage
-  # dnsutils
+  #Downloads container images for metallb, local-path-storage, dnsutils
+    local images=(
+        "rancher/local-path-provisioner:v0.0.31"
+        "public.ecr.aws/docker/library/busybox:stable"
+        "quay.io/metallb/speaker:$METALLB_VERSION"
+        "quay.io/metallb/controller:$METALLB_VERSION"
+        "registry.k8s.io/e2e-test-images/agnhost:2.39"
+    )
+    echo "Starting Docker image pull and save process..."
+    [ -d "$base_dir/rke2-install-files/utility-images" ] || mkdir -p "$base_dir/rke2-install-files/utility-images"
+    local output_dir="$base_dir/rke2-install-files/utility-images"
+    # Loop through each image to pull them first, ensuring they are available locally
+    for image in "${images[@]}"; do
+        echo ""
+        echo "Pulling image: $image..."
+        if docker pull "$image"; then
+            echo "Successfully pulled: $image"
+        else
+            echo "Error: Failed to pull image: $image. Skipping to next image."
+            continue
+        fi
+    done
+    echo "Image pull completed"
+    # save all images to a single tar.gz
+    local utility_images_filename="utility_images.tar.gz"
+    local utility_images_save_path="$output_dir/$utility_images_filename"
+    echo "Saving all pulled images to a single file: '$utility_images_filename'..."
+    if docker save "${images[@]}" | gzip > "$utility_images_save_path"; then
+        echo "Successfully saved all images to: $utility_images_save_path"
+    else
+        echo "Error: Failed to save all images to a single file."
+        echo "Please check Docker daemon status and permissions."
+    fi
+    echo "Docker image pull and save process completed."
 }
 
 function download_extra_binaries() {
-  echo "coming soon..."
-  # helm curl -OL https://get.helm.sh/helm-$HELM_VERION-linux-amd64.tar.gz
+  echo "Downloading Helm $HELM_VERION..."
+  mkdir -p $base_dir/rke2-install-files/extra-binaries
+  cd $base_dir/rke2-install-files/extra-binaries
+  curl -OL https://get.helm.sh/helm-$HELM_VERION-linux-amd64.tar.gz
+  echo "Downloading MetalLB manifest version $METALLB_VERSION..."
+  curl -OL https://raw.githubusercontent.com/metallb/metallb/$METALLB_VERSION/config/manifests/metallb-native.yaml
 }
 
 function download_rke2_zst() {
   echo "Downloading RKE2 air-gapped package..."
-  if [[ $CNI != "canal" && $CNI != "calico" ]]; then
+  if [[ $CNI_TYPE != "canal" && $CNI_TYPE != "calico" ]]; then
     echo "CNI must be either canal or calico"
     exit 1
   fi
+  cd $base_dir/rke2-install-files
   # v1.33.1%2Brke2r1 | v1.33.1+rke2r1
   local translated_version=$(echo $RKE2_VERSION | sed 's/+/%2B/')
   curl -OL https://github.com/rancher/rke2/releases/download/$translated_version/rke2-images-core.linux-amd64.tar.zst
   curl -OL https://github.com/rancher/rke2/releases/download/$translated_version/rke2-images-core.linux-amd64.txt
-  curl -OL https://github.com/rancher/rke2/releases/download/$translated_version/rke2.linux-amd64
+  curl -OL https://github.com/rancher/rke2/releases/download/$translated_version/rke2.linux-amd64.tar.gz
   curl -OL https://github.com/rancher/rke2/releases/download/$translated_version/sha256sum-amd64.txt
+  curl -sfL https://get.rke2.io --output install.sh
   # if cni = cannal
-  if [[ $CNI == "canal" ]]; then
+  if [[ $CNI_TYPE == "canal" ]]; then
     curl -OL https://github.com/rancher/rke2/releases/download/$translated_version/rke2-images-canal.linux-amd64.tar.zst
     curl -OL https://github.com/rancher/rke2/releases/download/$translated_version/rke2-images-canal.linux-amd64.txt
   fi
   # if cni = calico
-  if [[ $CNI == "calico" ]]; then
+  if [[ $CNI_TYPE == "calico" ]]; then
     curl -OL https://github.com/rancher/rke2/releases/download/$translated_version/rke2-images-calico.linux-amd64.tar.zst
     curl -OL https://github.com/rancher/rke2/releases/download/$translated_version/rke2-images-calico.linux-amd64.txt
   fi
-  # copy tar.zst to /var/lib/rancher/rke2/agent/images/
-
 }
 
-function prepare_offline_pacakge() {
-  echo "coming soon..."
-  # compress everything here
+function prepare_offline_package() {
+  echo "Generating offline archive..."
+  cd $base_dir
+  echo "Offline package generated on $(date) for $os_release_version and RKE2 version $RKE2_VERSION" | tee $base_dir/rke2-install-files/VERSION.txt
+  tar czvf rke2-offline-package.tar.gz rke2-install-files/ install_rke2.sh
 }
 
 # --- GENERIC HELPER FUNCTIONS --- #
