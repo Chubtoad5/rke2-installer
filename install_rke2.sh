@@ -128,12 +128,10 @@ function install_helm_chart() {
 # --- Installation functions --- #
 
 function load_extra_images() {
-  if [ ! -f $base_dir/rke2-install-files/VERSION.txt ]; then
-    return
+  if [ -f $base_dir/rke2-install-files/VERSION.txt ]; then
+    echo "Loading utility and service images from offline package..."
+    /var/lib/rancher/rke2/bin/ctr --address /run/k3s/containerd/containerd.sock --namespace k8s.io image import $base_dir/rke2-install-files/utility-images/utility_images.tar.gz
   fi
-  echo "Loading utility and service images from offline package..."
-  /var/lib/rancher/rke2/bin/ctr --address /run/k3s/containerd/containerd.sock --namespace k8s.io image import $base_dir/rke2-install-files/utility-images/utility_images.tar.gz
-
 }
 
 function run_utilities() {
@@ -147,6 +145,7 @@ function run_utilities() {
   fi
   if [ -f $base_dir/rke2-install-files/VERSION.txt ]; then
     echo "deb [trusted=yes] file:$base_dir/rke2-install-files/apt-packages ./" | tee -a /etc/apt/sources.list.d/extra-packages.list
+    echo "Backing up original apt sources for offline installation..."
     mv /etc/apt/sources.list /etc/apt/sources.list.bak
     [ $os_release_version_short = "22.04" ] || mv /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list.d/ubuntu.sources.bak
     [ ! -f /etc/apt/sources.list.d/docker.list ] || mv /etc/apt/sources.list.d/docker.list /etc/apt/sources.list.d/docker.list.bak
@@ -168,7 +167,7 @@ function run_utilities() {
     echo "Completed..."
   fi
   if [ -f $base_dir/rke2-install-files/VERSION.txt ]; then
-    echo "Reverting sources.list..."
+    echo "Reverting apt sources..."
     mv /etc/apt/sources.list.bak /etc/apt/sources.list
     [ $os_release_version_short = "22.04" ] || mv /etc/apt/sources.list.d/ubuntu.sources.bak /etc/apt/sources.list.d/ubuntu.sources
     [ ! -f /etc/apt/sources.list.d/docker.list.bak ] || mv /etc/apt/sources.list.d/docker.list.bak /etc/apt/sources.list.d/docker.list
@@ -249,6 +248,7 @@ function set_prereqs() {
 function start_rke2_server() {
   echo "Installing RKE2 version $RKE2_VERSION..."
   if [ -f $base_dir/rke2-install-files/VERSION.txt ]; then
+    cp $base_dir/rke2-install-files/*tar.zst /var/lib/rancher/rke2/agent/images/
     INSTALL_RKE2_ARTIFACT_PATH=$base_dir/rke2-install-files sh $base_dir/rke2-install-files/install.sh
   else
     curl -sfL https://get.rke2.io | sudo -E INSTALL_RKE2_VERSION="$RKE2_VERSION" sh -
