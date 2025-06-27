@@ -5,7 +5,7 @@ DEBUG=true
 K8S_DNS_UTILITY=true
 DOCKER_UTILITY=true
 DOCKER_BRIDGE_CIDR=172.30.0.1/16
-ZIP_UTILITY=true
+UNZIP_UTILITY=true
 JQ_UTILITY=true
 
 # Supply extra sysctl parameters if required by your application, note that standard kubernetes are already applied, including CIS if enabled
@@ -16,15 +16,16 @@ EXTRA_SYSCTL_PARAMS=(
 )
 
 # RKE2 Install Parameters (If INSTALL_INGRESS=false, then Metallb LoadBalancer will be installed)
-RKE2_VERSION=v1.33.1+rke2r1
+RKE2_VERSION=v1.32.5+rke2r1
 CNI_TYPE=canal
 ENABLE_CIS=false
 CLUSTER_CIDR=172.28.175.0/24
 SERVICE_CIDR=172.28.176.0/24
-INSTALL_INGRESS=false
+INSTALL_INGRESS=true
+INSTALL_METALLB=true
 METALLB_VERSION=v0.15.2
 INSTALL_LOCALPATH_STORAGE=true
-HELM_VERION=v3.18.2
+HELM_VERION=v3.12.3
 
 # Helm Chart Parameters (Helm runs as "helm upgrade --install $CHART_NAME $OCI_URL --version $CHART_VERSION -n $NAMESPACE $CHART_INSTALL_ARGS")
 CHART_NAME=native-edge-orchestrator
@@ -45,7 +46,15 @@ post_helm_install_cmds=(
 
 # Offline Prep Parameters
 
-OFFLINE_APT_PACKAGES=(zip jq open-iscsi zstd docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin)
+OFFLINE_APT_PACKAGES=(unzip jq open-iscsi zstd docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin)
+OFFLINE_EXTRA_IMAGES=(
+  "docker.io/rancher/local-path-provisioner:v0.0.31"
+  "public.ecr.aws/docker/library/busybox:stable"
+  "quay.io/metallb/speaker:$METALLB_VERSION"
+  "quay.io/metallb/controller:$METALLB_VERSION"
+  "registry.k8s.io/e2e-test-images/agnhost:2.39"
+)
+
 
 # --- INTERNAL VARIABLES (do not edit) --- #
 base_dir=$(pwd)
@@ -156,9 +165,9 @@ function run_utilities() {
     echo "Completed..."
     echo "Reload the shell to enable docker cli access or run as sudo/root user"
   fi
-  if [ $ZIP_UTILITY == true ]; then
-    echo "Installing zip utility..."
-    debug_run apt_get_install zip
+  if [ $UNZIP_UTILITY == true ]; then
+    echo "Installing unzip utility..."
+    debug_run apt_get_install unzip
     echo "Completed..."
   fi
   if [ $JQ_UTILITY == true ]; then
@@ -229,8 +238,10 @@ function set_prereqs() {
   gen_extra_sysctl_params
   gen_rke2_bootstrap
   gen_rke2_coredns_helmchartconfig
-  gen_metallb_ipaddresspool
-  gen_metallb_l2advertisement
+  if [ $INSTALL_METALLB == true ]; then
+    gen_metallb_ipaddresspool
+    gen_metallb_l2advertisement
+  fi
   modprobe -a overlay br_netfilter
   systemctl restart systemd-sysctl
   if [ $? -ne 0 ]; then
@@ -248,6 +259,7 @@ function set_prereqs() {
 function start_rke2_server() {
   echo "Installing RKE2 version $RKE2_VERSION..."
   if [ -f $base_dir/rke2-install-files/VERSION.txt ]; then
+    mkdir -p /var/lib/rancher/rke2/agent/images
     cp $base_dir/rke2-install-files/*tar.zst /var/lib/rancher/rke2/agent/images/
     INSTALL_RKE2_ARTIFACT_PATH=$base_dir/rke2-install-files sh $base_dir/rke2-install-files/install.sh
   else
@@ -290,7 +302,7 @@ function apply_services(){
     gen_localpath_storage
     kubectl apply -f $base_dir/rke2-install-files/local-path-storage.yaml
   fi
-  if [ $INSTALL_INGRESS == false ]; then
+  if [ $INSTALL_METALLB == true ]; then
     if [ -f $base_dir/rke2-install-files/VERSION.txt ]; then
       kubectl apply -f $base_dir/rke2-install-files/extra-binaries/metallb-native.yaml
     else
@@ -303,7 +315,7 @@ function set_service_config() {
   if [ $INSTALL_LOCALPATH_STORAGE == true ]; then
     kubectl patch storageclass local-path -p '{"metadata": {"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
   fi
-  if [ $INSTALL_INGRESS == false ]; then
+  if [ $INSTALL_METALLB == true ]; then
     kubectl apply -f $base_dir/rke2-install-files/metallb-ipaddresspool.yaml
     kubectl apply -f $base_dir/rke2-install-files/metallb-l2advertisement.yaml
   fi
@@ -365,18 +377,11 @@ function apt_download_packs () {
 
 function download_service_images() {
   #Downloads container images for metallb, local-path-storage, dnsutils
-    local images=(
-        "rancher/local-path-provisioner:v0.0.31"
-        "public.ecr.aws/docker/library/busybox:stable"
-        "quay.io/metallb/speaker:$METALLB_VERSION"
-        "quay.io/metallb/controller:$METALLB_VERSION"
-        "registry.k8s.io/e2e-test-images/agnhost:2.39"
-    )
     echo "Starting Docker image pull and save process..."
     [ -d "$base_dir/rke2-install-files/utility-images" ] || mkdir -p "$base_dir/rke2-install-files/utility-images"
     local output_dir="$base_dir/rke2-install-files/utility-images"
     # Loop through each image to pull them first, ensuring they are available locally
-    for image in "${images[@]}"; do
+    for image in "${OFFLINE_EXTRA_IMAGES[@]}"; do
         echo ""
         echo "Pulling image: $image..."
         if docker pull "$image"; then
@@ -391,7 +396,7 @@ function download_service_images() {
     local utility_images_filename="utility_images.tar.gz"
     local utility_images_save_path="$output_dir/$utility_images_filename"
     echo "Saving all pulled images to a single file: '$utility_images_filename'..."
-    if docker save "${images[@]}" | gzip > "$utility_images_save_path"; then
+    if docker save "${OFFLINE_EXTRA_IMAGES[@]}" | gzip > "$utility_images_save_path"; then
         echo "Successfully saved all images to: $utility_images_save_path"
     else
         echo "Error: Failed to save all images to a single file."

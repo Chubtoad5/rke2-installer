@@ -9,7 +9,7 @@ Simple RKE2 installer for Ubuntu based systems
 - Supports installing a user defined helm chart
 - Supports offline package preparation (Comming soon!)
 - install-helm-chart variables will install Dell Automation Platform by default
-- Supports installing utilities (k8s dnsutils pod, zip, jq)
+- Supports installing utilities (k8s dnsutils pod, unzip, jq)
 
 ## Installation and Usage
 - Download install_rke2.sh
