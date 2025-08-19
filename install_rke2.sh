@@ -5,8 +5,8 @@ DEBUG=true
 K8S_DNS_UTILITY=true
 DOCKER_UTILITY=true
 DOCKER_BRIDGE_CIDR=172.30.0.1/16
-UNZIP_UTILITY=true
-JQ_UTILITY=true
+# UNZIP_UTILITY=true
+# JQ_UTILITY=true
 
 # Supply extra sysctl parameters if required by your application, note that standard kubernetes are already applied, including CIS if enabled
 EXTRA_SYSCTL_PARAMS=(
@@ -22,36 +22,36 @@ ENABLE_CIS=false
 CLUSTER_CIDR=172.28.175.0/24
 SERVICE_CIDR=172.28.176.0/24
 INSTALL_INGRESS=true
-INSTALL_METALLB=true
-METALLB_VERSION=v0.15.2
 INSTALL_LOCALPATH_STORAGE=true
+# INSTALL_METALLB=true
+# METALLB_VERSION=v0.15.2
 HELM_VERION=v3.12.3
 
 # Helm Chart Parameters (Helm runs as "helm upgrade --install $CHART_NAME $OCI_URL --version $CHART_VERSION -n $NAMESPACE $CHART_INSTALL_ARGS")
-CHART_NAME=native-edge-orchestrator
-OCI_URL=oci://public.ecr.aws/dell/nativeedge/native-edge-orchestrator
-CHART_VERSION=3.1.0-0-58
-NAMESPACE=dell-automation
-INGRESS_FQDN=rke2.local.edge
-CHART_INSTALL_ARGS="--set global.ingress.fqdn=$INGRESS_FQDN --wait --timeout 60m"
-pre_helm_install_cmds=(
-  "kubectl create namespace $NAMESPACE"
-  "kubectl label namespace $NAMESPACE hzp.iam.webhook/active="true" --overwrite"
-)
-post_helm_install_cmds=(
-  "echo 'Dell Orchestrator URL: https://$INGRESS_FQDN'"
-  "echo 'Dell Orchestrator Username: administrator'"
-  "echo 'Dell Orchesator default password:' \$(kubectl -n \"$NAMESPACE\" get secret keycloak-secret -o jsonpath=\"{.data.security-admin-usr-pwd}\" | base64 --decode)"
-)
+# CHART_NAME=native-edge-orchestrator
+# OCI_URL=oci://public.ecr.aws/dell/nativeedge/native-edge-orchestrator
+# CHART_VERSION=3.1.0-0-58
+# NAMESPACE=dell-automation
+# INGRESS_FQDN=rke2.local.edge
+# CHART_INSTALL_ARGS="--set global.ingress.fqdn=$INGRESS_FQDN --wait --timeout 60m"
+# pre_helm_install_cmds=(
+#   "kubectl create namespace $NAMESPACE"
+#   "kubectl label namespace $NAMESPACE hzp.iam.webhook/active="true" --overwrite"
+# )
+# post_helm_install_cmds=(
+#   "echo 'Dell Orchestrator URL: https://$INGRESS_FQDN'"
+#   "echo 'Dell Orchestrator Username: administrator'"
+#   "echo 'Dell Orchesator default password:' \$(kubectl -n \"$NAMESPACE\" get secret keycloak-secret -o jsonpath=\"{.data.security-admin-usr-pwd}\" | base64 --decode)"
+# )
 
 # Offline Prep Parameters
 
-OFFLINE_APT_PACKAGES=(unzip jq open-iscsi zstd docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin)
+OFFLINE_APT_PACKAGES=( docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin )
 OFFLINE_EXTRA_IMAGES=(
   "docker.io/rancher/local-path-provisioner:v0.0.31"
   "public.ecr.aws/docker/library/busybox:stable"
-  "quay.io/metallb/speaker:$METALLB_VERSION"
-  "quay.io/metallb/controller:$METALLB_VERSION"
+  # "quay.io/metallb/speaker:$METALLB_VERSION"
+  # "quay.io/metallb/controller:$METALLB_VERSION"
   "registry.k8s.io/e2e-test-images/agnhost:2.39"
 )
 
@@ -63,7 +63,6 @@ os_release_version_short=$(lsb_release -rs |tail -1)
 mgmt_ip=$(hostname -I | awk '{print $1}')
 mgmt_if=$(ip a |grep "$(hostname -I |awk '{print $1}')" | awk '{print $NF}')
 user_name=$SUDO_USER
-offline_prep_done=false
 
 export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
 export PATH=$PATH:/var/lib/rancher/rke2/bin
@@ -81,8 +80,7 @@ function install_rke2() {
   debug_run load_extra_images
   debug_run apply_services
   [ $INSTALL_LOCALPATH_STORAGE == false ] || check_namespace_pods_ready
-  [ $INSTALL_INGRESS == true ] || check_namespace_pods_ready metallb-system
-  debug_run set_service_config
+  # debug_run set_service_config
   debug_run install_helm
   run_utilities
   echo "RKE2 installation workflow completed..."
@@ -116,22 +114,22 @@ function rke2_offline_prep() {
   debug_run apt_download_packs
   debug_run download_service_images
   debug_run download_extra_binaries
-  debug_run download_rke2_zst
+  debug_run download_rke2_tar
   debug_run prepare_offline_package
   echo "Offline package generation completed..."
   echo "Upload rke2-offline-package.tar.gz to your airgapped system running $os_release_version"
 }
 
-function install_helm_chart() {
-  echo "Installing Helm chart $CHART_NAME version $CHART_VERSION under namespace $NAMESPACE"
-  local pre_install_cmds=$pre_helm_install_cmds
-  run_helm_pre_install_cmds "${pre_install_cmds[@]}"
-  debug_run start_helm_chart
-  echo "Helm Chart finished, listing pods..."
-  kubectl get pods -n $NAMESPACE
-  local post_install_cmds=$post_helm_install_cmds
-  run_helm_post_install_cmds "${post_install_cmds[@]}"
-}
+# function install_helm_chart() {
+#   echo "Installing Helm chart $CHART_NAME version $CHART_VERSION under namespace $NAMESPACE"
+#   local pre_install_cmds=$pre_helm_install_cmds
+#   run_helm_pre_install_cmds "${pre_install_cmds[@]}"
+#   debug_run start_helm_chart
+#   echo "Helm Chart finished, listing pods..."
+#   kubectl get pods -n $NAMESPACE
+#   local post_install_cmds=$post_helm_install_cmds
+#   run_helm_post_install_cmds "${post_install_cmds[@]}"
+# }
 
 
 # --- Installation functions --- #
@@ -165,16 +163,16 @@ function run_utilities() {
     echo "Completed..."
     echo "Reload the shell to enable docker cli access or run as sudo/root user"
   fi
-  if [ $UNZIP_UTILITY == true ]; then
-    echo "Installing unzip utility..."
-    debug_run apt_get_install unzip
-    echo "Completed..."
-  fi
-  if [ $JQ_UTILITY == true ]; then
-    echo "Installing jq utility..."
-    debug_run apt_get_install jq
-    echo "Completed..."
-  fi
+  # if [ $UNZIP_UTILITY == true ]; then
+  #   echo "Installing unzip utility..."
+  #   debug_run apt_get_install unzip
+  #   echo "Completed..."
+  # fi
+  # if [ $JQ_UTILITY == true ]; then
+  #   echo "Installing jq utility..."
+  #   debug_run apt_get_install jq
+  #   echo "Completed..."
+  # fi
   if [ -f $base_dir/rke2-install-files/VERSION.txt ]; then
     echo "Reverting apt sources..."
     mv /etc/apt/sources.list.bak /etc/apt/sources.list
@@ -301,25 +299,27 @@ function apply_services(){
   if [ $INSTALL_LOCALPATH_STORAGE == true ]; then
     gen_localpath_storage
     kubectl apply -f $base_dir/rke2-install-files/local-path-storage.yaml
-  fi
-  if [ $INSTALL_METALLB == true ]; then
-    if [ -f $base_dir/rke2-install-files/VERSION.txt ]; then
-      kubectl apply -f $base_dir/rke2-install-files/extra-binaries/metallb-native.yaml
-    else
-      kubectl apply -f https://raw.githubusercontent.com/metallb/metallb/$METALLB_VERSION/config/manifests/metallb-native.yaml
-    fi
-  fi
-}
-
-function set_service_config() {
-  if [ $INSTALL_LOCALPATH_STORAGE == true ]; then
+    sleep 5
     kubectl patch storageclass local-path -p '{"metadata": {"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
   fi
-  if [ $INSTALL_METALLB == true ]; then
-    kubectl apply -f $base_dir/rke2-install-files/metallb-ipaddresspool.yaml
-    kubectl apply -f $base_dir/rke2-install-files/metallb-l2advertisement.yaml
-  fi
+  # if [ $INSTALL_METALLB == true ]; then
+  #   if [ -f $base_dir/rke2-install-files/VERSION.txt ]; then
+  #     kubectl apply -f $base_dir/rke2-install-files/extra-binaries/metallb-native.yaml
+  #   else
+  #     kubectl apply -f https://raw.githubusercontent.com/metallb/metallb/$METALLB_VERSION/config/manifests/metallb-native.yaml
+  #   fi
+  # fi
 }
+
+# function set_service_config() {
+#   if [ $INSTALL_LOCALPATH_STORAGE == true ]; then
+#     kubectl patch storageclass local-path -p '{"metadata": {"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
+#   fi
+#   if [ $INSTALL_METALLB == true ]; then
+#     kubectl apply -f $base_dir/rke2-install-files/metallb-ipaddresspool.yaml
+#     kubectl apply -f $base_dir/rke2-install-files/metallb-l2advertisement.yaml
+#   fi
+# }
 
 function install_helm() {
   if [ -f $base_dir/rke2-install-files/VERSION.txt ]; then
@@ -332,39 +332,39 @@ function install_helm() {
   cp $base_dir/rke2-install-files/extra-binaries/linux-amd64/helm /usr/local/bin/helm
 }
 
-function create_namespace() {
-  kubectl create namespace $NAMESPACE
-  kubectl label namespace $NAMESPACE hzp.iam.webhook/active="true" --overwrite
-}
+# function create_namespace() {
+#   kubectl create namespace $NAMESPACE
+#   kubectl label namespace $NAMESPACE hzp.iam.webhook/active="true" --overwrite
+# }
 
-function start_helm_chart() {
-  local helm_cmd="upgrade --install $CHART_NAME $OCI_URL --version $CHART_VERSION -n $NAMESPACE $CHART_INSTALL_ARGS"
-  echo "Helm Command:"
-  echo "helm $helm_cmd"
-  helm $helm_cmd
-  helm list -n $NAMESPACE
-}
+# function start_helm_chart() {
+#   local helm_cmd="upgrade --install $CHART_NAME $OCI_URL --version $CHART_VERSION -n $NAMESPACE $CHART_INSTALL_ARGS"
+#   echo "Helm Command:"
+#   echo "helm $helm_cmd"
+#   helm $helm_cmd
+#   helm list -n $NAMESPACE
+# }
 
-function run_helm_pre_install_cmds() {
-  echo "Running pre install commands..."   
-  for cmd in "${pre_helm_install_cmds[@]}"; do
-    eval "$cmd"
-  done
-  if [ $ENABLE_CIS == true ]; then
-    gen_cis_account_update
-    echo "Running CIS service account patch for default account..."
-    kubectl patch serviceaccount default -n $NAMESPACE -p "$(cat $base_dir/rke2-install-files/account_update.yaml)"
-    echo "Completed..."
-  fi
-}
+# function run_helm_pre_install_cmds() {
+#   echo "Running pre install commands..."   
+#   for cmd in "${pre_helm_install_cmds[@]}"; do
+#     eval "$cmd"
+#   done
+#   if [ $ENABLE_CIS == true ]; then
+#     gen_cis_account_update
+#     echo "Running CIS service account patch for default account..."
+#     kubectl patch serviceaccount default -n $NAMESPACE -p "$(cat $base_dir/rke2-install-files/account_update.yaml)"
+#     echo "Completed..."
+#   fi
+# }
 
-function run_helm_post_install_cmds() {
-  echo "Running post install commands..."
-  for cmd in "${post_helm_install_cmds[@]}"; do
-    eval "$cmd"
-  done
-  echo "Completed..."
-}
+# function run_helm_post_install_cmds() {
+#   echo "Running post install commands..."
+#   for cmd in "${post_helm_install_cmds[@]}"; do
+#     eval "$cmd"
+#   done
+#   echo "Completed..."
+# }
 
 # --- Offline Prep functions --- #
 
@@ -410,11 +410,11 @@ function download_extra_binaries() {
   mkdir -p $base_dir/rke2-install-files/extra-binaries
   cd $base_dir/rke2-install-files/extra-binaries
   curl -OL https://get.helm.sh/helm-$HELM_VERION-linux-amd64.tar.gz
-  echo "Downloading MetalLB manifest version $METALLB_VERSION..."
-  curl -OL https://raw.githubusercontent.com/metallb/metallb/$METALLB_VERSION/config/manifests/metallb-native.yaml
+  # echo "Downloading MetalLB manifest version $METALLB_VERSION..."
+  # curl -OL https://raw.githubusercontent.com/metallb/metallb/$METALLB_VERSION/config/manifests/metallb-native.yaml
 }
 
-function download_rke2_zst() {
+function download_rke2_tar() {
   echo "Downloading RKE2 air-gapped package..."
   if [[ $CNI_TYPE != "canal" && $CNI_TYPE != "calico" ]]; then
     echo "CNI must be either canal or calico"
@@ -423,19 +423,19 @@ function download_rke2_zst() {
   cd $base_dir/rke2-install-files
   # v1.33.1%2Brke2r1 | v1.33.1+rke2r1
   local translated_version=$(echo $RKE2_VERSION | sed 's/+/%2B/')
-  curl -OL https://github.com/rancher/rke2/releases/download/$translated_version/rke2-images-core.linux-amd64.tar.zst
+  curl -OL https://github.com/rancher/rke2/releases/download/$translated_version/rke2-images-core.linux-amd64.tar.gz
   curl -OL https://github.com/rancher/rke2/releases/download/$translated_version/rke2-images-core.linux-amd64.txt
   curl -OL https://github.com/rancher/rke2/releases/download/$translated_version/rke2.linux-amd64.tar.gz
   curl -OL https://github.com/rancher/rke2/releases/download/$translated_version/sha256sum-amd64.txt
   curl -sfL https://get.rke2.io --output install.sh
   # if cni = cannal
   if [[ $CNI_TYPE == "canal" ]]; then
-    curl -OL https://github.com/rancher/rke2/releases/download/$translated_version/rke2-images-canal.linux-amd64.tar.zst
+    curl -OL https://github.com/rancher/rke2/releases/download/$translated_version/rke2-images-canal.linux-amd64.tar.gz
     curl -OL https://github.com/rancher/rke2/releases/download/$translated_version/rke2-images-canal.linux-amd64.txt
   fi
   # if cni = calico
   if [[ $CNI_TYPE == "calico" ]]; then
-    curl -OL https://github.com/rancher/rke2/releases/download/$translated_version/rke2-images-calico.linux-amd64.tar.zst
+    curl -OL https://github.com/rancher/rke2/releases/download/$translated_version/rke2-images-calico.linux-amd64.tar.gz
     curl -OL https://github.com/rancher/rke2/releases/download/$translated_version/rke2-images-calico.linux-amd64.txt
   fi
 }
@@ -678,35 +678,35 @@ spec:
 EOF
 }
 
-function gen_metallb_ipaddresspool() {
-  echo "Generating $base_dir/rke2-install-files/metallb-ipaddresspool.yaml"
-  cat > $base_dir/rke2-install-files/metallb-ipaddresspool.yaml <<EOF
-apiVersion: metallb.io/v1beta1
-kind: IPAddressPool
-metadata:
-  name: default
-  namespace: metallb-system
-spec:
-  addresses:
-  - $mgmt_ip/32
-EOF
-}
+# function gen_metallb_ipaddresspool() {
+#   echo "Generating $base_dir/rke2-install-files/metallb-ipaddresspool.yaml"
+#   cat > $base_dir/rke2-install-files/metallb-ipaddresspool.yaml <<EOF
+# apiVersion: metallb.io/v1beta1
+# kind: IPAddressPool
+# metadata:
+#   name: default
+#   namespace: metallb-system
+# spec:
+#   addresses:
+#   - $mgmt_ip/32
+# EOF
+# }
 
-function gen_metallb_l2advertisement() {
-  echo "Generating $base_dir/rke2-install-files/metallb-l2advertisement.yaml"
-  cat > $base_dir/rke2-install-files/metallb-l2advertisement.yaml <<EOF
-apiVersion: metallb.io/v1beta1
-kind: L2Advertisement
-metadata:
-  namespace: metallb-system
-  name: default
-spec:
-  ipAddressPools:
-  - default
-  interfaces:
-  - $mgmt_if
-EOF
-}
+# function gen_metallb_l2advertisement() {
+#   echo "Generating $base_dir/rke2-install-files/metallb-l2advertisement.yaml"
+#   cat > $base_dir/rke2-install-files/metallb-l2advertisement.yaml <<EOF
+# apiVersion: metallb.io/v1beta1
+# kind: L2Advertisement
+# metadata:
+#   namespace: metallb-system
+#   name: default
+# spec:
+#   ipAddressPools:
+#   - default
+#   interfaces:
+#   - $mgmt_if
+# EOF
+# }
 
 function gen_localpath_storage(){
   echo "Generating $base_dir/rke2-install-files/local-path-storage.yaml"
@@ -889,7 +889,7 @@ function help {
   echo "install-server          | Installs RKE2 from the internet or offline package"
   echo "uninstall-server        | Uninstalls RKE2"
   echo "offline-prep            | Prepares an offline package"
-  echo "install-helm-chart      | Installs helm chart from variables"
+  # echo "install-helm-chart      | Installs helm chart from variables"
 }
 
 # Start CLI Wrapper
@@ -923,14 +923,14 @@ while [[ $# -gt 0 ]]; do
       rke2_offline_prep
       exit 0
       ;;
-    install-helm-chart)
-      check_root_privileges
-      echo "########################################"
-      echo "###  Helm Chart Installation Started ###"
-      echo "########################################"
-      install_helm_chart
-      exit 0
-      ;;
+    # install-helm-chart)
+    #   check_root_privileges
+    #   echo "########################################"
+    #   echo "###  Helm Chart Installation Started ###"
+    #   echo "########################################"
+    #   install_helm_chart
+    #   exit 0
+    #   ;;
 
     *)
       echo "Invalid option: $1"
