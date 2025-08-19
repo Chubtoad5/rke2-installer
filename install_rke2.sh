@@ -236,10 +236,10 @@ function set_prereqs() {
   gen_extra_sysctl_params
   gen_rke2_bootstrap
   gen_rke2_coredns_helmchartconfig
-  if [ $INSTALL_METALLB == true ]; then
-    gen_metallb_ipaddresspool
-    gen_metallb_l2advertisement
-  fi
+  # if [ $INSTALL_METALLB == true ]; then
+  #   gen_metallb_ipaddresspool
+  #   gen_metallb_l2advertisement
+  # fi
   modprobe -a overlay br_netfilter
   systemctl restart systemd-sysctl
   if [ $? -ne 0 ]; then
@@ -258,7 +258,7 @@ function start_rke2_server() {
   echo "Installing RKE2 version $RKE2_VERSION..."
   if [ -f $base_dir/rke2-install-files/VERSION.txt ]; then
     mkdir -p /var/lib/rancher/rke2/agent/images
-    cp $base_dir/rke2-install-files/*tar.zst /var/lib/rancher/rke2/agent/images/
+    cp $base_dir/rke2-install-files/*tar.gz /var/lib/rancher/rke2/agent/images/
     INSTALL_RKE2_ARTIFACT_PATH=$base_dir/rke2-install-files sh $base_dir/rke2-install-files/install.sh
   else
     curl -sfL https://get.rke2.io | sudo -E INSTALL_RKE2_VERSION="$RKE2_VERSION" sh -
@@ -295,7 +295,7 @@ function start_rke2_server() {
   echo 'Defaults secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/var/lib/rancher/rke2/bin"' | sudo tee /etc/sudoers.d/rke2-path
 }
 
-function apply_services(){
+function apply_services() {
   if [ $INSTALL_LOCALPATH_STORAGE == true ]; then
     gen_localpath_storage
     kubectl apply -f $base_dir/rke2-install-files/local-path-storage.yaml
@@ -520,7 +520,7 @@ function debug_run() {
   if [ "$DEBUG" = "true" ]; then
     # If DEBUG is true, execute the command/function normally.
     # All stdout and stderr will be displayed to the console.
-    echo "--- DEBUG: Running '$*' ---"
+    echo "--- Running '$*' with DEBUG enabled---"
     "$@"
     local status=$? # Capture the exit status of the executed command
     echo "--- DEBUG: Finished '$*' with status $status ---"
