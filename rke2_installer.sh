@@ -318,6 +318,9 @@ run_install () {
         config_host_settings
         start_rke2_service
         apply_utilities
+        local join_token=$(cat /var/lib/rancher/rke2/server/node-token)
+        echo "Join token stored in:/var/lib/rancher/rke2/server/node-token"
+        echo "Join token for this cluster is: $join_token"
     fi
     if [[ $JOIN_MODE -eq 1 && $JOIN_TYPE == "agent" ]]; then
         create_agent_join_config
