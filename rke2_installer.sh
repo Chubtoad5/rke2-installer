@@ -339,7 +339,7 @@ run_install () {
 }
 
 start_rke2_service () {
-    echo "Enabling and starting rke2-server service..."
+    echo "Enabling and starting rke2 service..."
     if [[ $JOIN_TYPE == "agent" ]]; then
         systemctl enable rke2-agent.service
         systemctl start rke2-agent.service
@@ -353,23 +353,27 @@ start_rke2_service () {
     else
         echo "rke2 service started successfully."
     fi
-    echo "Waiting for pods to start..."
-    sleep 15
-    mkdir -p /root/.kube
-    cp /etc/rancher/rke2/rke2.yaml /root/.kube/config
-    chmod 600 /root/.kube/config
-    if [[ -n "$user_name" ]]; then
-        mkdir -p /home/$user_name/.kube
-        cp /etc/rancher/rke2/rke2.yaml /home/$user_name/.kube/config
-        chown $user_name:$user_name /home/$user_name/.kube/config
-        chmod 600 /home/$user_name/.kube/config
-        echo "export KUBECONFIG=/home/$user_name/.kube/config" >> /home/$user_name/.bashrc
-        echo "export PATH=\$PATH:/var/lib/rancher/rke2/bin" >> /home/$user_name/.bashrc
-        echo 'Defaults secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/var/lib/rancher/rke2/bin"' | sudo tee /etc/sudoers.d/rke2-path
+    if [[ $JOIN_TYPE == "agent" ]]; then
+        echo "Agent install completed, check server status for details"
+    else
+        echo "Waiting for pods to start..."
+        sleep 15
+        mkdir -p /root/.kube
+        cp /etc/rancher/rke2/rke2.yaml /root/.kube/config
+        chmod 600 /root/.kube/config
+        if [[ -n "$user_name" ]]; then
+            mkdir -p /home/$user_name/.kube
+            cp /etc/rancher/rke2/rke2.yaml /home/$user_name/.kube/config
+            chown $user_name:$user_name /home/$user_name/.kube/config
+            chmod 600 /home/$user_name/.kube/config
+            echo "export KUBECONFIG=/home/$user_name/.kube/config" >> /home/$user_name/.bashrc
+            echo "export PATH=\$PATH:/var/lib/rancher/rke2/bin" >> /home/$user_name/.bashrc
+            echo 'Defaults secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/var/lib/rancher/rke2/bin"' | sudo tee /etc/sudoers.d/rke2-path
+        fi
+        export KUBECONFIG=/home/$user_name/.kube/config
+        export PATH=$PATH:/var/lib/rancher/rke2/bin
+        check_namespace_pods_ready
     fi
-    export KUBECONFIG=/home/$user_name/.kube/config
-    export PATH=$PATH:/var/lib/rancher/rke2/bin
-    check_namespace_pods_ready
 }
 
 install_rke2_binaries () {
