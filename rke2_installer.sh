@@ -425,7 +425,7 @@ EOF
 create_agent_join_config () {
     echo "Generating /etc/rancher/rke2/config.yaml for agent"
     cat > /etc/rancher/rke2/config.yaml <<EOF
-server: https://${SERVER_FQDN}:9345
+server: https://${JOIN_SERVER_FQDN}:9345
 token: "$JOIN_TOKEN"
 EOF
     if [ $ENABLE_CIS == true ]; then
