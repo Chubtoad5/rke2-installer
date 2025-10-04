@@ -12,6 +12,7 @@ CNI_TYPE=canal
 ENABLE_CIS=false
 CLUSTER_CIDR=172.28.175.0/24
 SERVICE_CIDR=172.28.176.0/24
+MAX_PODS=110
 INSTALL_INGRESS=true
 INSTALL_SERVICELB=true
 INSTALL_LOCAL_PATH_PROVISIONER=true
@@ -315,7 +316,7 @@ run_install () {
         create_registry_config
         install_rke2_binaries
         config_host_settings
-        start_rke2_server
+        start_rke2_service
         apply_utilities
     fi
     if [[ $JOIN_MODE -eq 1 && $JOIN_TYPE == "agent" ]]; then
@@ -323,26 +324,31 @@ run_install () {
         create_registry_config
         install_rke2_binaries
         config_host_settings
-        start_rke2_agent
+        start_rke2_service
     fi
     if [[ $JOIN_MODE -eq 1 && $JOIN_TYPE == "server" ]]; then
         create_server_join_config
         create_registry_config
         install_rke2_binaries
         config_host_settings
-        start_rke2_server
+        start_rke2_service
     fi
 }
 
-start_rke2_server () {
+start_rke2_service () {
     echo "Enabling and starting rke2-server service..."
-    systemctl enable rke2-server.service
-    systemctl start rke2-server.service
+    if [[ $JOIN_TYPE == "agent" ]]; then
+        systemctl enable rke2-agent.service
+        systemctl start rke2-agent.service
+    else
+        systemctl enable rke2-server.service
+        systemctl start rke2-server.service
+    fi
     if [ $? -ne 0 ]; then
-        echo "Error: rke2-server.service failed to start. Exiting script."
+        echo "Error: rke2 service failed to start. Exiting script."
         exit 1 
     else
-        echo "rke2-server.service started successfully."
+        echo "rke2 service started successfully."
     fi
     echo "Waiting for pods to start..."
     sleep 15
@@ -361,18 +367,6 @@ start_rke2_server () {
     export KUBECONFIG=/home/$user_name/.kube/config
     export PATH=$PATH:/var/lib/rancher/rke2/bin
     check_namespace_pods_ready
-}
-
-start_rke2_agent () {
-    echo "Enabling and starting rke2-agent service..."
-    systemctl enable rke2-agent.service
-    systemctl start rke2-agent.service
-    if [ $? -ne 0 ]; then
-        echo "Error: rke2-agent.service failed to start. Exiting script."
-        exit 1 
-    else
-        echo "rke2-agent.service started successfully."
-    fi
 }
 
 install_rke2_binaries () {
@@ -436,12 +430,6 @@ EOF
 profile: "cis"
 EOF
     fi
-    if [[ $TLS_SAN_MODE -eq 1 ]]; then
-        cat >> /etc/rancher/rke2/config.yaml <<EOF
-tls-sans:
-  - "$TLS_SAN"
-EOF
-    fi
 }
 
 create_server_join_config () {
@@ -457,7 +445,7 @@ etcd-extra-env:
   - "ETCD_AUTO_COMPACTION_RETENTION=72h"
   - "ETCD_AUTO_COMPACTION_MODE=periodic"
 kubelet-arg:
-  - "max-pods=180"
+  - "max-pods=$MAX_PODS"
   - "resolv-conf=/run/systemd/resolve/resolv.conf"
 kube-apiserver-arg:
   - "audit-log-path=/var/log/rke2-apiserver-audit.log"
@@ -491,7 +479,7 @@ etcd-extra-env:
   - "ETCD_AUTO_COMPACTION_RETENTION=72h"
   - "ETCD_AUTO_COMPACTION_MODE=periodic"
 kubelet-arg:
-  - "max-pods=180"
+  - "max-pods=$MAX_PODS"
   - "resolv-conf=/run/systemd/resolve/resolv.conf"
 kube-apiserver-arg:
   - "audit-log-path=/var/log/rke2-apiserver-audit.log"
