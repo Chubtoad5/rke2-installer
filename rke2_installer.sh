@@ -375,14 +375,22 @@ start_rke2_service () {
 install_rke2_binaries () {
     echo "Installing RKE2 binaries..."
     if [[ "$AIR_GAPPED_MODE" -eq 1 ]]; then
+        echo "extracting rke2-core-images archive..."
         tar -xzf $WORKING_DIR/rke2-core-images/rke2-core-images.tar.gz -C $WORKING_DIR/rke2-core-images
         mv $WORKING_DIR/rke2-core-images/images/rke2-images-core.linux-amd64.tar.gz $WORKING_DIR/rke2-binaries
         cp $WORKING_DIR/rke2-binaries/rke2-images-core.linux-amd64.tar.gz /var/lib/rancher/rke2/agent/images
         rm -rf $WORKING_DIR/rke2-core-images/images
+        echo "extracting rke2-cni-images archive..."
         tar -xzf $WORKING_DIR/rke2-cni-images/rke2-$CNI_TYPE-images.tar.gz -C $WORKING_DIR/rke2-cni-images
         mv $WORKING_DIR/rke2-cni-images/images/rke2-images-$CNI_TYPE.linux-amd64.tar.gz $WORKING_DIR/rke2-binaries
         cp $WORKING_DIR/rke2-binaries/rke2-images-$CNI_TYPE.linux-amd64.tar.gz /var/lib/rancher/rke2/agent/images
         rm -rf $WORKING_DIR/rke2-cni-images/images
+        if [[ $REGISTRY_MODE -eq 0 ]]; then
+            echo "extracting rke2-utilities archive..."
+            tar -xzf $WORKING_DIR/rke2-utilities/container_images_*.tar.gz -C $WORKING_DIR/rke2-utilities
+            cp $WORKING_DIR/rke2-utilities/images/images.tar.gz /var/lib/rancher/rke2/agent/images
+            rm -rf $WORKING_DIR/rke2-utilities/images
+        fi
         INSTALL_RKE2_ARTIFACT_PATH="$WORKING_DIR/rke2-binaries" INSTALL_RKE2_VERSION="$RKE2_VERSION" INSTALL_RKE2_TYPE="$JOIN_TYPE" sh $WORKING_DIR/rke2-binaries/install.sh
     else
         curl -sfL https://get.rke2.io | sudo -E INSTALL_RKE2_VERSION="$RKE2_VERSION" INSTALL_RKE2_TYPE="$JOIN_TYPE" INSTALL_RKE2_METHOD="tar" sh -
