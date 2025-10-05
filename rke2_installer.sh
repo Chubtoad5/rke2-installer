@@ -401,13 +401,6 @@ create_registry_config () {
             exit 1
         fi
         cat > /etc/rancher/rke2/registries.yaml <<EOF
-mirrors:
-  docker.io:
-    endpoint:
-      - "https://${REG_FQDN}:${REG_PORT}"
-  ${REG_FQDN}:${REG_PORT}:
-    endpoint:
-      - "https://${REG_FQDN}:${REG_PORT}"
 configs:
   ${REG_FQDN}:${REG_PORT}:
     auth:
@@ -415,7 +408,21 @@ configs:
       password: "${REG_PASS}"
     tls:
       ca_file: "${CERTS_DIR}/ca.crt"
+mirrors:
+  docker.io:
+    endpoint:
+      - "https://${REG_FQDN}:${REG_PORT}"
+  ${REG_FQDN}:${REG_PORT}:
+    endpoint:
+      - "https://${REG_FQDN}:${REG_PORT}"
 EOF
+        if [[ $INSTALL_DNS_UTILITY == "true" ]]; then
+            cat >> /etc/rancher/rke2/registries.yaml <<EOF
+  registry.k8s.io:
+    endpoint:
+      - "https://${REG_FQDN}:${REG_PORT}"
+EOF
+        fi
         echo "Private registry configuration written to /etc/rancher/rke2/registries.yaml"
     else
         echo "Private registry not enabled. Skipping registry configuration."
@@ -598,6 +605,7 @@ apply_utilities () {
         done
     fi
     if [[ $INSTALL_LOCAL_PATH_PROVISIONER == "true" ]]; then
+        # need to add check for registry and update yaml path
         if [[ $AIR_GAPPED_MODE -eq 1 ]]; then
             kubectl apply -f $WORKING_DIR/rke2-utilities/local-path-storage.yaml
         else
@@ -607,6 +615,7 @@ apply_utilities () {
         kubectl patch storageclass local-path -p '{"metadata": {"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
     fi
     if [[ $INSTALL_DNS_UTILITY == "true" ]]; then
+        # need to add check for registry and update yaml path
         if [[ $AIR_GAPPED_MODE -eq 1 ]]; then
             kubectl apply -f $WORKING_DIR/rke2-utilities/dnsutils.yaml
         else
@@ -695,7 +704,7 @@ download_rke2_utilities () {
 create_save_archive () {
     # saves downloaded files into rke2-save.tar.gz
     echo "Creating final archive..."
-    tar -czf rke2-save.tar.gz rke2-install install_rke2.sh
+    tar -czf rke2-save.tar.gz rke2-install rke2_installer.sh
     echo "Air-gapped archive 'rke2-save.tar.gz' created."
 }
 
