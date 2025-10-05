@@ -335,12 +335,13 @@ run_install () {
 }
 
 start_rke2_service () {
-    echo "Enabling and starting rke2 service..."
     if [[ $JOIN_TYPE == "agent" ]]; then
         systemctl enable rke2-agent.service
+        echo "Starting rke2 service, this may take several minutes..."
         systemctl start rke2-agent.service
     else
         systemctl enable rke2-server.service
+        echo "Starting rke2 service, this may take several minutes..."
         systemctl start rke2-server.service
     fi
     if [ $? -ne 0 ]; then
@@ -453,7 +454,7 @@ EOF
 create_server_join_config () {
     echo "Generating /etc/rancher/rke2/config.yaml for server join"
     cat > /etc/rancher/rke2/config.yaml <<EOF
-server: https://${SERVER_FQDN}:9345
+server: https://${JOIN_SERVER_FQDN}:9345
 token: "$JOIN_TOKEN"
 write-kubeconfig-mode: "0600"
 service-node-port-range: "443-40000"
@@ -794,14 +795,18 @@ runtime_outputs () {
         echo "Join token stored in: /var/lib/rancher/rke2/server/node-token"
         if [[ $TLS_SAN_MODE -eq 1 ]]; then
             echo "To join more nodes to this cluster use the following config:"
+            echo "----"
             echo "server: https://$TLS_SAN:9345"
             echo "token: $join_token"
+            echo "----"
         else
             echo "To join more nodes to this cluster use the following config:"
+            echo "----"
             echo "server: https://$host_ip:9345"
             echo "token: $join_token"
+            echo "----"
         fi
-        echo "kube config stored in: /etc/rancher/rke2/rke2.yaml and coppied to /home/$user_name/.kube/config"
+        echo "Kube config stored in: /etc/rancher/rke2/rke2.yaml and coppied to /home/$user_name/.kube/config"
         echo "Run 'source ~/.bashrc' to enable Kubectl on this shell session."
     fi
     if [[ $JOIN_MODE -eq 1 ]]; then
@@ -817,10 +822,6 @@ runtime_outputs () {
 
 create_working_dir () {
     # check for rke2-install directory and supporting directories, then create them
-    if [[ $AIR_GAPPED_MODE -eq 1 ]]; then
-        echo "Extracting rke2-save.tar.gz..."
-        tar xzf "$base_dir/rke2-save.tar.gz"
-    fi
     [ -d "$WORKING_DIR" ] || mkdir -p "$WORKING_DIR"
     [ -d "$WORKING_DIR/rke2-core-images/images" ] || mkdir -p "$WORKING_DIR/rke2-core-images/images"
     [ -d "$WORKING_DIR/rke2-cni-images/images" ] || mkdir -p "$WORKING_DIR/rke2-cni-images/images"
