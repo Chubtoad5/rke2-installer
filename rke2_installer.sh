@@ -48,12 +48,12 @@ ipv4_pattern='^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]
 
 usage() {
     cat << EOF
-Usage: $SCRIPT_NAME [install] [unintall] [save] [push] [join [server|agent] server-fqdn join-token-string] [registry:port username password] [tls-san [server-fqdn-ip]] 
+Usage: $SCRIPT_NAME [install] [unintall] [save] [push] [join [server|agent] server-fqdn join-token-string] [tls-san [server-fqdn-ip]] [registry [registry:port username password]]
 
 - This script must be run with root privileges.
 - At least one parameter of [install], [uninstall], [save], [push], or [join] must be specified. 
 - When [push] is specified, [registry:port username password] must be provided. The correct project path must exist on the registry (i.e. my.registry.com:443/rancher). See README.md for details.
-- When [registry:port username password] is specified with [install] or [join], rke2 will use the private registry as a mirror to pull images.
+- When [registry [registry:port username password]] is specified with [install] or [join], rke2 will use the private registry as a mirror to pull images.
 - When [join] is specified, an install type, [server-fqdn] and [join-token-string] must be provided from an existing cluster. (Comming soon!)
 - When [tls-san] is specified, install and join operations will add the [server-fqdn-ip] as the tls-san of the server configuration.
 - To change the default install configuration, edit $SCRIPT_NAME USER DEFINED VARIABLES before running. See README.md for details.
@@ -165,13 +165,13 @@ while [[ "$#" -gt 0 ]]; do
             shift
             shift
             ;;
-        *:*)
+        registry)
             REGISTRY_MODE=1
             REGISTRY_INFO="$1"
             REG_USER="${2:-}"
             REG_PASS="${3:-}"
             if [[ -z "$REG_USER" || -z "$REG_PASS" ]]; then
-                echo "Error: Registry info requires a username and password. Format: [registry:port] [username] [password]"
+                echo "Error: Registry info requires a username and password. Format: registry [registry:port username password]"
                 echo "Type './$SCRIPT_NAME -h' for help."
                 exit 1
             fi
@@ -205,7 +205,7 @@ if [[ "$PUSH_MODE" == "1"  ]]; then
         exit 1
     fi
     if [[ "$REGISTRY_MODE" == "0" ]]; then
-        echo "Error: 'push' command requires registry config. Format: push [registry:port] [username] [password]"
+        echo "Error: 'push' command requires registry config. Format: push registry [registry:port] [username] [password]"
         echo "Type './$SCRIPT_NAME -h' for help."
         exit 1
     fi

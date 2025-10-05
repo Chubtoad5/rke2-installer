@@ -13,11 +13,15 @@ Simple RKE2 installer for Ubuntu based systems
 - Supports uninstalling the agent/server running on the local host
 
 ## Installation and Usage
-- Download rke2-installer.sh
+- Download rke2_installer.sh and make it executable
 ```
-chmod +x rke2-installer.sh
+git clone https://github.com/Chubtoad5/rke2-installer.git
+cd rke2-installer
 ```
-- (Optional) edit install_rke2.sh variables in USER DEFINED VARIABLES section
+```
+chmod +x rke2_installer.sh
+```
+- (Optional) edit rke2_installer.sh variables in USER DEFINED VARIABLES section
 - Run script as sudo or root user
 ```
 Usage: $SCRIPT_NAME [install] [unintall] [save] [push] [join [server|agent] server-fqdn join-token-string] [registry:port username password] [tls-san [server-fqdn-ip]] 
