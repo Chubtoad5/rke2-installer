@@ -10,8 +10,8 @@ set -o pipefail
 RKE2_VERSION=v1.32.5+rke2r1
 CNI_TYPE=canal
 ENABLE_CIS=false
-CLUSTER_CIDR=172.28.175.0/24
-SERVICE_CIDR=172.28.176.0/24
+CLUSTER_CIDR=10.42.0.0/16
+SERVICE_CIDR=10.43.0.0/16
 MAX_PODS=110
 INSTALL_INGRESS=true
 INSTALL_SERVICELB=true
@@ -459,7 +459,6 @@ kube-apiserver-arg:
   - "audit-log-maxage=30"
   - "audit-log-maxbackup=10"
   - "audit-log-maxsize=200"
-  - "service-cluster-ip-range=$SERVICE_CIDR"
 EOF
     if [ $ENABLE_CIS == true ]; then
         cat >> /etc/rancher/rke2/config.yaml <<EOF
@@ -493,7 +492,6 @@ kube-apiserver-arg:
   - "audit-log-maxage=30"
   - "audit-log-maxbackup=10"
   - "audit-log-maxsize=200"
-  - "service-cluster-ip-range=$SERVICE_CIDR"
 EOF
     if [ $INSTALL_INGRESS == false ]; then
         cat >> /etc/rancher/rke2/config.yaml <<EOF
