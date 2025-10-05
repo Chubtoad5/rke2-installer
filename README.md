@@ -24,19 +24,19 @@ chmod +x rke2_installer.sh
 - (Optional) edit rke2_installer.sh variables in USER DEFINED VARIABLES section
 - Run script as sudo or root user
 ```
-Usage: $SCRIPT_NAME [install] [unintall] [save] [push] [join [server|agent] server-fqdn join-token-string] [registry:port username password] [tls-san [server-fqdn-ip]] 
+Usage: $SCRIPT_NAME [install] [unintall] [save] [push] [join [server|agent] server-fqdn join-token-string] [-tls-san [server-fqdn-ip]] [-registry [registry:port username password]]
 
 - This script must be run with root privileges.
-- At least one parameter of [install], [uninstall], [save], [push], or [join] must be specified. 
+- At least one command of [install], [uninstall], [save], [push], or [join] must be specified. 
 - When [push] is specified, [registry:port username password] must be provided. The correct project path must exist on the registry (i.e. my.registry.com:443/rancher). See README.md for details.
-- When [registry:port username password] is specified with [install] or [join], rke2 will use the private registry as a mirror to pull images.
-- When [join] is specified, an install type, [server-fqdn] and [join-token-string] must be provided from an existing cluster. (Comming soon!)
-- When [tls-san] is specified, install and join operations will add the [server-fqdn-ip] as the tls-san of the server configuration.
+- When [join] is specified, an install type, [server-fqdn] and [join-token-string] must be provided from an existing cluster.
+- When [-registry [registry:port username password]] is specified with [install] or [join], rke2 will use the private registry as a mirror to pull images.
+- When [-tls-san] is specified, install and join operations will add the [server-fqdn-ip] as the tls-san of the server configuration.
 - To change the default install configuration, edit $SCRIPT_NAME USER DEFINED VARIABLES before running. See README.md for details.
 
 Commands:
   install   : Installs rke2 and dependencies from the internet as a single-node untainted server.
-              If a version file is detected in the directory, rke2 will be installed from offline tar package.
+              If an rke2-save.tar.gz file is detected in the directory, rke2 will be installed from offline tar package.
   uninstall : Uninstalls rke2 from the host.
   save      : Prepares an offline tar package with all rke2 install files and dependencies.
   push      : Pushes rke2 images to the specified registry. If a on offline tar package is not found, it will first pull from the internet.
