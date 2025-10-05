@@ -1,7 +1,6 @@
 #!/bin/bash
 
-# --- Script Configuration ---
-# Set strict mode to catch errors early
+# --- Script Configuration - DO NOT EDIT --- #
 set -o errexit
 set -o nounset
 set -o pipefail
@@ -20,7 +19,7 @@ LOCAL_PATH_PROVISIONER_VERSION=v0.0.32
 INSTALL_DNS_UTILITY=true
 DEBUG=1
 
-# --- INTERNAL VARIABLES --- #
+# --- INTERNAL VARIABLES - DO NOT EDIT --- #
 user_name=$SUDO_USER
 SCRIPT_NAME=$(basename "$0")
 AIR_GAPPED_MODE=0
@@ -95,7 +94,7 @@ EOF
 
 # --- Start Argument parsing and validation --- #
 
-# Check for root privileges (optional, but good practice based on the usage output)
+# Check for root privileges
 if [[ $EUID -ne 0 ]]; then
    echo "This script must be run with root privileges."
    echo "Type './$SCRIPT_NAME -h' for help."
@@ -318,9 +317,6 @@ run_install () {
         config_host_settings
         start_rke2_service
         apply_utilities
-        local join_token=$(cat /var/lib/rancher/rke2/server/node-token)
-        echo "Join token stored in:/var/lib/rancher/rke2/server/node-token"
-        echo "Join token for this cluster is: $join_token"
     fi
     if [[ $JOIN_MODE -eq 1 && $JOIN_TYPE == "agent" ]]; then
         create_agent_join_config
@@ -354,7 +350,7 @@ start_rke2_service () {
         echo "rke2 service started successfully."
     fi
     if [[ $JOIN_TYPE == "agent" ]]; then
-        echo "Agent install completed, check server status for details"
+        echo "Agent install completed, check the status with 'kubectl get nodes' and 'kubectl get pods -A' on the server for details."
     else
         echo "Waiting for pods to start..."
         sleep 15
@@ -758,6 +754,50 @@ push_rke2_images () {
 
 # --- Helper Functions --- #
 
+runtime_outputs () {
+    if [[ $PUSH_MODE -eq 1 ]]; then
+        echo "----"
+        echo "Push to external registry $REG_FQDN completed, check the registry to confirm images are present"
+    fi
+    if [[ $SAVE_MODE -eq 1 ]]; then
+        echo "----"
+        echo "Air-gapped archive 'rke2-save.tar.gz' created."
+        echo "Copy the archive to an air-gapped host runing the same version of $os_id and extract it with 'tar -xzf rke2-save.tar.gz'."
+    fi
+    if [[ $INSTALL_MODE -eq 1 ]]; then
+        local join_token=$(cat /var/lib/rancher/rke2/server/node-token)
+        local host_ip=$(hostname -I |awk '{print $1}')
+        echo "----"
+        echo "RKE2 Server installed successfully."
+        echo "Verify API is reachable at:"
+        echo "https://$host_ip:6443"
+        if [[ $TLS_SAN_MODE -eq 1 ]]; then
+            echo "https://$TLS_SAN:6443"
+        fi
+        echo "Join token stored in: /var/lib/rancher/rke2/server/node-token"
+        if [[ $TLS_SAN_MODE -eq 1 ]]; then
+            echo "To join more nodes to this cluster use the following config:"
+            echo "server: https://$TLS_SAN:9345"
+            echo "token: $join_token"
+        else
+            echo "To join more nodes to this cluster use the following config:"
+            echo "server: https://$host_ip:9345"
+            echo "token: $join_token"
+        fi
+        echo "kube config stored in: /etc/rancher/rke2/rke2.yaml and coppied to /home/$user_name/.kube/config"
+        echo "Run 'source ~/.bashrc' to enable Kubectl on this shell session."
+    fi
+    if [[ $JOIN_MODE -eq 1 ]]; then
+        if [[ $JOIN_TYPE == "server" ]]; then
+            echo "Server join completed, check the status with 'kubectl get nodes' and 'kubectl get pods -A' on the server for details."
+            echo "kube config stored in: /etc/rancher/rke2/rke2.yaml and coppied to /home/$user_name/.kube/config"
+            echo "Run 'source ~/.bashrc' to enable Kubectl on this shell session."
+        else
+            echo "Agent install completed, check the status with 'kubectl get nodes' and 'kubectl get pods -A' on the server for details."
+        fi
+    fi
+}
+
 create_working_dir () {
     # check for rke2-install directory and supporting directories, then create them
     if [[ $AIR_GAPPED_MODE -eq 1 ]]; then
@@ -898,5 +938,6 @@ run_debug run_save
 run_debug run_push
 run_debug run_install
 cleanup
+runtime_outputs
 
 echo "--- RKE2 installer script complete ---"
