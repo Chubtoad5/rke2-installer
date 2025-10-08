@@ -20,7 +20,7 @@ INSTALL_DNS_UTILITY=${INSTALL_DNS_UTILITY:-"true"}
 DEBUG=${DEBUG:-"1"}
 
 # --- INTERNAL VARIABLES - DO NOT EDIT --- #
-user_name=$SUDO_USER
+user_name=${SUDO_USER:-}
 SCRIPT_NAME=$(basename "$0")
 AIR_GAPPED_MODE=0
 SAVE_MODE=0
@@ -135,17 +135,17 @@ while [[ "$#" -gt 0 ]]; do
             JOIN_SERVER_FQDN="${3:-}"
             JOIN_TOKEN="${4:-}"
             if [[ -z "$JOIN_TYPE" || "$JOIN_TYPE" != "agent" && "$JOIN_TYPE" != "server" ]]; then
-                echo "Error: 'join' command requires a join type. Format: join [server|agent] [join-token-string]"
+                echo "Error: 'join' command requires a join type. Format: join [server|agent] [server-fqdn] [join-token-string]"
                 echo "Type './$SCRIPT_NAME -h' for help."
                 exit 1
             fi
             if [[ -z "$JOIN_SERVER_FQDN" ]]; then
-                echo "Error: 'join' command requires a server fqdn/ip. Format: join [server|agent] [join-token-string]"
+                echo "Error: 'join' command requires a server fqdn/ip. Format: join [server|agent] [server-fqdn] [join-token-string]"
                 echo "Type './$SCRIPT_NAME -h' for help."
                 exit 1
             fi
             if [[ -z "$JOIN_TOKEN" ]]; then
-                echo "Error: 'join' command requires a join token. Format: join [server|agent] [join-token-string]"
+                echo "Error: 'join' command requires a join token. Format: join [server|agent] [server-fqdn] [join-token-string]"
                 echo "Type './$SCRIPT_NAME -h' for help."
                 exit 1
             fi
@@ -158,7 +158,7 @@ while [[ "$#" -gt 0 ]]; do
             TLS_SAN_MODE=1
             TLS_SAN="${2:-}"
             if [[ -z "$TLS_SAN" ]]; then
-                echo "Error: 'tls-san' command requires a server fqdn/ip. Format: tls-san [server-fqdn-ip]"
+                echo "Error: '-tls-san' command requires a server fqdn/ip. Format: -tls-san [server-fqdn-ip]"
                 echo "Type './$SCRIPT_NAME -h' for help."
                 exit 1
             fi
@@ -167,7 +167,7 @@ while [[ "$#" -gt 0 ]]; do
             ;;
         -registry)
             REGISTRY_MODE=1
-            REGISTRY_INFO="$2"
+            REGISTRY_INFO="${2:-}"
             REG_USER="${3:-}"
             REG_PASS="${4:-}"
             if [[ -z "$REG_USER" || -z "$REG_PASS" ]]; then
@@ -206,7 +206,12 @@ if [[ "$PUSH_MODE" == "1"  ]]; then
         exit 1
     fi
     if [[ "$REGISTRY_MODE" == "0" ]]; then
-        echo "Error: 'push' command requires registry config. Format: push registry [registry:port] [username] [password]"
+        echo "Error: 'push' command requires registry config. Format: push -registry [registry:port] [username] [password]"
+        echo "Type './$SCRIPT_NAME -h' for help."
+        exit 1
+    fi
+    if [[ "$TLS_SAN_MODE" == "1" && "$INSTALL_MODE" == "0" ]]; then
+        echo "Error: 'push' command cannot be used with '-tls-san'."
         echo "Type './$SCRIPT_NAME -h' for help."
         exit 1
     fi
