@@ -701,7 +701,7 @@ download_rke2_utilities () {
     if [[ $INSTALL_LOCAL_PATH_PROVISIONER == "true" ]]; then
         echo "Downloading local-path-provisioner manifest..."
         curl -sfL https://raw.githubusercontent.com/rancher/local-path-provisioner/$LOCAL_PATH_PROVISIONER_VERSION/deploy/local-path-storage.yaml -o $WORKING_DIR/rke2-utilities/local-path-storage.yaml
-        cat $WORKING_DIR/rke2-utilities/local-path-storage.yaml |grep image: |cut -d: -f2-3 | awk '{sub(/^ /, ""); print}' > $WORKING_DIR/rke2-utilities/images/utility-images.txt
+        cat $WORKING_DIR/rke2-utilities/local-path-storage.yaml |grep image: |cut -d: -f2-3 | awk '{sub(/^ /, ""); print}' >> $WORKING_DIR/rke2-utilities/images/utility-images.txt
     fi
     # Download k8s dns utils regardless so docker binaries get saved by image_pull_push.sh
     echo "Downloading k8s dns utils manifest..."
