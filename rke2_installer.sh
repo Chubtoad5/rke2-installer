@@ -718,7 +718,7 @@ download_rke2_utilities () {
 
 create_save_archive () {
     # saves downloaded files into rke2-save.tar.gz
-    echo "Creating final archive..."
+    echo "Creating rke2 archive..."
     tar -czf rke2-save.tar.gz rke2-install rke2_installer.sh
     echo "Air-gapped archive 'rke2-save.tar.gz' created."
 }
