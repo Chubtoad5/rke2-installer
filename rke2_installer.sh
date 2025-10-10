@@ -581,17 +581,16 @@ EOF
 }
 
 config_host_settings () {
+    # Common kubernetes requirments
     echo "Enabling overlay and br_netfilter modules..."
     cat > /etc/modules-load.d/40-k8s.conf <<EOF
 overlay
 br_netfilter
 EOF
     modprobe -a overlay br_netfilter
-    echo "Disabling swap space and ufw..."
+    echo "Disabling swap space..."
     swapoff -a
     sed -i -e '/swap/d' /etc/fstab
-    systemctl stop ufw
-    systemctl disable ufw
     echo "Enabling k8s sysctl parameters..."
     cat > /etc/sysctl.d/40-k8s.conf <<EOF
 net.bridge.bridge-nf-call-ip6tables = 1
@@ -609,6 +608,66 @@ EOF
         exit 1 
     else
         echo "systemd-sysctl.service restarted successfully."
+    fi
+# Disable multipath and firewall services
+    if systemctl list-unit-files --no-legend --no-pager | grep -q "multipathd.service"; then
+        echo "Stopping and disabling multipathd..."
+        systemctl stop multipathd 2>/dev/null || true
+        systemctl disable multipathd 2>/dev/null || true
+        # Status checks also use || echo '...' for robustness in strict mode
+        echo "  - Status: $(systemctl is-active multipathd 2>/dev/null || echo 'inactive') / $(systemctl is-enabled multipathd 2>/dev/null || echo 'disabled')"
+    else
+        echo "multipathd service not found. Skipping."
+    fi
+ # Disable native firewall services
+    echo "Disabling native firewall services..."
+    if [[ "${OS_ID}" =~ ^(ubuntu|debian)$ ]] || [[ "${OS_ID_LIKE}" =~ (debian|ubuntu) ]]; then
+        echo "  - Detected Debian/Ubuntu family."
+        if command -v ufw &>/dev/null; then
+            echo "  - Disabling UFW (Uncomplicated Firewall)..."
+            ufw disable || true
+            # UFW status is safe for pipefail as 'ufw status' usually returns 0 if installed.
+            echo "  - UFW Status: $(ufw status | grep 'Status:' || echo 'Status: inactive (check failed)')"
+        else
+            echo "  - UFW not installed. Skipping UFW disablement."
+        fi
+    # Check for RHEL/CentOS/Rocky/AlmaLinux/Fedora family (ID_LIKE or ID contains rhel/fedora/centos)
+    elif [[ "${OS_ID}" =~ ^(rhel|centos|rocky|almalinux|fedora)$ ]] || [[ "${OS_ID_LIKE}" =~ (rhel|fedora|centos) ]]; then
+        echo "  - Detected RHEL/Fedora family."
+        if systemctl list-unit-files --no-legend --no-pager | grep -q "firewalld.service"; then
+            echo "  - Stopping and disabling firewalld..."
+            systemctl stop firewalld 2>/dev/null || true
+            systemctl disable firewalld 2>/dev/null || true
+            echo "  - Status: $(systemctl is-active firewalld 2>/dev/null || echo 'inactive') / $(systemctl is-enabled firewalld 2>/dev/null || echo 'disabled')"
+        else
+            echo "  - 'firewalld' service not found. Skipping."
+        fi
+    # Check for SLES/OpenSUSE (ID_LIKE or ID contains suse/sles)
+    elif [[ "${OS_ID}" =~ ^(sles|opensuse-leap)$ ]] || [[ "${OS_ID_LIKE}" =~ (suse|sles) ]]; then
+        echo "  - Detected SLES/OpenSUSE family."
+        FIREWALL_DISABLED=false
+        # Check firewalld first (common on modern SUSE)
+        if systemctl list-unit-files --no-legend --no-pager | grep -q "firewalld.service"; then
+            echo "  - Stopping and disabling firewalld..."
+            systemctl stop firewalld 2>/dev/null || true
+            systemctl disable firewalld 2>/dev/null || true
+            echo "  - Status (firewalld): $(systemctl is-active firewalld 2>/dev/null || echo 'inactive') / $(systemctl is-enabled firewalld 2>/dev/null || echo 'disabled')"
+            FIREWALL_DISABLED=true
+        fi
+        # Check SuSEfirewall2
+        if systemctl list-unit-files --no-legend --no-pager | grep -q "SuSEfirewall2.service"; then
+            echo "  - Stopping and disabling SuSEfirewall2..."
+            systemctl stop SuSEfirewall2 2>/dev/null || true
+            systemctl disable SuSEfirewall2 2>/dev/null || true
+            echo "  - Status (SuSEfirewall2): $(systemctl is-active SuSEfirewall2 2>/dev/null || echo 'inactive') / $(systemctl is-enabled SuSEfirewall2 2>/dev/null || echo 'disabled')"
+            FIREWALL_DISABLED=true
+        fi
+        if [ "$FIREWALL_DISABLED" == false ]; then
+             echo "  - Firewall service (firewalld or SuSEfirewall2) not found. Skipping."
+        fi
+    else
+        echo "  - WARNING: OS not explicitly handled for firewall configuration."
+        echo "    Please manually verify the firewall service is stopped and disabled."
     fi
 }
 
@@ -668,7 +727,7 @@ run_save () {
         download_rke2_utilities
         create_save_archive
         echo "--- Finished save workflow ---"
-        echo "Copy the archive to an air-gapped host runing the same version of $os_id"
+        echo "Copy the archive to an air-gapped host runing the same version of $OS_ID"
     fi 
 }
 
@@ -786,7 +845,7 @@ runtime_outputs () {
     if [[ $SAVE_MODE -eq 1 ]]; then
         echo "----"
         echo "Air-gapped archive 'rke2-save.tar.gz' created."
-        echo "Copy the archive to an air-gapped host runing the same version of $os_id and extract it with 'tar -xzf rke2-save.tar.gz'."
+        echo "Copy the archive to an air-gapped host runing the same version of $OS_ID and extract it with 'tar -xzf rke2-save.tar.gz'."
     fi
     if [[ $INSTALL_MODE -eq 1 ]]; then
         local join_token=$(cat /var/lib/rancher/rke2/server/node-token)
@@ -845,13 +904,14 @@ os_check () {
         # shellcheck disable=SC1091
         source /etc/os-release
         echo "OS type is: $ID"
-        os_id="$ID"
+        OS_ID_LIKE="${ID_LIKE:-}"
+        OS_ID="${ID:-}"
     else
-        echo "Unknown or unsupported OS $os_id."
+        echo "Unknown or unsupported OS $OS_ID."
         exit 1
     fi
-    if [[ ! "$os_id" =~ ^(ubuntu|debian|rhel|centos|rocky|almalinux|fedora|sles|opensuse-leap)$ ]]; then
-        echo "Unknown or unsupported OS $os_id."
+    if [[ ! "$OS_ID" =~ ^(ubuntu|debian|rhel|centos|rocky|almalinux|fedora|sles|opensuse-leap)$ ]]; then
+        echo "Unknown or unsupported OS $OS_ID."
         exit 1
     fi
 }
