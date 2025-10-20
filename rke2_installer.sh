@@ -218,11 +218,11 @@ install_rke2_binaries () {
 
 create_registry_config () {
     if [[ "$REGISTRY_MODE" -eq 1 ]]; then
-        echo "Configuring private registry for RKE2..."
+        echo "  Configuring private registry for RKE2..."
         CERTS_DIR="/etc/rancher/rke2/certs.d/${REG_FQDN}:${REG_PORT}"
         mkdir -p "$CERTS_DIR"
         if openssl s_client -showcerts -connect "$REGISTRY_INFO" < /dev/null 2>/dev/null | openssl x509 -outform PEM > "$CERTS_DIR/ca.crt"; then
-            echo "Certificate saved to $CERTS_DIR."
+            echo "  Certificate saved to $CERTS_DIR."
         else
             echo "Error: Failed to retrieve certificate from '$REG_FQDN'. Please ensure the registry is accessible and the port is correct."
             exit 1
@@ -250,14 +250,14 @@ EOF
       - "https://${REG_FQDN}:${REG_PORT}"
 EOF
         fi
-        echo "Private registry configuration written to /etc/rancher/rke2/registries.yaml"
+        echo "  Private registry configuration written to /etc/rancher/rke2/registries.yaml"
     else
-        echo "Private registry not enabled. Skipping registry configuration."
+        echo "  Private registry not enabled. Skipping registry configuration."
     fi
 }
 
 create_agent_join_config () {
-    echo "Generating /etc/rancher/rke2/config.yaml for agent"
+    echo "  Generating /etc/rancher/rke2/config.yaml for agent"
     cat > /etc/rancher/rke2/config.yaml <<EOF
 server: https://${JOIN_SERVER_FQDN}:9345
 token: "$JOIN_TOKEN"
@@ -270,7 +270,7 @@ EOF
 }
 
 create_server_join_config () {
-    echo "Generating /etc/rancher/rke2/config.yaml for server join"
+    echo "  Generating /etc/rancher/rke2/config.yaml for server join"
     cat > /etc/rancher/rke2/config.yaml <<EOF
 server: https://${JOIN_SERVER_FQDN}:9345
 token: "$JOIN_TOKEN"
@@ -720,7 +720,7 @@ os_check () {
 
 image_pull_push_check () {
     if [[ ! -f $WORKING_DIR/rke2-utilities/image_pull_push.sh ]]; then
-        echo "Downloading image_pull_push.sh..."
+        echo "  Downloading image_pull_push.sh..."
         curl -sfL https://github.com/Chubtoad5/images-pull-push/raw/refs/heads/main/image_pull_push.sh  -o $WORKING_DIR/rke2-utilities/image_pull_push.sh
         chmod +x $WORKING_DIR/rke2-utilities/image_pull_push.sh
     fi
