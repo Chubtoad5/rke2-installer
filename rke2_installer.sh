@@ -642,27 +642,24 @@ push_rke2_images () {
 
 runtime_outputs () {
     if [[ $PUSH_MODE -eq 1 ]]; then
-        echo "----"
-        echo "Push to external registry $REG_FQDN completed, check the registry to confirm images are present"
+        echo "  Push to external registry $REG_FQDN completed, check the registry to confirm images are present"
     fi
     if [[ $SAVE_MODE -eq 1 ]]; then
-        echo "----"
-        echo "Air-gapped archive 'rke2-save.tar.gz' created."
-        echo "Copy the archive to an air-gapped host runing the same version of $OS_ID and extract it with 'tar -xzf rke2-save.tar.gz'."
+        echo "  Air-gapped archive 'rke2-save.tar.gz' created."
+        echo "  Copy the archive to an air-gapped host runing the same version of $OS_ID and extract it with 'tar -xzf rke2-save.tar.gz'."
     fi
     if [[ $INSTALL_MODE -eq 1 ]]; then
         local join_token=$(cat /var/lib/rancher/rke2/server/node-token)
         local host_ip=$(hostname -I |awk '{print $1}')
-        echo "----"
-        echo "RKE2 Server installed successfully."
-        echo "Verify API is reachable at:"
-        echo "https://$host_ip:6443"
+        echo "  RKE2 Server installed successfully."
+        echo "  Verify API is reachable at:"
+        echo "    https://$host_ip:6443"
         if [[ $TLS_SAN_MODE -eq 1 ]]; then
-            echo "https://$TLS_SAN:6443"
+            echo "    https://$TLS_SAN:6443"
         fi
-        echo "Join token stored in: /var/lib/rancher/rke2/server/node-token"
+        echo "  Join token stored in: /var/lib/rancher/rke2/server/node-token"
         if [[ $TLS_SAN_MODE -eq 1 ]]; then
-            echo "To join more nodes to this cluster use the following config:"
+            echo "  To join more nodes to this cluster use the following config:"
             echo "----"
             echo "server: https://$TLS_SAN:9345"
             echo "token: $join_token"
@@ -674,16 +671,16 @@ runtime_outputs () {
             echo "token: $join_token"
             echo "----"
         fi
-        echo "Kube config stored in: /etc/rancher/rke2/rke2.yaml and coppied to /home/$user_name/.kube/config"
-        echo "Run 'source ~/.bashrc' to enable Kubectl on this shell session."
+        echo "  Kube config stored in: /etc/rancher/rke2/rke2.yaml and coppied to /home/$user_name/.kube/config"
+        echo "  Run 'source ~/.bashrc' to enable Kubectl on this shell session."
     fi
     if [[ $JOIN_MODE -eq 1 ]]; then
         if [[ $JOIN_TYPE == "server" ]]; then
-            echo "Server join completed, check the status with 'kubectl get nodes' and 'kubectl get pods -A' on the server for details."
-            echo "kube config stored in: /etc/rancher/rke2/rke2.yaml and coppied to /home/$user_name/.kube/config"
-            echo "Run 'source ~/.bashrc' to enable Kubectl on this shell session."
+            echo "  Server join completed, check the status with 'kubectl get nodes' and 'kubectl get pods -A' on the server for details."
+            echo "  kube config stored in: /etc/rancher/rke2/rke2.yaml and coppied to /home/$user_name/.kube/config"
+            echo "  Run 'source ~/.bashrc' to enable Kubectl on this shell session."
         else
-            echo "Agent install completed, check the status with 'kubectl get nodes' and 'kubectl get pods -A' on the server for details."
+            echo "  Agent install completed, check the status with 'kubectl get nodes' and 'kubectl get pods -A' on the server for details."
         fi
     fi
 }
@@ -734,7 +731,7 @@ check_namespace_pods_ready() {
   local ns=${1:-"kube-system"}
   while true; do
     local completed_pods=$(kubectl get pods -n $ns --field-selector status.phase=Succeeded -o name)
-    echo "  - Checking pod status in $ns namespace..."
+    echo "  Checking pod status in $ns namespace..."
     for pod_name in $completed_pods; do
       kubectl delete -n $ns "$pod_name" --ignore-not-found
     done
@@ -749,7 +746,7 @@ check_namespace_pods_ready() {
       break
     fi
     echo "  - Wating on $current_pods_not_ready pods..."
-    echo "    Elapsed: ${elapsed_time}s/${timeout_seconds}s"
+    echo "  - Elapsed: ${elapsed_time}s/${timeout_seconds}s"
     sleep 10
   done
   echo "  - All pods are ready in $ns namespace!"
@@ -1001,5 +998,4 @@ if [[ $INSTALL_MODE -eq 1 || ($JOIN_MODE -eq 1 && $JOIN_TYPE == "agent") || ($JO
 fi
 cleanup
 runtime_outputs
-
-echo "--- RKE2 installer script complete ---"
+echo "### RKE2 Installer Completed at $(date) ###"
