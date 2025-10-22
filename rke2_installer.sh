@@ -593,6 +593,10 @@ create_save_archive () {
 # -- Push Definitions -- #
 run_push () {
     echo "--- Running push workflow"
+    # check if save has already run so files are not downloaded again
+    if [[ $SAVE_MODE -eq 1 ]]; then
+        $AIR_GAPPED_MODE=1
+    fi
     push_utility_images
     push_rke2_images
     echo "--- Finished push workflow"
