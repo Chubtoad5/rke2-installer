@@ -398,6 +398,7 @@ config_host_settings () {
     cat > /etc/modules-load.d/40-k8s.conf <<EOF
 overlay
 br_netfilter
+dm_crypt
 EOF
     modprobe -a overlay br_netfilter
     echo "  Disabling swap space"
