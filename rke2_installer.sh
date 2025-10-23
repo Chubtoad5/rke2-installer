@@ -424,13 +424,28 @@ EOF
 # Disable multipath and firewall services
     if systemctl list-unit-files --no-legend --no-pager | grep -q "multipathd.service"; then
         echo "  Stopping and disabling multipathd"
-        systemctl stop multipathd 2>/dev/null || true
-        systemctl disable multipathd 2>/dev/null || true
-        # Status checks also use || echo '...' for robustness in strict mode
-        echo "  - Status: $(systemctl is-active multipathd 2>/dev/null || echo 'inactive') / $(systemctl is-enabled multipathd 2>/dev/null || echo 'disabled')"
-    else
-        echo "  multipathd service not found. Skipping."
+        systemctl stop multipathd.service 2>/dev/null || true
+        systemctl disable multipathd.service 2>/dev/null || true
+        systemctl mask multipathd.service 2>/dev/null || true
     fi
+
+    if systemctl list-unit-files --no-legend --no-pager | grep -q "multipathd.socket"; then
+        echo "  Stopping and disabling multipathd.socket"
+        systemctl stop multipathd.socket 2>/dev/null || true
+        systemctl disable multipathd.socket 2>/dev/null || true
+        systemctl mask multipathd.socket 2>/dev/null || true
+    fi
+    echo "  - Service status: $(systemctl is-active multipathd 2>/dev/null || echo 'inactive') / $(systemctl is-enabled multipathd 2>/dev/null || echo 'disabled')"
+    echo "  - Socket status:  $(systemctl is-active multipathd.socket 2>/dev/null || echo 'inactive') / $(systemctl is-enabled multipathd.socket 2>/dev/null || echo 'disabled')"
+    # if systemctl list-unit-files --no-legend --no-pager | grep -q "multipathd.service"; then
+    #     echo "  Stopping and disabling multipathd"
+    #     systemctl stop multipathd 2>/dev/null || true
+    #     systemctl disable multipathd 2>/dev/null || true
+    #     # Status checks also use || echo '...' for robustness in strict mode
+    #     echo "  - Status: $(systemctl is-active multipathd 2>/dev/null || echo 'inactive') / $(systemctl is-enabled multipathd 2>/dev/null || echo 'disabled')"
+    # else
+    #     echo "  multipathd service not found. Skipping."
+    # fi
  # Disable native firewall services
     echo "  Disabling native firewall services"
     if [[ "${OS_ID}" =~ ^(ubuntu|debian)$ ]] || [[ "${OS_ID_LIKE}" =~ (debian|ubuntu) ]]; then
