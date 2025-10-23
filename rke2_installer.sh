@@ -631,6 +631,9 @@ push_utility_images () {
             cat $WORKING_DIR/rke2-utilities/dnsutils.yaml |grep image: |cut -d: -f2-3 | awk '{sub(/^ /, ""); print}' >> $WORKING_DIR/rke2-utilities/images/utility-images.txt
         fi
         image_pull_push_check
+        echo "--- Printing utility-images.txt"
+        cat $WORKING_DIR/rke2-utilities/images/utility-images.txt
+        echo "---"
         $WORKING_DIR/rke2-utilities/image_pull_push.sh -f $WORKING_DIR/rke2-utilities/images/utility-images.txt push $REGISTRY_INFO $REG_USER $REG_PASS
     else
         echo "  No utility images to push"
