@@ -250,6 +250,13 @@ EOF
       - "https://${REG_FQDN}:${REG_PORT}"
 EOF
         fi
+        if [[ $INSTALL_METALLB == "true" ]]; then
+            cat >> /etc/rancher/rke2/registries.yaml <<EOF
+  quay.io:
+    endpoint:
+      - "https://${REG_FQDN}:${REG_PORT}"
+EOF
+        fi
         echo "  Private registry configuration written to /etc/rancher/rke2/registries.yaml"
     else
         echo "  Private registry not enabled. Skipping registry configuration."
@@ -400,7 +407,7 @@ overlay
 br_netfilter
 dm_crypt
 EOF
-    modprobe -a overlay br_netfilter dm_crypt
+    modprobe -a overlay br_netfilter dm_crypt nfs
     echo "  Disabling swap space"
     swapoff -a
     sed -i -e '/swap/d' /etc/fstab
