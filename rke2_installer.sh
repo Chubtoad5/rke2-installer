@@ -400,7 +400,7 @@ overlay
 br_netfilter
 dm_crypt
 EOF
-    modprobe -a overlay br_netfilter
+    modprobe -a overlay br_netfilter dm_crypt
     echo "  Disabling swap space"
     swapoff -a
     sed -i -e '/swap/d' /etc/fstab
