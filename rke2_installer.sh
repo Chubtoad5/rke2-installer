@@ -624,7 +624,7 @@ push_utility_images () {
     elif [[ $AIR_GAPPED_MODE -eq 0 ]]; then
         if [[ $INSTALL_LOCAL_PATH_PROVISIONER == "true" ]]; then
             curl -sfL https://raw.githubusercontent.com/rancher/local-path-provisioner/$LOCAL_PATH_PROVISIONER_VERSION/deploy/local-path-storage.yaml -o $WORKING_DIR/rke2-utilities/local-path-storage.yaml
-            cat $WORKING_DIR/rke2-utilities/local-path-storage.yaml |grep image: |cut -d: -f2-3 | awk '{sub(/^ /, ""); print}' > $WORKING_DIR/rke2-utilities/images/utility-images.txt
+            cat $WORKING_DIR/rke2-utilities/local-path-storage.yaml |grep image: |cut -d: -f2-3 | awk '{sub(/^ /, ""); print}' >> $WORKING_DIR/rke2-utilities/images/utility-images.txt
         fi
         if [[ $INSTALL_DNS_UTILITY == "true" ]]; then
             curl -sfL https://raw.githubusercontent.com/kubernetes/website/main/content/en/examples/admin/dns/dnsutils.yaml -o $WORKING_DIR/rke2-utilities/dnsutils.yaml
