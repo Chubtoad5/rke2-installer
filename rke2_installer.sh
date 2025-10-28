@@ -411,11 +411,12 @@ EOF
 
 config_host_settings () {
     # Common kubernetes requirments
-    echo "  Enabling overlay, br_netfilter modules"
+    echo "  Enabling overlay, br_netfilter, dm_crypt, and nfs modules"
     cat > /etc/modules-load.d/40-k8s.conf <<EOF
 overlay
 br_netfilter
 dm_crypt
+nfs
 EOF
     modprobe -a overlay br_netfilter dm_crypt nfs
     echo "  Disabling swap space"
