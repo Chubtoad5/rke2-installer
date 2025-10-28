@@ -277,6 +277,11 @@ EOF
 }
 
 create_server_join_config () {
+    if [[ -L /etc/resolv.conf ]]; then
+        resolv_conf_file=$(readlink -f /etc/resolv.conf)
+    else
+        resolv_conf_file="/etc/resolv.conf"
+    fi
     echo "  Generating /etc/rancher/rke2/config.yaml for server join"
     cat > /etc/rancher/rke2/config.yaml <<EOF
 server: https://${JOIN_SERVER_FQDN}:9345
@@ -290,7 +295,7 @@ etcd-extra-env:
   - "ETCD_AUTO_COMPACTION_MODE=periodic"
 kubelet-arg:
   - "max-pods=$MAX_PODS"
-  - "resolv-conf=/run/systemd/resolve/resolv.conf"
+  - "resolv-conf=$resolv_conf_file"
 kube-apiserver-arg:
   - "audit-log-path=/var/log/rke2-apiserver-audit.log"
   - "audit-log-maxage=30"
@@ -445,7 +450,7 @@ EOF
             echo "  NetworkManager restarted successfully"
         fi
     fi
-# Disable multipath and firewall services
+# Disable multipath services
     if systemctl list-unit-files --no-legend --no-pager | grep -q "multipathd.service"; then
         echo "  Stopping and disabling multipathd"
         systemctl stop multipathd.service 2>/dev/null || true
@@ -476,7 +481,7 @@ EOF
     # Check for RHEL/CentOS/Rocky/AlmaLinux/Fedora family (ID_LIKE or ID contains rhel/fedora/centos)
     elif [[ "${OS_ID}" =~ ^(rhel|centos|rocky|almalinux|fedora)$ ]] || [[ "${OS_ID_LIKE}" =~ (rhel|fedora|centos) ]]; then
         echo "  - Detected RHEL/Fedora family."
-        if systemctl list-unit-files --no-legend --no-pager | grep -q "firewalld.service"; then
+        if systemctl list-unit-files --no-legend --no-pager | grep "firewalld.service"; then
             echo "  - Stopping and disabling firewalld..."
             systemctl stop firewalld 2>/dev/null || true
             systemctl disable firewalld 2>/dev/null || true
@@ -489,7 +494,7 @@ EOF
         echo "  - Detected SLES/OpenSUSE family."
         FIREWALL_DISABLED=false
         # Check firewalld first (common on modern SUSE)
-        if systemctl list-unit-files --no-legend --no-pager | grep -q "firewalld.service"; then
+        if systemctl list-unit-files --no-legend --no-pager | grep "firewalld.service"; then
             echo "  - Stopping and disabling firewalld..."
             systemctl stop firewalld 2>/dev/null || true
             systemctl disable firewalld 2>/dev/null || true
@@ -497,7 +502,7 @@ EOF
             FIREWALL_DISABLED=true
         fi
         # Check SuSEfirewall2
-        if systemctl list-unit-files --no-legend --no-pager | grep -q "SuSEfirewall2.service"; then
+        if systemctl list-unit-files --no-legend --no-pager | grep "SuSEfirewall2.service"; then
             echo "  - Stopping and disabling SuSEfirewall2..."
             systemctl stop SuSEfirewall2 2>/dev/null || true
             systemctl disable SuSEfirewall2 2>/dev/null || true
