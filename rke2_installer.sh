@@ -316,6 +316,11 @@ EOF
 }
 
 create_config_files () {
+    if [[ -L /etc/resolv.conf ]]; then
+        resolv_conf_file=$(readlink -f /etc/resolv.conf)
+    else
+        resolv_conf_file="/etc/resolv.conf"
+    fi
     echo "  Generating /etc/rancher/rke2/config.yaml"
     cat > /etc/rancher/rke2/config.yaml <<EOF
 cni: "$CNI_TYPE"
@@ -328,7 +333,7 @@ etcd-extra-env:
   - "ETCD_AUTO_COMPACTION_MODE=periodic"
 kubelet-arg:
   - "max-pods=$MAX_PODS"
-  - "resolv-conf=/run/systemd/resolve/resolv.conf"
+  - "resolv-conf=$resolv_conf_file"
 kube-apiserver-arg:
   - "audit-log-path=/var/log/rke2-apiserver-audit.log"
   - "audit-log-maxage=30"
