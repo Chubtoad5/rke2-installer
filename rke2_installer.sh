@@ -429,6 +429,22 @@ EOF
     else
         echo "  systemd-sysctl.service restarted successfully"
     fi
+# Configure NetworkManager to ignore CNI interfaces if it is in use
+    if systemctl is-active --quiet NetworkManager; then
+        echo "  NetworkManager is active. Creating rke2-canal.conf..."
+        cat > /etc/NetworkManager/conf.d/rke2-canal.conf <<EOF
+[keyfile]
+unmanaged-devices=interface-name:flannel*;interface-name:cali*;interface-name:tunl*;interface-name:vxlan.calico;interface-name:vxlan-v6.calico;interface-name:wireguard.cali;interface-name:wg-v6.cali
+EOF
+        echo "  Restarting NetworkManager to apply changes..."
+        systemctl restart NetworkManager
+        if [ $? -ne 0 ]; then
+            echo "Error: NetworkManager failed to restart."
+            exit 1 
+        else
+            echo "  NetworkManager restarted successfully"
+        fi
+    fi
 # Disable multipath and firewall services
     if systemctl list-unit-files --no-legend --no-pager | grep -q "multipathd.service"; then
         echo "  Stopping and disabling multipathd"
