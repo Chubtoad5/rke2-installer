@@ -474,7 +474,7 @@ EOF
  # Disable native firewall services
     echo "  Disabling native firewall services"
     if [[ "${OS_ID}" =~ ^(ubuntu|debian)$ ]] || [[ "${OS_ID_LIKE}" =~ (debian|ubuntu) ]]; then
-        echo "  - Detected Debian/Ubuntu family."
+        echo "  - Detected $OS_ID."
         if command -v ufw &>/dev/null; then
             echo "  - Disabling UFW (Uncomplicated Firewall)..."
             ufw disable || true
@@ -485,7 +485,7 @@ EOF
         fi
     # Check for RHEL/CentOS/Rocky/AlmaLinux/Fedora family (ID_LIKE or ID contains rhel/fedora/centos)
     elif [[ "${OS_ID}" =~ ^(rhel|centos|rocky|almalinux|fedora)$ ]] || [[ "${OS_ID_LIKE}" =~ (rhel|fedora|centos) ]]; then
-        echo "  - Detected RHEL/Fedora family."
+        echo "  - Detected $OS_ID."
         if systemctl list-unit-files --no-legend --no-pager | grep "firewalld.service"; then
             echo "  - Stopping and disabling firewalld..."
             systemctl stop firewalld 2>/dev/null || true
@@ -496,7 +496,7 @@ EOF
         fi
     # Check for SLES/OpenSUSE (ID_LIKE or ID contains suse/sles)
     elif [[ "${OS_ID}" =~ ^(sles|opensuse-leap)$ ]] || [[ "${OS_ID_LIKE}" =~ (suse|sles) ]]; then
-        echo "  - Detected SLES/OpenSUSE family."
+        echo "  - Detected $OS_ID."
         FIREWALL_DISABLED=false
         # Check firewalld first (common on modern SUSE)
         if systemctl list-unit-files --no-legend --no-pager | grep "firewalld.service"; then
