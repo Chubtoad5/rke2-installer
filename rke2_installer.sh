@@ -317,7 +317,12 @@ EOF
 
 create_config_files () {
     if [[ -L /etc/resolv.conf ]]; then
-        resolv_conf_file=$(readlink -f /etc/resolv.conf)
+        resolv_link=$(readlink -f /etc/resolv.conf)
+        if [[ "$resolv_link" == "/run/systemd/resolve/stub-resolv.conf" ]]; then
+            resolv_conf_file="/run/systemd/resolve/resolv.conf"
+        else
+            resolv_conf_file="$resolv_link"
+        fi
     else
         resolv_conf_file="/etc/resolv.conf"
     fi
