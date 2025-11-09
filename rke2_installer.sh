@@ -192,9 +192,9 @@ start_rke2_service () {
         fi
         export KUBECONFIG=/home/$user_name/.kube/config
         export PATH=$PATH:/var/lib/rancher/rke2/bin
-        ln -s /var/lib/rancher/rke2/bin/kubectl /usr/local/bin/kubectl
-        ln -s /var/lib/rancher/rke2/bin/ctr /usr/local/bin/ctr
-        ln -s /var/lib/rancher/rke2/bin/crictl /usr/local/bin/crictl
+        ln -s /var/lib/rancher/rke2/bin/kubectl /usr/local/bin/kubectl || true
+        ln -s /var/lib/rancher/rke2/bin/ctr /usr/local/bin/ctr || true
+        ln -s /var/lib/rancher/rke2/bin/crictl /usr/local/bin/crictl || true
         check_namespace_pods_ready
     fi
 }
