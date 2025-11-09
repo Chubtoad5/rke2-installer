@@ -186,9 +186,6 @@ start_rke2_service () {
             cp /etc/rancher/rke2/rke2.yaml /home/$user_name/.kube/config
             chown $user_name:$user_name /home/$user_name/.kube/config
             chmod 600 /home/$user_name/.kube/config
-            # echo "export KUBECONFIG=/home/$user_name/.kube/config" >> /home/$user_name/.bashrc
-            # echo "export PATH=\$PATH:/var/lib/rancher/rke2/bin" >> /home/$user_name/.bashrc
-            # echo 'Defaults secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/var/lib/rancher/rke2/bin"' | sudo tee /etc/sudoers.d/rke2-path
         fi
         export KUBECONFIG=/home/$user_name/.kube/config
         export PATH=$PATH:/var/lib/rancher/rke2/bin
@@ -577,8 +574,11 @@ uninstall_rke2() {
     [  ! -d "/root/.kube" ] || rm -rf /root/.kube
     # Clean up the KUBECONFIG and PATH from the global environment if they were set here
     unset KUBECONFIG
-    # Restore original PATH if possible, or just remove the RKE2 bin path
-    PATH=$(echo $PATH | sed -e "s|:/var/lib/rancher/rke2/bin||g")
+    for link in /usr/local/bin/kubectl /usr/local/bin/ctr /usr/local/bin/crictl; do
+        if [ -L "$link" ] && [ "$(readlink -f "$link")" = "/var/lib/rancher/rke2/bin/$(basename "$link")" ]; then
+            rm -f "$link"
+        fi
+    done
     [ ! -d "$WORKING_DIR" ] || rm -rf "$WORKING_DIR"
     echo "  Completed"
     echo "### RKE2 Installer Ended at $(date) ###"
@@ -732,16 +732,14 @@ runtime_outputs () {
             echo "token: $join_token"
             echo "----"
         fi
-        echo "  Kube config stored in: /etc/rancher/rke2/rke2.yaml and coppied to /home/$user_name/.kube/config"
-        echo "  Run 'source ~/.bashrc' to enable Kubectl on this shell session."
+        echo "  Kube config stored in: /etc/rancher/rke2/rke2.yaml"
     fi
     if [[ $JOIN_MODE -eq 1 ]]; then
         if [[ $JOIN_TYPE == "server" ]]; then
             echo "  Server join completed, check the status with 'kubectl get nodes' and 'kubectl get pods -A' on the server for details."
-            echo "  kube config stored in: /etc/rancher/rke2/rke2.yaml and coppied to /home/$user_name/.kube/config"
-            echo "  Run 'source ~/.bashrc' to enable Kubectl on this shell session."
+            echo "  Kube config stored in: /etc/rancher/rke2/rke2.yaml"
         else
-            echo "  Agent install completed, check the status with 'kubectl get nodes' and 'kubectl get pods -A' on the server for details."
+            echo "  Agent install completed, check the status with 'kubectl get nodes' and 'kubectl get pods -A' on the server node for details."
         fi
     fi
 }
