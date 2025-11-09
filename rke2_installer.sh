@@ -186,12 +186,15 @@ start_rke2_service () {
             cp /etc/rancher/rke2/rke2.yaml /home/$user_name/.kube/config
             chown $user_name:$user_name /home/$user_name/.kube/config
             chmod 600 /home/$user_name/.kube/config
-            echo "export KUBECONFIG=/home/$user_name/.kube/config" >> /home/$user_name/.bashrc
-            echo "export PATH=\$PATH:/var/lib/rancher/rke2/bin" >> /home/$user_name/.bashrc
-            echo 'Defaults secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/var/lib/rancher/rke2/bin"' | sudo tee /etc/sudoers.d/rke2-path
+            # echo "export KUBECONFIG=/home/$user_name/.kube/config" >> /home/$user_name/.bashrc
+            # echo "export PATH=\$PATH:/var/lib/rancher/rke2/bin" >> /home/$user_name/.bashrc
+            # echo 'Defaults secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/var/lib/rancher/rke2/bin"' | sudo tee /etc/sudoers.d/rke2-path
         fi
         export KUBECONFIG=/home/$user_name/.kube/config
         export PATH=$PATH:/var/lib/rancher/rke2/bin
+        ln -s /var/lib/rancher/rke2/bin/kubectl /usr/local/bin/kubectl
+        ln -s /var/lib/rancher/rke2/bin/ctr /usr/local/bin/ctr
+        ln -s /var/lib/rancher/rke2/bin/crictl /usr/local/bin/crictl
         check_namespace_pods_ready
     fi
 }
