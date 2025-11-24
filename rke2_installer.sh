@@ -17,6 +17,7 @@ INSTALL_SERVICELB=${INSTALL_SERVICELB:-"true"}
 INSTALL_LOCAL_PATH_PROVISIONER=${INSTALL_LOCAL_PATH_PROVISIONER:-"true"}
 LOCAL_PATH_PROVISIONER_VERSION=${LOCAL_PATH_PROVISIONER_VERSION:-"v0.0.32"}
 INSTALL_DNS_UTILITY=${INSTALL_DNS_UTILITY:-"true"}
+MGMT_IP=${MGMT_IP:-$(hostname -I | awk '{print $1}')}
 DEBUG=${DEBUG:-"1"}
 
 # --- INTERNAL VARIABLES - DO NOT EDIT --- #
@@ -269,10 +270,28 @@ EOF
 }
 
 create_agent_join_config () {
+    if [[ -L /etc/resolv.conf ]]; then
+        resolv_link=$(readlink -f /etc/resolv.conf)
+        if [[ "$resolv_link" == "/run/systemd/resolve/stub-resolv.conf" ]]; then
+            resolv_conf_file="/run/systemd/resolve/resolv.conf"
+        else
+            resolv_conf_file="$resolv_link"
+        fi
+    else
+        resolv_conf_file="/etc/resolv.conf"
+    fi
     echo "  Generating /etc/rancher/rke2/config.yaml for agent"
     cat > /etc/rancher/rke2/config.yaml <<EOF
 server: https://${JOIN_SERVER_FQDN}:9345
 token: "$JOIN_TOKEN"
+node-ip: "$MGMT_IP"
+kubelet-arg:
+  - "max-pods=$MAX_PODS"
+  - "resolv-conf=$resolv_conf_file"
+node-label:
+  - "role=worker"
+node-taint:
+  - "CriticalAddonsOnly=true:NoSchedule"
 EOF
     if [ $ENABLE_CIS == true ]; then
         cat >> /etc/rancher/rke2/config.yaml <<EOF
@@ -283,7 +302,12 @@ EOF
 
 create_server_join_config () {
     if [[ -L /etc/resolv.conf ]]; then
-        resolv_conf_file=$(readlink -f /etc/resolv.conf)
+        resolv_link=$(readlink -f /etc/resolv.conf)
+        if [[ "$resolv_link" == "/run/systemd/resolve/stub-resolv.conf" ]]; then
+            resolv_conf_file="/run/systemd/resolve/resolv.conf"
+        else
+            resolv_conf_file="$resolv_link"
+        fi
     else
         resolv_conf_file="/etc/resolv.conf"
     fi
@@ -295,6 +319,8 @@ write-kubeconfig-mode: "0600"
 service-node-port-range: "443-40000"
 cluster-cidr: "$CLUSTER_CIDR"
 service-cidr: "$SERVICE_CIDR"
+advertise-address: "$MGMT_IP"
+node-ip: "$MGMT_IP"
 etcd-extra-env:
   - "ETCD_AUTO_COMPACTION_RETENTION=72h"
   - "ETCD_AUTO_COMPACTION_MODE=periodic"
@@ -338,6 +364,8 @@ write-kubeconfig-mode: "0600"
 service-node-port-range: "443-40000"
 cluster-cidr: "$CLUSTER_CIDR"
 service-cidr: "$SERVICE_CIDR"
+advertise-address: "$MGMT_IP"
+node-ip: "$MGMT_IP"
 etcd-extra-env:
   - "ETCD_AUTO_COMPACTION_RETENTION=72h"
   - "ETCD_AUTO_COMPACTION_MODE=periodic"
