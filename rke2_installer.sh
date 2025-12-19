@@ -952,7 +952,7 @@ while [[ "$#" -gt 0 ]]; do
             REG_USER="${3:-}"
             REG_PASS="${4:-}"
             if [[ -z "$REG_USER" || -z "$REG_PASS" ]]; then
-                echo "Error: Registry info requires a username and password. Format: registry [registry:port username password]"
+                echo "Error: Registry info requires a username and password. Format: -registry [registry:port username password]"
                 echo "Type './$SCRIPT_NAME -h' for help."
                 exit 1
             fi
