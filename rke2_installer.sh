@@ -188,7 +188,7 @@ start_rke2_service () {
             chown $user_name:$user_name /home/$user_name/.kube/config
             chmod 600 /home/$user_name/.kube/config
         fi
-        export KUBECONFIG=/home/$user_name/.kube/config
+        export KUBECONFIG=/root/.kube/config
         export PATH=$PATH:/var/lib/rancher/rke2/bin
         ln -s /var/lib/rancher/rke2/bin/kubectl /usr/local/bin/kubectl || true
         ln -s /var/lib/rancher/rke2/bin/ctr /usr/local/bin/ctr || true
@@ -245,6 +245,9 @@ mirrors:
   docker.io:
     endpoint:
       - "https://${REG_FQDN}:${REG_PORT}"
+  quay.io:
+    endpoint:
+      - "https://${REG_FQDN}:${REG_PORT}"
   ${REG_FQDN}:${REG_PORT}:
     endpoint:
       - "https://${REG_FQDN}:${REG_PORT}"
@@ -252,13 +255,6 @@ EOF
         if [[ $INSTALL_DNS_UTILITY == "true" ]]; then
             cat >> /etc/rancher/rke2/registries.yaml <<EOF
   registry.k8s.io:
-    endpoint:
-      - "https://${REG_FQDN}:${REG_PORT}"
-EOF
-        fi
-        if [[ $INSTALL_METALLB == "true" ]]; then
-            cat >> /etc/rancher/rke2/registries.yaml <<EOF
-  quay.io:
     endpoint:
       - "https://${REG_FQDN}:${REG_PORT}"
 EOF
