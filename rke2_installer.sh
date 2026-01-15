@@ -879,6 +879,9 @@ if [[ $EUID -ne 0 ]]; then
    echo "Type './$SCRIPT_NAME -h' for help."
    exit 1
 fi
+if [[ -z "$user_name" ]]; then
+    user_name=$(logname)
+fi
 # Check for no arguments, and show usage if none are provided
 if [[ "$#" -eq 0 ]]; then
     echo "Error: No arguments provided."
