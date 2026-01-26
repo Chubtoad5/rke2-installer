@@ -329,6 +329,16 @@ kube-apiserver-arg:
   - "audit-log-maxbackup=10"
   - "audit-log-maxsize=200"
 EOF
+    if [ $INSTALL_INGRESS == false ]; then
+        cat >> /etc/rancher/rke2/config.yaml <<EOF
+disable:
+  - rke2-ingress-nginx
+EOF
+    fi
+    if [[ $INSTALL_SERVICELB == true ]]; then
+        cat >> /etc/rancher/rke2/config.yaml <<EOF
+enable-servicelb: $INSTALL_SERVICELB
+EOF
     if [ $ENABLE_CIS == true ]; then
         cat >> /etc/rancher/rke2/config.yaml <<EOF
 profile: "cis"
@@ -336,7 +346,7 @@ EOF
     fi
     if [[ $TLS_SAN_MODE -eq 1 ]]; then
         cat >> /etc/rancher/rke2/config.yaml <<EOF
-tls-sans:
+tls-san:
   - "$TLS_SAN"
 EOF
     fi
