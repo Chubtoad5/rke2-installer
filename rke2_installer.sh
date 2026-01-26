@@ -339,6 +339,7 @@ EOF
         cat >> /etc/rancher/rke2/config.yaml <<EOF
 enable-servicelb: $INSTALL_SERVICELB
 EOF
+    fi
     if [ $ENABLE_CIS == true ]; then
         cat >> /etc/rancher/rke2/config.yaml <<EOF
 profile: "cis"
