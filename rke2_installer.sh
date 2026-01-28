@@ -190,9 +190,9 @@ start_rke2_service () {
         fi
         export KUBECONFIG=/root/.kube/config
         export PATH=$PATH:/var/lib/rancher/rke2/bin
-        ln -s /var/lib/rancher/rke2/bin/kubectl /usr/local/bin/kubectl || true
-        ln -s /var/lib/rancher/rke2/bin/ctr /usr/local/bin/ctr || true
-        ln -s /var/lib/rancher/rke2/bin/crictl /usr/local/bin/crictl || true
+        ln -s /var/lib/rancher/rke2/bin/kubectl /usr/bin/kubectl || true
+        ln -s /var/lib/rancher/rke2/bin/ctr /usr/bin/ctr || true
+        ln -s /var/lib/rancher/rke2/bin/crictl /usr/bin/crictl || true
         check_namespace_pods_ready
     fi
 }
@@ -609,8 +609,8 @@ uninstall_rke2() {
     [  ! -d "/root/.kube" ] || rm -rf /root/.kube
     # Clean up the KUBECONFIG and PATH from the global environment if they were set here
     unset KUBECONFIG
-    for link in /usr/local/bin/kubectl /usr/local/bin/ctr /usr/local/bin/crictl; do
-        if [ -L "$link" ] && [ "$(readlink -f "$link")" = "/var/lib/rancher/rke2/bin/$(basename "$link")" ]; then
+    for link in /usr/bin/kubectl /usr/bin/ctr /usr/bin/crictl; do
+        if [[ -L "$link" ]];then
             rm -f "$link"
         fi
     done
