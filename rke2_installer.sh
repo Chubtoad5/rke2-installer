@@ -7,17 +7,20 @@ set -o pipefail
 
 # --- USER DEFINED VARIABLES ---#
 RKE2_VERSION=${RKE2_VERSION:-"v1.32.5+rke2r1"}
-CNI_TYPE=${CNI_TYPE:-"canal"} 
-ENABLE_CIS=${ENABLE_CIS:-"false"}
+CNI_TYPE=${CNI_TYPE:-"canal"}                                                   # Valid values: calico, canal, cilium, none
+ENABLE_CIS=${ENABLE_CIS:-"false"}                                               # Enables Kubernetes specific CIS hardening
 CLUSTER_CIDR=${CLUSTER_CIDR:-"10.42.0.0/16"}
 SERVICE_CIDR=${SERVICE_CIDR:-"10.43.0.0/16"}
 MAX_PODS=${MAX_PODS:-"110"}
-INSTALL_INGRESS=${INSTALL_INGRESS:-"true"}
-INSTALL_SERVICELB=${INSTALL_SERVICELB:-"true"}
-INSTALL_LOCAL_PATH_PROVISIONER=${INSTALL_LOCAL_PATH_PROVISIONER:-"true"}
+INSTALL_INGRESS=${INSTALL_INGRESS:-"true"}                                      # Install default NGINX ingress controller
+INSTALL_SERVICELB=${INSTALL_SERVICELB:-"true"}                                  # Install Klipper LoadBalancer
+INSTALL_LOCAL_PATH_PROVISIONER=${INSTALL_LOCAL_PATH_PROVISIONER:-"true"}        # Install Rancher's local path storage-class
 LOCAL_PATH_PROVISIONER_VERSION=${LOCAL_PATH_PROVISIONER_VERSION:-"v0.0.32"}
-INSTALL_DNS_UTILITY=${INSTALL_DNS_UTILITY:-"true"}
+INSTALL_DNS_UTILITY=${INSTALL_DNS_UTILITY:-"true"}                              # Install kubernetes.io DNS utility container
 MGMT_IP=${MGMT_IP:-$(hostname -I | awk '{print $1}')}
+RKE2_DATA=${RKE2_DATA:-"default"}                                               # Path where etcd, containerd and RKE2 data is stored, update with valid local path
+KUBELET_DATA=${KUBELET_DATA:-"default"}                                         # Path where kubelet data is stored, update with valid local path
+PVC_DATA=${PVC_DATA:-"default"}                                                 # Path where storage class PVCs are stored, update with valid local path
 DEBUG=${DEBUG:-"1"}
 
 # --- INTERNAL VARIABLES - DO NOT EDIT --- #
@@ -129,10 +132,14 @@ display_args() {
 
 run_install () {
     if [[ ! $(hostname) =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]]; then
-    echo "Error: Hostname '$(hostname)' is invalid."
-    echo "It must match DNS-1123 subdomain format (i.e. lowercase alphanumeric characters, '-' or '.', and must start and end with an alphanumeric character)."
-    exit 1
+      echo "Error: Hostname '$(hostname)' is invalid."
+      echo "It must match DNS-1123 subdomain format (i.e. lowercase alphanumeric characters, '-' or '.', and must start and end with an alphanumeric character)."
+      exit 1
     fi
+    # Update non-default install paths
+    if [[ $RKE2_DATA == "default" ]]; then RKE2_DATA="/var/lib/rancher/rke2"; else mkdir -p "$RKE2_DATA"; fi
+    if [[ $KUBELET_DATA == "default" ]]; then KUBELET_DATA="/var/lib/kubelet"; else mkdir -p "$KUBELET_DATA"; fi
+    if [[ $PVC_DATA == "default" ]]; then PVC_DATA="/opt/local-path-provisioner"; else mkdir -p "$PVC_DATA"; fi
     run_debug create_registry_config
     if [[ $INSTALL_MODE -eq 1 ]]; then
         echo "--- Installing RKE2 ---"
@@ -189,10 +196,10 @@ start_rke2_service () {
             chmod 600 /home/$user_name/.kube/config
         fi
         export KUBECONFIG=/root/.kube/config
-        export PATH=$PATH:/var/lib/rancher/rke2/bin
-        ln -s /var/lib/rancher/rke2/bin/kubectl /usr/bin/kubectl || true
-        ln -s /var/lib/rancher/rke2/bin/ctr /usr/bin/ctr || true
-        ln -s /var/lib/rancher/rke2/bin/crictl /usr/bin/crictl || true
+        export PATH=$PATH:$RKE2_DATA/bin
+        ln -s $RKE2_DATA/bin/kubectl /usr/bin/kubectl || true
+        ln -s $RKE2_DATA/bin/ctr /usr/bin/ctr || true
+        ln -s $RKE2_DATA/bin/crictl /usr/bin/crictl || true
         check_namespace_pods_ready
     fi
 }
@@ -203,17 +210,17 @@ install_rke2_binaries () {
         echo "  extracting rke2-core-images archive..."
         tar -xzf $WORKING_DIR/rke2-core-images/rke2-core-images.tar.gz -C $WORKING_DIR/rke2-core-images
         mv $WORKING_DIR/rke2-core-images/images/rke2-images-core.linux-amd64.tar.gz $WORKING_DIR/rke2-binaries
-        cp $WORKING_DIR/rke2-binaries/rke2-images-core.linux-amd64.tar.gz /var/lib/rancher/rke2/agent/images
+        cp $WORKING_DIR/rke2-binaries/rke2-images-core.linux-amd64.tar.gz $RKE2_DATA/agent/images
         rm -rf $WORKING_DIR/rke2-core-images/images
         echo "  extracting rke2-cni-images archive..."
         tar -xzf $WORKING_DIR/rke2-cni-images/rke2-$CNI_TYPE-images.tar.gz -C $WORKING_DIR/rke2-cni-images
         mv $WORKING_DIR/rke2-cni-images/images/rke2-images-$CNI_TYPE.linux-amd64.tar.gz $WORKING_DIR/rke2-binaries
-        cp $WORKING_DIR/rke2-binaries/rke2-images-$CNI_TYPE.linux-amd64.tar.gz /var/lib/rancher/rke2/agent/images
+        cp $WORKING_DIR/rke2-binaries/rke2-images-$CNI_TYPE.linux-amd64.tar.gz $RKE2_DATA/agent/images
         rm -rf $WORKING_DIR/rke2-cni-images/images
         if [[ $REGISTRY_MODE -eq 0 ]]; then
             echo "  extracting rke2-utilities archive..."
             tar -xzf $WORKING_DIR/rke2-utilities/container_images_*.tar.gz -C $WORKING_DIR/rke2-utilities
-            cp $WORKING_DIR/rke2-utilities/images/images.tar.gz /var/lib/rancher/rke2/agent/images
+            cp $WORKING_DIR/rke2-utilities/images/images.tar.gz $RKE2_DATA/agent/images
             rm -rf $WORKING_DIR/rke2-utilities/images
         fi
         INSTALL_RKE2_ARTIFACT_PATH="$WORKING_DIR/rke2-binaries" INSTALL_RKE2_VERSION="$RKE2_VERSION" INSTALL_RKE2_TYPE="$JOIN_TYPE" sh $WORKING_DIR/rke2-binaries/install.sh
@@ -320,15 +327,25 @@ node-ip: "$MGMT_IP"
 etcd-extra-env:
   - "ETCD_AUTO_COMPACTION_RETENTION=72h"
   - "ETCD_AUTO_COMPACTION_MODE=periodic"
-kubelet-arg:
-  - "max-pods=$MAX_PODS"
-  - "resolv-conf=$resolv_conf_file"
 kube-apiserver-arg:
   - "audit-log-path=/var/log/rke2-apiserver-audit.log"
   - "audit-log-maxage=30"
   - "audit-log-maxbackup=10"
   - "audit-log-maxsize=200"
+kubelet-arg:
+  - "max-pods=$MAX_PODS"
+  - "resolv-conf=$resolv_conf_file"
 EOF
+    if [[ $KUBELET_DATA != "/var/lib/kubelet" ]]; then
+        cat >> /etc/rancher/rke2/config.yaml <<EOF
+  - root-dir=$KUBELET_DATA
+EOF
+    fi
+    if [[ $RKE2_DATA != "/var/lib/rancher/rke2" ]]; then
+        cat >> /etc/rancher/rke2/config.yaml <<EOF
+data-dir: "$RKE2_DATA"
+EOF
+    fi
     if [ $INSTALL_INGRESS == false ]; then
         cat >> /etc/rancher/rke2/config.yaml <<EOF
 disable:
@@ -376,15 +393,26 @@ node-ip: "$MGMT_IP"
 etcd-extra-env:
   - "ETCD_AUTO_COMPACTION_RETENTION=72h"
   - "ETCD_AUTO_COMPACTION_MODE=periodic"
-kubelet-arg:
-  - "max-pods=$MAX_PODS"
-  - "resolv-conf=$resolv_conf_file"
 kube-apiserver-arg:
   - "audit-log-path=/var/log/rke2-apiserver-audit.log"
   - "audit-log-maxage=30"
   - "audit-log-maxbackup=10"
   - "audit-log-maxsize=200"
+kubelet-arg:
+  - "max-pods=$MAX_PODS"
+  - "resolv-conf=$resolv_conf_file"
 EOF
+    if [[ $KUBELET_DATA != "/var/lib/kubelet" ]]; then
+        cat >> /etc/rancher/rke2/config.yaml <<EOF
+  - root-dir=$KUBELET_DATA
+EOF
+    fi
+    if [[ $RKE2_DATA != "/var/lib/rancher/rke2" ]]; then
+        cat >> /etc/rancher/rke2/config.yaml <<EOF
+data-dir: "$RKE2_DATA"
+EOF
+    fi
+
     if [ $INSTALL_INGRESS == false ]; then
         cat >> /etc/rancher/rke2/config.yaml <<EOF
 disable:
@@ -415,8 +443,8 @@ metadata:
 automountServiceAccountToken: false
 EOF
     fi
-    echo "  Generating /var/lib/rancher/rke2/server/manifests/rke2-coredns-helmchartconfig.yaml"
-    cat > /var/lib/rancher/rke2/server/manifests/rke2-coredns-helmchartconfig.yaml <<EOF
+    echo "  Generating $RKE2_DATA/server/manifests/rke2-coredns-helmchartconfig.yaml"
+    cat > $RKE2_DATA/server/manifests/rke2-coredns-helmchartconfig.yaml <<EOF
 apiVersion: helm.cattle.io/v1
 kind: HelmChartConfig
 metadata:
@@ -579,11 +607,13 @@ apply_utilities () {
     if [[ $INSTALL_LOCAL_PATH_PROVISIONER == "true" ]]; then
         echo "  Installing local-path-provisioner"
         # need to add check for registry and update yaml path
-        if [[ $AIR_GAPPED_MODE -eq 1 ]]; then
-            kubectl apply -f $WORKING_DIR/rke2-utilities/local-path-storage.yaml
-        else
-            kubectl apply -f https://raw.githubusercontent.com/rancher/local-path-provisioner/$LOCAL_PATH_PROVISIONER_VERSION/deploy/local-path-storage.yaml
+        if [[ $AIR_GAPPED_MODE -eq 0 ]]; then
+            curl -sfL https://raw.githubusercontent.com/rancher/local-path-provisioner/$LOCAL_PATH_PROVISIONER_VERSION/deploy/local-path-storage.yaml -o $WORKING_DIR/rke2-utilities/local-path-storage.yaml
         fi
+        if [[ $PVC_DATA != "/opt/local-path-provisioner" ]]; then
+           sed -i "s|\"paths\":\[\s*\"[^\"]*\"\s*\]|\"paths\":[\"${PVC_DATA}/local-path-provisioner\"]|g" $WORKING_DIR/rke2-utilities/local-path-storage.yaml
+        fi    
+        kubectl apply -f $WORKING_DIR/rke2-utilities/local-path-storage.yaml
         check_namespace_pods_ready local-path-storage
         kubectl patch storageclass local-path -p '{"metadata": {"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
     fi
@@ -607,13 +637,39 @@ uninstall_rke2() {
     # rm -rf $base_dir/rke2-install-files
     [ ! -d "/home/$user_name/.kube" ] || rm -rf /home/$user_name/.kube
     [  ! -d "/root/.kube" ] || rm -rf /root/.kube
-    # Clean up the KUBECONFIG and PATH from the global environment if they were set here
+    # Clean up the KUBECONFIG and command symlinks
     unset KUBECONFIG
     for link in /usr/bin/kubectl /usr/bin/ctr /usr/bin/crictl; do
         if [[ -L "$link" ]];then
             rm -f "$link"
         fi
     done
+    # cleanup non-default paths
+    if [[ -n "$RKE2_DATA" && "$RKE2_DATA" != "default" ]]; then
+        if [[ "$RKE2_DATA" != /* || "$RKE2_DATA" == "/" ]]; then
+            echo "Refusing removal of dir RKE2_DATA=$RKE2_DATA"
+        else
+            rm -rf -- "$RKE2_DATA"
+        fi
+    fi
+    if [[ -n "$KUBELET_DATA" && "$KUBELET_DATA" != "default" ]]; then
+        if [[ "$KUBELET_DATA" != /* || "$KUBELET_DATA" == "/" ]]; then
+            echo "Refusing removal of dir KUBELET_DATA=$KUBELET_DATA"
+        else
+            # unmount projected/secret tmpfs mounts (best effort)
+            find "$KUBELET_DATA" -type d -path '*kubernetes.io~*' -exec umount -lf {} \; 2>/dev/null || true
+            # unmount anything else still mounted under the tree (best effort)
+            findmnt -R -n -o TARGET "$KUBELET_DATA" 2>/dev/null | sort -r | xargs -r umount -l 2>/dev/null || true
+            rm -rf -- "$KUBELET_DATA"
+        fi
+    fi
+    if [[ -n "$PVC_DATA" && "$PVC_DATA" != "default" && "$INSTALL_LOCAL_PATH_PROVISIONER" == "true" ]]; then
+        if [[ "$PVC_DATA" != /* || "$PVC_DATA" == "/" ]]; then
+            echo "Refusing removal of dir PVC_DATA=$PVC_DATA"
+        else
+            rm -rf -- "$PVC_DATA"
+        fi
+    fi
     [ ! -d "$WORKING_DIR" ] || rm -rf "$WORKING_DIR"
     echo "  Completed"
     echo "### RKE2 Installer Ended at $(date) ###"
@@ -745,7 +801,7 @@ runtime_outputs () {
         echo "  Copy the archive to an air-gapped host runing the same version of $OS_ID and extract it with 'tar -xzf rke2-save.tar.gz'."
     fi
     if [[ $INSTALL_MODE -eq 1 ]]; then
-        local join_token=$(cat /var/lib/rancher/rke2/server/node-token)
+        local join_token=$(cat $RKE2_DATA/server/node-token)
         local host_ip=$(hostname -I |awk '{print $1}')
         echo "  RKE2 Server installed successfully."
         echo "  Verify API is reachable at:"
@@ -753,7 +809,7 @@ runtime_outputs () {
         if [[ $TLS_SAN_MODE -eq 1 ]]; then
             echo "    https://$TLS_SAN:6443"
         fi
-        echo "  Join token stored in: /var/lib/rancher/rke2/server/node-token"
+        echo "  Join token stored in: $RKE2_DATA/server/node-token"
         if [[ $TLS_SAN_MODE -eq 1 ]]; then
             echo "  To join more nodes to this cluster use the following config:"
             echo "----"
@@ -786,9 +842,9 @@ create_working_dir () {
     [ -d "$WORKING_DIR/rke2-cni-images/images" ] || mkdir -p "$WORKING_DIR/rke2-cni-images/images"
     [ -d "$WORKING_DIR/rke2-binaries" ] || mkdir -p "$WORKING_DIR/rke2-binaries"
     [ -d "$WORKING_DIR/rke2-utilities/images" ] || mkdir -p "$WORKING_DIR/rke2-utilities/images"
-    [ -d "/var/lib/rancher/rke2/agent/images" ] || mkdir -p "/var/lib/rancher/rke2/agent/images"
+    [ -d "$RKE2_DATA/agent/images" ] || mkdir -p "$RKE2_DATA/agent/images"
     [ -d "/etc/rancher/rke2" ] || mkdir -p "/etc/rancher/rke2"
-    [ -d "/var/lib/rancher/rke2/server/manifests" ] || mkdir -p "/var/lib/rancher/rke2/server/manifests"
+    [ -d "$RKE2_DATA/server/manifests" ] || mkdir -p "$RKE2_DATA/server/manifests"
 }
 
 
@@ -893,6 +949,12 @@ fi
 if [[ -z "$user_name" ]]; then
     user_name=$(logname)
 fi
+
+# Update non-default install paths
+if [[ $RKE2_DATA == "default" ]]; then RKE2_DATA="/var/lib/rancher/rke2"; else mkdir -p "$RKE2_DATA"; fi
+if [[ $KUBELET_DATA == "default" ]]; then KUBELET_DATA="/var/lib/kubelet"; else mkdir -p "$KUBELET_DATA"; fi
+if [[ $PVC_DATA == "default" ]]; then PVC_DATA="/opt/local-path-provisioner"; else mkdir -p "$PVC_DATA"; fi
+
 # Check for no arguments, and show usage if none are provided
 if [[ "$#" -eq 0 ]]; then
     echo "Error: No arguments provided."
