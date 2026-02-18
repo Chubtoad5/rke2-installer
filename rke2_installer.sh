@@ -21,6 +21,7 @@ MGMT_IP=${MGMT_IP:-$(hostname -I | awk '{print $1}')}
 RKE2_DATA=${RKE2_DATA:-"default"}                                               # Path where etcd, containerd and RKE2 data is stored, update with valid local path
 KUBELET_DATA=${KUBELET_DATA:-"default"}                                         # Path where kubelet data is stored, update with valid local path
 PVC_DATA=${PVC_DATA:-"default"}                                                 # Path where storage class PVCs are stored, update with valid local path
+CONTROL_PLANE_TAINT=${CONTROL_PLANE_TAINT:-"false"}                             # Set to true to taint the control-plane node for multi-node clusters and workload separation
 DEBUG=${DEBUG:-"1"}
 
 # --- INTERNAL VARIABLES - DO NOT EDIT --- #
@@ -292,9 +293,7 @@ kubelet-arg:
   - "max-pods=$MAX_PODS"
   - "resolv-conf=$resolv_conf_file"
 node-label:
-  - "role=worker"
-node-taint:
-  - "CriticalAddonsOnly=true:NoSchedule"
+  - "node-role.kubernetes.io/worker=true"
 EOF
     if [ $ENABLE_CIS == true ]; then
         cat >> /etc/rancher/rke2/config.yaml <<EOF
@@ -344,6 +343,12 @@ EOF
     if [[ $RKE2_DATA != "/var/lib/rancher/rke2" ]]; then
         cat >> /etc/rancher/rke2/config.yaml <<EOF
 data-dir: "$RKE2_DATA"
+EOF
+    fi
+    if [[ $CONTROL_PLANE_TAINT == "true" ]]; then
+        cat >> /etc/rancher/rke2/config.yaml <<EOF
+node-taint:
+  - "node-role.kubernetes.io/control-plane:NoSchedule"
 EOF
     fi
     if [ $INSTALL_INGRESS == false ]; then
@@ -412,7 +417,12 @@ EOF
 data-dir: "$RKE2_DATA"
 EOF
     fi
-
+    if [[ $CONTROL_PLANE_TAINT == "true" ]]; then
+        cat >> /etc/rancher/rke2/config.yaml <<EOF
+node-taint:
+  - "node-role.kubernetes.io/control-plane:NoSchedule"
+EOF
+    fi
     if [ $INSTALL_INGRESS == false ]; then
         cat >> /etc/rancher/rke2/config.yaml <<EOF
 disable:
