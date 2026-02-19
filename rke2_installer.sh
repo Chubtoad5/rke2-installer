@@ -7,22 +7,35 @@ set -o pipefail
 
 # --- USER DEFINED VARIABLES ---#
 RKE2_VERSION=${RKE2_VERSION:-"v1.32.5+rke2r1"}
-CNI_TYPE=${CNI_TYPE:-"canal"}                                                   # Valid values: calico, canal, cilium, none
-ENABLE_CIS=${ENABLE_CIS:-"false"}                                               # Enables Kubernetes specific CIS hardening
+CNI_TYPE=${CNI_TYPE:-"canal"}                                                 # Valid values: calico, canal, cilium, none
+ENABLE_CIS=${ENABLE_CIS:-"false"}                                             # Enables Kubernetes specific CIS hardening
 CLUSTER_CIDR=${CLUSTER_CIDR:-"10.42.0.0/16"}
 SERVICE_CIDR=${SERVICE_CIDR:-"10.43.0.0/16"}
 MAX_PODS=${MAX_PODS:-"110"}
-INSTALL_INGRESS=${INSTALL_INGRESS:-"true"}                                      # Install default NGINX ingress controller
-INSTALL_SERVICELB=${INSTALL_SERVICELB:-"true"}                                  # Install Klipper LoadBalancer
-INSTALL_LOCAL_PATH_PROVISIONER=${INSTALL_LOCAL_PATH_PROVISIONER:-"true"}        # Install Rancher's local path storage-class
+INSTALL_INGRESS=${INSTALL_INGRESS:-"true"}                                    # Install default NGINX ingress controller
+INSTALL_SERVICELB=${INSTALL_SERVICELB:-"true"}                                # Install Klipper LoadBalancer
+INSTALL_LOCAL_PATH_PROVISIONER=${INSTALL_LOCAL_PATH_PROVISIONER:-"true"}      # Install Rancher's local path storage-class
 LOCAL_PATH_PROVISIONER_VERSION=${LOCAL_PATH_PROVISIONER_VERSION:-"v0.0.32"}
-INSTALL_DNS_UTILITY=${INSTALL_DNS_UTILITY:-"true"}                              # Install kubernetes.io DNS utility container
+INSTALL_DNS_UTILITY=${INSTALL_DNS_UTILITY:-"true"}                            # Install kubernetes.io DNS utility container
 MGMT_IP=${MGMT_IP:-$(hostname -I | awk '{print $1}')}
-RKE2_DATA=${RKE2_DATA:-"default"}                                               # Path where etcd, containerd and RKE2 data is stored, update with valid local path
-KUBELET_DATA=${KUBELET_DATA:-"default"}                                         # Path where kubelet data is stored, update with valid local path
-PVC_DATA=${PVC_DATA:-"default"}                                                 # Path where storage class PVCs are stored, update with valid local path
-CONTROL_PLANE_TAINT=${CONTROL_PLANE_TAINT:-"false"}                             # Set to true to taint the control-plane node for multi-node clusters and workload separation
+RKE2_DATA=${RKE2_DATA:-"default"}                                             # Path where etcd, containerd and RKE2 data is stored, update with valid local path
+KUBELET_DATA=${KUBELET_DATA:-"default"}                                       # Path where kubelet data is stored, update with valid local path
+PVC_DATA=${PVC_DATA:-"default"}                                               # Path where storage class PVCs are stored, update with valid local path
+CONTROL_PLANE_TAINT=${CONTROL_PLANE_TAINT:-"false"}                           # Set to true to taint the control-plane node for multi-node clusters and workload separation
 DEBUG=${DEBUG:-"1"}
+
+# Velero Backup Configuration
+VELERO_VERSION=${VELERO_VERSION:-"v1.17.1"}
+VELERO_AWS_PLUGIN_VERSION=${VELERO_AWS_PLUGIN_VERSION:-"v1.13.0"}
+VELERO_BUCKET=${VELERO_BUCKET:-"velero"}
+VELERO_S3_URL=${VELERO_S3_URL:-""}                                   # S3 endpoint URL, e.g. https://s3.example.com:8333
+VELERO_S3_ACCESS_KEY=${VELERO_S3_ACCESS_KEY:-""}                     # S3 access key
+VELERO_S3_SECRET_KEY=${VELERO_S3_SECRET_KEY:-""}                     # S3 secret key
+VELERO_BACKUP_NAMESPACES=${VELERO_BACKUP_NAMESPACES:-"default"}      # Comma-separated list of namespaces to back up
+VELERO_BACKUP_TTL=${VELERO_BACKUP_TTL:-"720h"}                       # Backup retention period (30 days)
+VELERO_BACKUP_SCHEDULE=${VELERO_BACKUP_SCHEDULE:-"0 2 * * *"}        # Cron schedule for daily backups at 2 AM
+VSC_NAME=${VSC_NAME:-"longhorn-snapshot-vsc"}                        # VolumeSnapshotClass name for Longhorn CSI snapshots
+VSC_DRIVER=${VSC_DRIVER:-"driver.longhorn.io"}                       # CSI driver name for the VolumeSnapshotClass
 
 # --- INTERNAL VARIABLES - DO NOT EDIT --- #
 user_name=${SUDO_USER:-}
@@ -31,6 +44,7 @@ AIR_GAPPED_MODE=0
 SAVE_MODE=0
 PUSH_MODE=0
 INSTALL_MODE=0
+INSTALL_TYPE="rke2"
 TLS_SAN_MODE=0
 TLS_SAN=""
 UNINSTALL_MODE=0
@@ -65,30 +79,39 @@ Description:
 - Edit $SCRIPT_NAME 'USER DEFINED VARIABLES' before running. See README.md for details.
 
 Commands:
-  [install]   : Installs rke2 and dependencies from the internet as a single-node untainted server.
-                  If an rke2-save.tar.gz file is detected in the directory, rke2 will be installed in air-gapped mode.
-  [uninstall] : Uninstalls rke2 from the host.
-  [save]      : Prepares an offline tar package with all rke2 install files and dependencies.
-  [push]      : Pushes rke2 images to the specified registry. If a on offline tar package is not found, it will first pull from the internet.
-  [join]      : Joins the host to an existing cluster as a [server] or [agent]. [join-token-string] must be specified.
+  [install]        : Installs the specified component. Defaults to rke2 if no type is given.
+                     If an rke2-save.tar.gz file is detected in the directory, rke2 will be installed in air-gapped mode.
+    (no type/rke2)   Installs rke2 as a single-node untainted server.
+    [velero]         Installs Velero backup with CSI snapshot support into an existing RKE2 cluster.
+                     Requires VELERO_S3_URL, VELERO_S3_ACCESS_KEY, and VELERO_S3_SECRET_KEY to be set.
+  [uninstall]      : Uninstalls rke2 from the host.
+  [save]           : Prepares an offline tar package with all rke2 and velero install files and dependencies.
+  [push]           : Pushes rke2 images to the specified registry. If an offline tar package is not found, it will first pull from the internet.
+  [join]           : Joins the host to an existing cluster as a [server] or [agent]. [join-token-string] must be specified.
 
 Options:
   [agent|server <server-fqdn/ip> <join-token-string>]  : Only use with [join]
-  [-registry <registry:port> <username> <password>]    : Only use with [install], [join], [push]
+  [-registry <registry:port> <username> <password>]    : Only use with [install], [install velero], [join], [push]
   [-tls-san <server-fqdn-ip>]                          : Only use with [install], [join server]
 
 Examples:
-  Install rke2 fron the internet or offline package if it exists:          
+  Install rke2 from the internet or offline package if it exists:
   sudo ./$SCRIPT_NAME install
 
-  Install rke2 fron the internet or offline package if it exists, and uses a private registry with existing images a mirror:
+  Install rke2 from the internet or offline package if it exists, and uses a private registry with existing images as a mirror:
   sudo ./$SCRIPT_NAME install -registry my.registry.com:443 myusername mypassword
 
-  Install rke2 fron the internet or offline package if it exists, and configure specified tls-san:
+  Install rke2 from the internet or offline package if it exists, and configure specified tls-san:
   sudo ./$SCRIPT_NAME install -tls-san my.rke2-cluster.lab
 
-  Install rke2 fron the internet or offline package if it exists, and push the rke2 images to a registry, using it as a mirror:
+  Install rke2 from the internet or offline package if it exists, and push the rke2 images to a registry, using it as a mirror:
   sudo ./$SCRIPT_NAME install push -registry my.registry.com:443 myusername mypassword
+
+  Install Velero into an existing RKE2 cluster (requires VELERO_S3_* vars to be configured):
+  sudo ./$SCRIPT_NAME install velero
+
+  Install Velero and push its images to a registry first (for air-gapped clusters with a mirror registry):
+  sudo ./$SCRIPT_NAME install velero push -registry my.registry.com:443 myusername mypassword
 
   Push images to a private registry from an offline tar package if it exists, or pull from the internet, but do not install rke2:
   sudo ./$SCRIPT_NAME push -registry my.registry.com:443 myusername mypassword
@@ -96,7 +119,7 @@ Examples:
   Join the host to an existing cluster as a agent node:
   sudo ./$SCRIPT_NAME join agent my.rke2-server.lab [join-token-string]
 
-  Create an offline tar package for installing rke2 later in an air-gapped environment:
+  Create an offline tar package for installing rke2 and velero later in an air-gapped environment:
   sudo ./$SCRIPT_NAME save
 
   Uninstall rke2 instance from the host:
@@ -111,6 +134,7 @@ display_args() {
     echo "### RKE2 Installer Started at $(date) ###"
     echo "  AIR_GAPPED_MODE: $AIR_GAPPED_MODE"
     echo "  INSTALL_MODE: $INSTALL_MODE"
+    echo "  INSTALL_TYPE: $INSTALL_TYPE"
     echo "  TLS_SAN_MODE: $TLS_SAN_MODE"
     echo "  TLS_SAN: $TLS_SAN"
     echo "  UNINSTALL_MODE: $UNINSTALL_MODE"
@@ -639,6 +663,108 @@ apply_utilities () {
     fi
 }
 
+# -- Velero Install Definitions -- #
+
+run_install_velero () {
+  export KUBECONFIG=/root/.kube/config
+  export PATH=$PATH:$RKE2_DATA/bin
+
+  # Push velero images to registry if push mode is active
+  if [[ $PUSH_MODE == "1" ]]; then
+    echo "  Checking for RKE2 registries.yaml..."
+    if [[ ! -f /etc/rancher/rke2/registries.yaml ]]; then
+      echo "Error: /etc/rancher/rke2/registries.yaml not found."
+      echo "  RKE2 must be installed with '-registry' to configure the docker.io mirror."
+      echo "  Run: ./rke2_installer.sh install velero push -registry <registry:port> <username> <password>"
+      exit 1
+    fi
+    echo "  Pushing Velero images to registry ${REGISTRY_INFO}..."
+    image_pull_push_check
+    cd $WORKING_DIR/velero
+    echo "velero/velero:${VELERO_VERSION}" > velero-images.txt
+    echo "velero/velero-plugin-for-aws:${VELERO_AWS_PLUGIN_VERSION}" >> velero-images.txt
+    $WORKING_DIR/rke2-utilities/image_pull_push.sh -f $WORKING_DIR/velero/velero-images.txt push $REGISTRY_INFO $REG_USER $REG_PASS
+    cd $base_dir
+    echo "  Velero images pushed to registry."
+  fi
+
+  # Install Velero CLI binary
+  echo "  Installing Velero CLI ${VELERO_VERSION}..."
+  cd $WORKING_DIR/velero
+  if [[ $AIR_GAPPED_MODE == "0" ]]; then
+    curl -L https://github.com/vmware-tanzu/velero/releases/download/${VELERO_VERSION}/velero-${VELERO_VERSION}-linux-amd64.tar.gz \
+      -o velero-${VELERO_VERSION}-linux-amd64.tar.gz
+  fi
+  tar -xzf velero-${VELERO_VERSION}-linux-amd64.tar.gz
+  mv velero-${VELERO_VERSION}-linux-amd64/velero /usr/local/bin/velero
+  rm -rf velero-${VELERO_VERSION}-linux-amd64
+  velero version --client-only
+
+  # Verify snapshot controller is running (provided by RKE2)
+  echo "  Verifying snapshot controller..."
+  if ! kubectl get pods -n kube-system 2>/dev/null | grep -q snapshot-controller; then
+    echo "Error: Snapshot controller not found in kube-system namespace."
+    echo "  The snapshot controller is required for Velero CSI integration and should be provided by RKE2."
+    exit 1
+  fi
+  echo "  Snapshot controller is running."
+
+  # Create VolumeSnapshotClass for Longhorn
+  echo "  Creating VolumeSnapshotClass '${VSC_NAME}'..."
+  cat <<SNAPEOF | kubectl apply -f -
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshotClass
+metadata:
+  name: ${VSC_NAME}
+  labels:
+    velero.io/csi-volumesnapshot-class: "true"
+driver: ${VSC_DRIVER}
+deletionPolicy: Delete
+parameters:
+  type: snap
+SNAPEOF
+
+  # Create S3 credentials file
+  echo "  Creating Velero S3 credentials..."
+  cat > /tmp/credentials-velero <<CREDEOF
+[default]
+aws_access_key_id=${VELERO_S3_ACCESS_KEY}
+aws_secret_access_key=${VELERO_S3_SECRET_KEY}
+CREDEOF
+
+  # Install Velero into the cluster
+  echo "  Installing Velero server into the cluster..."
+  velero install \
+    --provider aws \
+    --plugins velero/velero-plugin-for-aws:${VELERO_AWS_PLUGIN_VERSION} \
+    --bucket ${VELERO_BUCKET} \
+    --backup-location-config \
+      region=us-east-1,s3ForcePathStyle=true,s3Url=${VELERO_S3_URL},checksumAlgorithm="",insecureSkipTLSVerify=true \
+    --secret-file /tmp/credentials-velero \
+    --features=EnableCSI \
+    --use-node-agent \
+    --use-volume-snapshots=true \
+    --wait
+
+  # Clean up credentials file
+  rm -f /tmp/credentials-velero
+
+  # Verify installation
+  echo "  Verifying Velero installation..."
+  check_namespace_pods_ready "velero"
+
+  # Create scheduled backup
+  echo "  Creating scheduled backup '${VELERO_BACKUP_SCHEDULE}'..."
+  velero schedule create daily-full-backup \
+    --schedule="${VELERO_BACKUP_SCHEDULE}" \
+    --ttl ${VELERO_BACKUP_TTL} \
+    --snapshot-move-data \
+    --include-cluster-resources=true \
+    --include-namespaces ${VELERO_BACKUP_NAMESPACES}
+
+  cd $base_dir
+}
+
 # -- Uninstall Definitions -- #
 
 uninstall_rke2() {
@@ -691,6 +817,7 @@ uninstall_rke2() {
 run_save () {
     echo "--- Running save workflow"
     download_rke2_binaries
+    download_velero
     download_rke2_utilities
     create_save_archive
     echo "--- Finished save workflow"
@@ -736,6 +863,15 @@ download_rke2_utilities () {
         ./image_pull_push.sh -f images/utility-images.txt save
         cd $base_dir
     fi
+}
+
+download_velero () {
+    echo "  Downloading Velero CLI ${VELERO_VERSION}..."
+    curl -L https://github.com/vmware-tanzu/velero/releases/download/${VELERO_VERSION}/velero-${VELERO_VERSION}-linux-amd64.tar.gz \
+        -o $WORKING_DIR/velero/velero-${VELERO_VERSION}-linux-amd64.tar.gz
+    echo "  Adding Velero images to utility-images list..."
+    echo "velero/velero:${VELERO_VERSION}" >> $WORKING_DIR/rke2-utilities/images/utility-images.txt
+    echo "velero/velero-plugin-for-aws:${VELERO_AWS_PLUGIN_VERSION}" >> $WORKING_DIR/rke2-utilities/images/utility-images.txt
 }
 
 create_save_archive () {
@@ -810,7 +946,7 @@ runtime_outputs () {
         echo "  Air-gapped archive 'rke2-save.tar.gz' created."
         echo "  Copy the archive to an air-gapped host runing the same version of $OS_ID and extract it with 'tar -xzf rke2-save.tar.gz'."
     fi
-    if [[ $INSTALL_MODE -eq 1 ]]; then
+    if [[ $INSTALL_MODE -eq 1 && $INSTALL_TYPE == "rke2" ]]; then
         local join_token=$(cat $RKE2_DATA/server/node-token)
         local host_ip=$(hostname -I |awk '{print $1}')
         echo "  RKE2 Server installed successfully."
@@ -843,6 +979,33 @@ runtime_outputs () {
             echo "  Agent install completed, check the status with 'kubectl get nodes' and 'kubectl get pods -A' on the server node for details."
         fi
     fi
+    if [[ $INSTALL_MODE -eq 1 && $INSTALL_TYPE == "velero" ]]; then
+        echo ""
+        echo "### VELERO INSTALL COMPLETED ###"
+        echo ""
+        echo "Velero Configuration:"
+        echo "  S3 Endpoint:         $VELERO_S3_URL"
+        echo "  S3 Bucket:           $VELERO_BUCKET"
+        echo "  Backup Namespaces:   $VELERO_BACKUP_NAMESPACES"
+        echo "  Backup Schedule:     $VELERO_BACKUP_SCHEDULE (TTL: $VELERO_BACKUP_TTL)"
+        echo "  VolumeSnapshotClass: $VSC_NAME (driver: $VSC_DRIVER)"
+        echo ""
+        echo "Verify installation:"
+        echo "  velero backup-location get          # Should show 'Available'"
+        echo "  velero schedule get                 # Should show 'daily-full-backup'"
+        echo "  kubectl get pods -n velero          # Velero server + node-agent pods"
+        echo ""
+        echo "Common operations:"
+        echo "  velero backup create manual-backup --from-schedule daily-full-backup --wait"
+        echo "  velero backup get"
+        echo "  velero backup describe <backup-name> --details"
+        echo "  velero restore create --from-backup <backup-name> --wait"
+        echo ""
+        echo "If backup-location shows 'Unavailable', check:"
+        echo "  - S3 is running and accessible at $VELERO_S3_URL"
+        echo "  - S3 credentials are correct (VELERO_S3_ACCESS_KEY / VELERO_S3_SECRET_KEY)"
+        echo "  - kubectl logs deployment/velero -n velero | tail -20"
+    fi
 }
 
 create_working_dir () {
@@ -852,6 +1015,7 @@ create_working_dir () {
     [ -d "$WORKING_DIR/rke2-cni-images/images" ] || mkdir -p "$WORKING_DIR/rke2-cni-images/images"
     [ -d "$WORKING_DIR/rke2-binaries" ] || mkdir -p "$WORKING_DIR/rke2-binaries"
     [ -d "$WORKING_DIR/rke2-utilities/images" ] || mkdir -p "$WORKING_DIR/rke2-utilities/images"
+    [ -d "$WORKING_DIR/velero" ] || mkdir -p "$WORKING_DIR/velero"
     [ -d "$RKE2_DATA/agent/images" ] || mkdir -p "$RKE2_DATA/agent/images"
     [ -d "/etc/rancher/rke2" ] || mkdir -p "/etc/rancher/rke2"
     [ -d "$RKE2_DATA/server/manifests" ] || mkdir -p "$RKE2_DATA/server/manifests"
@@ -978,6 +1142,10 @@ while [[ "$#" -gt 0 ]]; do
             ;;
         install)
             INSTALL_MODE=1
+            if [[ "${2:-}" == "velero" ]]; then
+                INSTALL_TYPE="velero"
+                shift
+            fi
             shift
             ;;
         uninstall)
@@ -1087,6 +1255,19 @@ if [[ "$INSTALL_MODE" == "1" && $JOIN_MODE == "1" ]]; then
     echo "Type './$SCRIPT_NAME -h' for help."
     exit 1
 fi
+# Verify velero S3 credentials and URL when installing velero
+if [[ "$INSTALL_MODE" == "1" && "$INSTALL_TYPE" == "velero" ]]; then
+    if [[ -z "$VELERO_S3_ACCESS_KEY" || -z "$VELERO_S3_SECRET_KEY" ]]; then
+        echo "Error: 'install velero' requires S3 credentials. Set VELERO_S3_ACCESS_KEY and VELERO_S3_SECRET_KEY in the script."
+        echo "Type './$SCRIPT_NAME -h' for help."
+        exit 1
+    fi
+    if [[ -z "$VELERO_S3_URL" ]]; then
+        echo "Error: 'install velero' requires VELERO_S3_URL to be set (e.g. https://s3.example.com:8333)."
+        echo "Type './$SCRIPT_NAME -h' for help."
+        exit 1
+    fi
+fi
 # Verify REGISTRY_MODE is used with one of PUSH_MODE, INSTALL_MODE or JOIN_MODE
 if [[ "$REGISTRY_MODE" == "1" && "$PUSH_MODE" != "1" && "$INSTALL_MODE" != "1" && "$JOIN_MODE" != "1" ]]; then
     echo "Error: 'Registry config must be used with either 'push', 'join', or 'install'."
@@ -1159,11 +1340,15 @@ create_working_dir
 if [[ $SAVE_MODE -eq 1 ]]; then
     run_debug run_save
 fi
-if [[ $PUSH_MODE -eq 1 ]]; then
+if [[ $PUSH_MODE -eq 1 && $INSTALL_TYPE != "velero" ]]; then
     run_debug run_push
 fi
-if [[ $INSTALL_MODE -eq 1 || ($JOIN_MODE -eq 1 && $JOIN_TYPE == "agent") || ($JOIN_MODE -eq 1 && $JOIN_TYPE == "server") ]]; then
+if [[ ($INSTALL_MODE -eq 1 && $INSTALL_TYPE == "rke2") || ($JOIN_MODE -eq 1 && $JOIN_TYPE == "agent") || ($JOIN_MODE -eq 1 && $JOIN_TYPE == "server") ]]; then
   run_install
+fi
+if [[ $INSTALL_MODE -eq 1 && $INSTALL_TYPE == "velero" ]]; then
+  echo "  Installing Velero with CSI snapshot support..."
+  run_install_velero
 fi
 cleanup
 runtime_outputs
