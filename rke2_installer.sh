@@ -37,6 +37,18 @@ VELERO_BACKUP_SCHEDULE=${VELERO_BACKUP_SCHEDULE:-"0 2 * * *"}        # Cron sche
 VSC_NAME=${VSC_NAME:-"longhorn-snapshot-vsc"}                        # VolumeSnapshotClass name for Longhorn CSI snapshots
 VSC_DRIVER=${VSC_DRIVER:-"driver.longhorn.io"}                       # CSI driver name for the VolumeSnapshotClass
 
+# Monitoring Configuration
+MONITORING_HOST=${MONITORING_HOST:-""}                               # IP/FQDN of external monitoring Docker host (Loki + Grafana + Prometheus)
+MONITORING_LOKI_PORT=${MONITORING_LOKI_PORT:-"3100"}                 # Loki HTTP port on the monitoring host
+MONITORING_PROMETHEUS_PORT=${MONITORING_PROMETHEUS_PORT:-"9090"}     # Prometheus remote-write receiver port on the monitoring host
+CLUSTER_NAME=${CLUSTER_NAME:-"rke2-prod"}                           # Cluster label applied to all metrics and logs
+HELM_VERSION=${HELM_VERSION:-"3.12.0"}                              # Helm version to download if not already installed
+KUBE_PROMETHEUS_STACK_VERSION=${KUBE_PROMETHEUS_STACK_VERSION:-"69.8.0"}  # kube-prometheus-stack Helm chart version
+FLUENT_BIT_VERSION=${FLUENT_BIT_VERSION:-"3.2.8"}                   # Fluent Bit Helm chart version (app version matches)
+PROMETHEUS_RETENTION=${PROMETHEUS_RETENTION:-"48h"}                  # In-cluster Prometheus retention (short; long-term lives on external host)
+PROMETHEUS_STORAGE_SIZE=${PROMETHEUS_STORAGE_SIZE:-"50Gi"}           # PVC size for in-cluster Prometheus
+PROMETHEUS_STORAGE_CLASS=${PROMETHEUS_STORAGE_CLASS:-"longhorn"}     # StorageClass for Prometheus and Alertmanager PVCs
+
 # --- INTERNAL VARIABLES - DO NOT EDIT --- #
 user_name=${SUDO_USER:-}
 SCRIPT_NAME=$(basename "$0")
@@ -84,6 +96,8 @@ Commands:
     (no type/rke2)   Installs rke2 as a single-node untainted server.
     [velero]         Installs Velero backup with CSI snapshot support into an existing RKE2 cluster.
                      Requires VELERO_S3_URL, VELERO_S3_ACCESS_KEY, and VELERO_S3_SECRET_KEY to be set.
+    [monitoring]     Installs kube-prometheus-stack, Fluent Bit, and ServiceMonitors into an existing RKE2 cluster.
+                     Requires MONITORING_HOST to be set to the IP/FQDN of the external monitoring Docker host.
   [uninstall]      : Uninstalls rke2 from the host.
   [save]           : Prepares an offline tar package with all rke2 and velero install files and dependencies.
   [push]           : Pushes rke2 images to the specified registry. If an offline tar package is not found, it will first pull from the internet.
@@ -151,6 +165,10 @@ display_args() {
     echo "  REG_USER: $REG_USER"
     echo "  REG_PASS: $REG_PASS"
     echo "  OS: $OS_ID"
+    if [[ $INSTALL_TYPE == "monitoring" ]]; then
+        echo "  MONITORING_HOST: $MONITORING_HOST"
+        echo "  CLUSTER_NAME: $CLUSTER_NAME"
+    fi
 }
 
 # -- Install & Join Definitions -- #
@@ -765,6 +783,339 @@ CREDEOF
   cd $base_dir
 }
 
+# -- Monitoring Install Definitions -- #
+
+helm_check () {
+    if ! command -v helm &>/dev/null; then
+        echo "  Helm not found. Installing Helm ${HELM_VERSION}..."
+        local helm_tar="helm-v${HELM_VERSION}-linux-amd64.tar.gz"
+        if [[ $AIR_GAPPED_MODE -eq 1 ]]; then
+            local local_helm="$WORKING_DIR/monitoring/${helm_tar}"
+            if [[ ! -f "$local_helm" ]]; then
+                echo "Error: Air-gapped mode but Helm binary not found at $local_helm"
+                echo "  Run '$SCRIPT_NAME save' first to download all required binaries."
+                exit 1
+            fi
+            tar -xzf "$local_helm" -C /tmp
+        else
+            curl -fsSLo /tmp/${helm_tar} https://get.helm.sh/${helm_tar}
+            tar -xzf /tmp/${helm_tar} -C /tmp
+        fi
+        mv /tmp/linux-amd64/helm /usr/bin/helm
+        rm -rf /tmp/linux-amd64
+        echo "  Helm ${HELM_VERSION} installed."
+    else
+        echo "  Helm found: $(helm version --short)"
+    fi
+}
+
+run_install_monitoring () {
+  export KUBECONFIG=/root/.kube/config
+  export PATH=$PATH:$RKE2_DATA/bin
+
+  helm_check
+
+  # Resolve chart references — local .tgz in air-gapped mode, remote repo in online mode
+  local PROM_CHART_REF FB_CHART_REF prom_version_flag fb_version_flag
+  if [[ $AIR_GAPPED_MODE -eq 1 ]]; then
+    echo "  Air-gapped mode: using local Helm charts from $WORKING_DIR/monitoring/"
+    PROM_CHART_REF=$(ls "$WORKING_DIR/monitoring/kube-prometheus-stack-"*.tgz 2>/dev/null | head -1)
+    FB_CHART_REF=$(ls "$WORKING_DIR/monitoring/fluent-bit-"*.tgz 2>/dev/null | head -1)
+    if [[ -z "$PROM_CHART_REF" || -z "$FB_CHART_REF" ]]; then
+      echo "Error: Air-gapped monitoring charts not found in $WORKING_DIR/monitoring/"
+      echo "  Run '$SCRIPT_NAME save' first to download all required charts."
+      exit 1
+    fi
+    prom_version_flag=""
+    fb_version_flag=""
+  else
+    echo "  Adding Helm repositories..."
+    helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+    helm repo add fluent https://fluent.github.io/helm-charts
+    helm repo update
+    PROM_CHART_REF="prometheus-community/kube-prometheus-stack"
+    FB_CHART_REF="fluent/fluent-bit"
+    prom_version_flag="--version ${KUBE_PROMETHEUS_STACK_VERSION}"
+    fb_version_flag="--version ${FLUENT_BIT_VERSION}"
+  fi
+
+  echo "  Creating monitoring namespace..."
+  kubectl create namespace monitoring --dry-run=client -o yaml | kubectl apply -f -
+
+  # Install kube-prometheus-stack
+  echo "  Installing kube-prometheus-stack v${KUBE_PROMETHEUS_STACK_VERSION}..."
+  local prom_values
+  prom_values=$(mktemp)
+  cat > "$prom_values" <<PROMEOF
+grafana:
+  enabled: false
+
+prometheus:
+  prometheusSpec:
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: ${PROMETHEUS_STORAGE_CLASS}
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: ${PROMETHEUS_STORAGE_SIZE}
+    retention: ${PROMETHEUS_RETENTION}
+    retentionSize: "45GB"
+    remoteWrite:
+      - url: "http://${MONITORING_HOST}:${MONITORING_PROMETHEUS_PORT}/api/v1/write"
+        queueConfig:
+          maxSamplesPerSend: 5000
+          batchSendDeadline: 10s
+          maxShards: 10
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    resources:
+      requests:
+        cpu: 500m
+        memory: 1Gi
+      limits:
+        cpu: "2"
+        memory: 4Gi
+  service:
+    type: ClusterIP
+
+nodeExporter:
+  enabled: true
+
+kubeStateMetrics:
+  enabled: true
+
+alertmanager:
+  enabled: false
+PROMEOF
+  # shellcheck disable=SC2086
+  helm upgrade --install kube-prometheus-stack "$PROM_CHART_REF" \
+    --namespace monitoring \
+    --values "$prom_values" \
+    $prom_version_flag \
+    --wait --timeout 10m
+  rm -f "$prom_values"
+
+  # Install Fluent Bit
+  echo "  Installing Fluent Bit v${FLUENT_BIT_VERSION}..."
+  local fb_values
+  fb_values=$(mktemp)
+  cat > "$fb_values" <<FBEOF
+kind: DaemonSet
+
+image:
+  repository: cr.fluentbit.io/fluent/fluent-bit
+  tag: "${FLUENT_BIT_VERSION}"
+
+tolerations:
+  - operator: Exists
+
+serviceMonitor:
+  enabled: true
+  namespace: monitoring
+  interval: 30s
+
+config:
+  service: |
+    [SERVICE]
+        Flush         5
+        Log_Level     info
+        Daemon        off
+        Parsers_File  /fluent-bit/etc/parsers.conf
+        HTTP_Server   On
+        HTTP_Listen   0.0.0.0
+        HTTP_Port     2020
+        Health_Check  On
+
+  inputs: |
+    [INPUT]
+        Name              tail
+        Tag               kube.*
+        Path              /var/log/containers/*.log
+        Parser            cri
+        DB                /var/log/fluentbit-kube.db
+        Mem_Buf_Limit     50MB
+        Skip_Long_Lines   On
+        Refresh_Interval  5
+
+    [INPUT]
+        Name              systemd
+        Tag               host.*
+        Systemd_Filter    _SYSTEMD_UNIT=rke2-server.service
+        Systemd_Filter    _SYSTEMD_UNIT=rke2-agent.service
+        Systemd_Filter    _SYSTEMD_UNIT=kubelet.service
+        Read_From_Tail    On
+        DB                /var/log/fluentbit-systemd.db
+
+  filters: |
+    [FILTER]
+        Name                kubernetes
+        Match               kube.*
+        Kube_URL            https://kubernetes.default.svc:443
+        Kube_CA_File        /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+        Kube_Token_File     /var/run/secrets/kubernetes.io/serviceaccount/token
+        Kube_Tag_Prefix     kube.var.log.containers.
+        Merge_Log           On
+        Merge_Log_Key       log_processed
+        Keep_Log            Off
+        K8S-Logging.Parser  On
+        K8S-Logging.Exclude On
+        Labels              On
+        Annotations         Off
+        Buffer_Size         256k
+
+    [FILTER]
+        Name    modify
+        Match   kube.*
+        Add     cluster ${CLUSTER_NAME}
+
+    [FILTER]
+        Name    modify
+        Match   host.*
+        Add     cluster ${CLUSTER_NAME}
+
+  outputs: |
+    [OUTPUT]
+        Name                 loki
+        Match                kube.*
+        Host                 ${MONITORING_HOST}
+        Port                 ${MONITORING_LOKI_PORT}
+        Labels               job=fluent-bit, cluster=${CLUSTER_NAME}
+        Label_Keys           \$kubernetes['namespace_name'],\$kubernetes['pod_name'],\$kubernetes['container_name']
+        Remove_Keys          kubernetes,stream
+        Auto_Kubernetes_Labels Off
+        Line_Format          json
+        Retry_Limit          5
+
+    [OUTPUT]
+        Name                 loki
+        Match                host.*
+        Host                 ${MONITORING_HOST}
+        Port                 ${MONITORING_LOKI_PORT}
+        Labels               job=fluent-bit-systemd, cluster=${CLUSTER_NAME}
+        Line_Format          json
+        Retry_Limit          5
+
+  customParsers: |
+    [PARSER]
+        Name        cri
+        Format      regex
+        Regex       ^(?<time>[^ ]+) (?<stream>stdout|stderr) (?<logtag>[^ ]*) (?<message>.*)$
+        Time_Key    time
+        Time_Format %Y-%m-%dT%H:%M:%S.%L%z
+
+volumeMounts:
+  - name: varlog
+    mountPath: /var/log
+    readOnly: true
+  - name: etcmachineid
+    mountPath: /etc/machine-id
+    readOnly: true
+
+volumes:
+  - name: varlog
+    hostPath:
+      path: /var/log
+  - name: etcmachineid
+    hostPath:
+      path: /etc/machine-id
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+FBEOF
+  # shellcheck disable=SC2086
+  helm upgrade --install fluent-bit "$FB_CHART_REF" \
+    --namespace monitoring \
+    --values "$fb_values" \
+    $fb_version_flag \
+    --wait --timeout 5m
+  rm -f "$fb_values"
+
+  # Apply ServiceMonitors for existing workloads
+  echo "  Applying ServiceMonitors (haproxy, metallb, longhorn, velero)..."
+  kubectl apply -f - <<SMEOF
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: haproxy
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  namespaceSelector:
+    matchNames:
+      - haproxy-controller
+  selector:
+    matchLabels:
+      app: haproxy
+  endpoints:
+    - port: metrics
+      interval: 30s
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: metallb
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  namespaceSelector:
+    matchNames:
+      - metallb-system
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: metallb
+  endpoints:
+    - port: monitoring
+      interval: 30s
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: longhorn
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  namespaceSelector:
+    matchNames:
+      - longhorn-system
+  selector:
+    matchLabels:
+      app: longhorn-manager
+  endpoints:
+    - port: manager
+      interval: 30s
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: velero
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  namespaceSelector:
+    matchNames:
+      - velero
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: velero
+  endpoints:
+    - port: monitoring
+      interval: 60s
+SMEOF
+
+  check_namespace_pods_ready "monitoring"
+}
+
 # -- Uninstall Definitions -- #
 
 uninstall_rke2() {
@@ -818,6 +1169,7 @@ run_save () {
     echo "--- Running save workflow"
     download_rke2_binaries
     download_velero
+    download_monitoring_charts
     download_rke2_utilities
     create_save_archive
     echo "--- Finished save workflow"
@@ -872,6 +1224,29 @@ download_velero () {
     echo "  Adding Velero images to utility-images list..."
     echo "velero/velero:${VELERO_VERSION}" >> $WORKING_DIR/rke2-utilities/images/utility-images.txt
     echo "velero/velero-plugin-for-aws:${VELERO_AWS_PLUGIN_VERSION}" >> $WORKING_DIR/rke2-utilities/images/utility-images.txt
+}
+
+download_monitoring_charts () {
+    echo "  Downloading monitoring Helm charts (kube-prometheus-stack v${KUBE_PROMETHEUS_STACK_VERSION}, fluent-bit v${FLUENT_BIT_VERSION})..."
+    local helm_tar="helm-v${HELM_VERSION}-linux-amd64.tar.gz"
+    # Save helm binary tarball so helm_check() can use it in air-gapped mode
+    if [[ ! -f $WORKING_DIR/monitoring/${helm_tar} ]]; then
+        curl -fsSLo $WORKING_DIR/monitoring/${helm_tar} https://get.helm.sh/${helm_tar}
+    fi
+    # Install helm temporarily if not already available
+    if ! command -v helm &>/dev/null; then
+        tar -xzf $WORKING_DIR/monitoring/${helm_tar} -C /tmp
+        mv /tmp/linux-amd64/helm /usr/bin/helm
+        rm -rf /tmp/linux-amd64
+    fi
+    helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+    helm repo add fluent https://fluent.github.io/helm-charts
+    helm repo update
+    cd $WORKING_DIR/monitoring
+    helm pull prometheus-community/kube-prometheus-stack --version ${KUBE_PROMETHEUS_STACK_VERSION}
+    helm pull fluent/fluent-bit --version ${FLUENT_BIT_VERSION}
+    cd $base_dir
+    echo "  Monitoring charts saved to $WORKING_DIR/monitoring/"
 }
 
 create_save_archive () {
@@ -979,6 +1354,30 @@ runtime_outputs () {
             echo "  Agent install completed, check the status with 'kubectl get nodes' and 'kubectl get pods -A' on the server node for details."
         fi
     fi
+    if [[ $INSTALL_MODE -eq 1 && $INSTALL_TYPE == "monitoring" ]]; then
+        echo ""
+        echo "### MONITORING INSTALL COMPLETED ###"
+        echo ""
+        echo "In-cluster components:"
+        echo "  kubectl -n monitoring get pods          # kube-prometheus-stack + fluent-bit"
+        echo "  kubectl -n monitoring get servicemonitors"
+        echo ""
+        echo "External monitoring host ($MONITORING_HOST):"
+        echo "  Grafana:    https://$MONITORING_HOST:3000"
+        echo "  Loki:       http://$MONITORING_HOST:$MONITORING_LOKI_PORT"
+        echo "  Prometheus: http://$MONITORING_HOST:$MONITORING_PROMETHEUS_PORT"
+        echo ""
+        echo "Verify data is flowing:"
+        echo "  curl -s http://$MONITORING_HOST:$MONITORING_LOKI_PORT/loki/api/v1/labels"
+        echo "  curl -s http://$MONITORING_HOST:$MONITORING_PROMETHEUS_PORT/api/v1/label/__name__/values | grep -c ."
+        echo ""
+        echo "Recommended Grafana dashboard IDs to import:"
+        echo "  3119  - Kubernetes Cluster Overview"
+        echo "  1860  - Node Exporter Full"
+        echo "  16888 - Longhorn"
+        echo "  7752  - Fluent Bit"
+        echo "  13639 - Loki Logs"
+    fi
     if [[ $INSTALL_MODE -eq 1 && $INSTALL_TYPE == "velero" ]]; then
         echo ""
         echo "### VELERO INSTALL COMPLETED ###"
@@ -1016,6 +1415,7 @@ create_working_dir () {
     [ -d "$WORKING_DIR/rke2-binaries" ] || mkdir -p "$WORKING_DIR/rke2-binaries"
     [ -d "$WORKING_DIR/rke2-utilities/images" ] || mkdir -p "$WORKING_DIR/rke2-utilities/images"
     [ -d "$WORKING_DIR/velero" ] || mkdir -p "$WORKING_DIR/velero"
+    [ -d "$WORKING_DIR/monitoring" ] || mkdir -p "$WORKING_DIR/monitoring"
     [ -d "$RKE2_DATA/agent/images" ] || mkdir -p "$RKE2_DATA/agent/images"
     [ -d "/etc/rancher/rke2" ] || mkdir -p "/etc/rancher/rke2"
     [ -d "$RKE2_DATA/server/manifests" ] || mkdir -p "$RKE2_DATA/server/manifests"
@@ -1145,6 +1545,9 @@ while [[ "$#" -gt 0 ]]; do
             if [[ "${2:-}" == "velero" ]]; then
                 INSTALL_TYPE="velero"
                 shift
+            elif [[ "${2:-}" == "monitoring" ]]; then
+                INSTALL_TYPE="monitoring"
+                shift
             fi
             shift
             ;;
@@ -1268,6 +1671,14 @@ if [[ "$INSTALL_MODE" == "1" && "$INSTALL_TYPE" == "velero" ]]; then
         exit 1
     fi
 fi
+# Verify MONITORING_HOST is set when installing monitoring
+if [[ "$INSTALL_MODE" == "1" && "$INSTALL_TYPE" == "monitoring" ]]; then
+    if [[ -z "$MONITORING_HOST" ]]; then
+        echo "Error: 'install monitoring' requires MONITORING_HOST to be set to the IP/FQDN of the external monitoring host."
+        echo "Type './$SCRIPT_NAME -h' for help."
+        exit 1
+    fi
+fi
 # Verify REGISTRY_MODE is used with one of PUSH_MODE, INSTALL_MODE or JOIN_MODE
 if [[ "$REGISTRY_MODE" == "1" && "$PUSH_MODE" != "1" && "$INSTALL_MODE" != "1" && "$JOIN_MODE" != "1" ]]; then
     echo "Error: 'Registry config must be used with either 'push', 'join', or 'install'."
@@ -1349,6 +1760,10 @@ fi
 if [[ $INSTALL_MODE -eq 1 && $INSTALL_TYPE == "velero" ]]; then
   echo "  Installing Velero with CSI snapshot support..."
   run_install_velero
+fi
+if [[ $INSTALL_MODE -eq 1 && $INSTALL_TYPE == "monitoring" ]]; then
+  echo "  Installing monitoring stack (kube-prometheus-stack + Fluent Bit)..."
+  run_install_monitoring
 fi
 cleanup
 runtime_outputs
