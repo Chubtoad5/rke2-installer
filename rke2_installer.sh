@@ -48,6 +48,9 @@ FLUENT_BIT_VERSION=${FLUENT_BIT_VERSION:-"3.2.8"}                   # Fluent Bit
 PROMETHEUS_RETENTION=${PROMETHEUS_RETENTION:-"48h"}                  # In-cluster Prometheus retention (short; long-term lives on external host)
 PROMETHEUS_STORAGE_SIZE=${PROMETHEUS_STORAGE_SIZE:-"50Gi"}           # PVC size for in-cluster Prometheus
 PROMETHEUS_STORAGE_CLASS=${PROMETHEUS_STORAGE_CLASS:-"longhorn"}     # StorageClass for Prometheus and Alertmanager PVCs
+MONITOR_EXCLUDE_NS=${MONITOR_EXCLUDE_NS:-"kube-system kube-public kube-node-lease default monitoring"}  # Namespaces to skip during ServiceMonitor auto-discovery
+MONITOR_PORT_NAMES=${MONITOR_PORT_NAMES:-"metrics http-metrics prometheus monitoring prom"}              # Port names treated as Prometheus metrics endpoints
+MONITOR_CONFIGS_DIR=${MONITOR_CONFIGS_DIR:-""}                                                          # Optional dir of additional ServiceMonitor YAML files to apply
 
 # --- INTERNAL VARIABLES - DO NOT EDIT --- #
 user_name=${SUDO_USER:-}
@@ -809,6 +812,94 @@ helm_check () {
     fi
 }
 
+generate_service_monitors () {
+    echo "  Scanning cluster for metrics-exposing services..."
+    local found=0
+
+    while IFS= read -r ns; do
+        # Skip excluded namespaces
+        echo "$MONITOR_EXCLUDE_NS" | grep -qw "$ns" && continue
+
+        # Iterate over services in this namespace: "<svc_name>\t<port1>,<port2>,..."
+        while IFS=$'\t' read -r svc_name svc_ports; do
+            [[ -z "$svc_name" ]] && continue
+
+            # Find the first port name that matches a known metrics port
+            local metrics_port=""
+            for pname in $MONITOR_PORT_NAMES; do
+                if echo "$svc_ports" | tr ',' '\n' | grep -qx "$pname"; then
+                    metrics_port="$pname"
+                    break
+                fi
+            done
+            [[ -z "$metrics_port" ]] && continue
+
+            # Prefer app.kubernetes.io/name label, fall back to app
+            local sel_key sel_val
+            sel_val=$(kubectl get svc -n "$ns" "$svc_name" \
+              -o jsonpath='{.metadata.labels.app\.kubernetes\.io/name}' 2>/dev/null)
+            if [[ -n "$sel_val" ]]; then
+                sel_key="app.kubernetes.io/name"
+            else
+                sel_val=$(kubectl get svc -n "$ns" "$svc_name" \
+                  -o jsonpath='{.metadata.labels.app}' 2>/dev/null)
+                sel_key="app"
+            fi
+
+            if [[ -z "$sel_val" ]]; then
+                echo "    Skipping $ns/$svc_name: no 'app' or 'app.kubernetes.io/name' label found."
+                continue
+            fi
+
+            echo "    Creating ServiceMonitor: $svc_name (namespace=$ns port=$metrics_port ${sel_key}=${sel_val})"
+            kubectl apply -f - <<EOF
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: ${svc_name}
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  namespaceSelector:
+    matchNames:
+      - ${ns}
+  selector:
+    matchLabels:
+      ${sel_key}: ${sel_val}
+  endpoints:
+    - port: ${metrics_port}
+      interval: 30s
+EOF
+            found=$((found + 1))
+
+        done < <(kubectl get svc -n "$ns" \
+          -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{range .spec.ports[*]}{.name}{","}{end}{"\n"}{end}' \
+          2>/dev/null)
+
+    done < <(kubectl get ns -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null)
+
+    if [[ $found -eq 0 ]]; then
+        echo "  No metrics-exposing services found outside excluded namespaces."
+    else
+        echo "  Created/updated $found ServiceMonitor(s)."
+    fi
+
+    # Apply any user-supplied or caller-supplied ServiceMonitor YAML files
+    if [[ -n "$MONITOR_CONFIGS_DIR" ]]; then
+        if [[ -d "$MONITOR_CONFIGS_DIR" ]]; then
+            echo "  Applying custom ServiceMonitors from $MONITOR_CONFIGS_DIR..."
+            for f in "$MONITOR_CONFIGS_DIR"/*.yaml; do
+                [[ -f "$f" ]] || continue
+                echo "    Applying $(basename "$f")..."
+                kubectl apply -f "$f"
+            done
+        else
+            echo "  Warning: MONITOR_CONFIGS_DIR='$MONITOR_CONFIGS_DIR' not found, skipping custom monitors."
+        fi
+    fi
+}
+
 run_install_monitoring () {
   export KUBECONFIG=/root/.kube/config
   export PATH=$PATH:$RKE2_DATA/bin
@@ -1037,81 +1128,8 @@ FBEOF
     --wait --timeout 5m
   rm -f "$fb_values"
 
-  # Apply ServiceMonitors for existing workloads
-  echo "  Applying ServiceMonitors (haproxy, metallb, longhorn, velero)..."
-  kubectl apply -f - <<SMEOF
-apiVersion: monitoring.coreos.com/v1
-kind: ServiceMonitor
-metadata:
-  name: haproxy
-  namespace: monitoring
-  labels:
-    release: kube-prometheus-stack
-spec:
-  namespaceSelector:
-    matchNames:
-      - haproxy-controller
-  selector:
-    matchLabels:
-      app: haproxy
-  endpoints:
-    - port: metrics
-      interval: 30s
----
-apiVersion: monitoring.coreos.com/v1
-kind: ServiceMonitor
-metadata:
-  name: metallb
-  namespace: monitoring
-  labels:
-    release: kube-prometheus-stack
-spec:
-  namespaceSelector:
-    matchNames:
-      - metallb-system
-  selector:
-    matchLabels:
-      app.kubernetes.io/name: metallb
-  endpoints:
-    - port: monitoring
-      interval: 30s
----
-apiVersion: monitoring.coreos.com/v1
-kind: ServiceMonitor
-metadata:
-  name: longhorn
-  namespace: monitoring
-  labels:
-    release: kube-prometheus-stack
-spec:
-  namespaceSelector:
-    matchNames:
-      - longhorn-system
-  selector:
-    matchLabels:
-      app: longhorn-manager
-  endpoints:
-    - port: manager
-      interval: 30s
----
-apiVersion: monitoring.coreos.com/v1
-kind: ServiceMonitor
-metadata:
-  name: velero
-  namespace: monitoring
-  labels:
-    release: kube-prometheus-stack
-spec:
-  namespaceSelector:
-    matchNames:
-      - velero
-  selector:
-    matchLabels:
-      app.kubernetes.io/name: velero
-  endpoints:
-    - port: monitoring
-      interval: 60s
-SMEOF
+  # Auto-discover and apply ServiceMonitors for metrics-exposing services
+  generate_service_monitors
 
   check_namespace_pods_ready "monitoring"
 }
