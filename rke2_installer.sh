@@ -312,7 +312,6 @@ mirrors:
     endpoint:
       - "https://${REG_FQDN}:${REG_PORT}"
 EOF
-        fi
         echo "  Private registry configuration written to /etc/rancher/rke2/registries.yaml"
     else
         echo "  Private registry not enabled. Skipping registry configuration."
