@@ -41,15 +41,16 @@ VSC_DRIVER=${VSC_DRIVER:-"driver.longhorn.io"}                       # CSI drive
 MONITORING_HOST=${MONITORING_HOST:-""}                               # IP/FQDN of external monitoring Docker host (Loki + Grafana + Prometheus)
 MONITORING_LOKI_PORT=${MONITORING_LOKI_PORT:-"3100"}                 # Loki HTTP port on the monitoring host
 MONITORING_PROMETHEUS_PORT=${MONITORING_PROMETHEUS_PORT:-"9090"}     # Prometheus remote-write receiver port on the monitoring host
-CLUSTER_NAME=${CLUSTER_NAME:-"rke2-prod"}                           # Cluster label applied to all metrics and logs
+CLUSTER_NAME=${CLUSTER_NAME:-"edge-lab"}                           # Cluster label applied to all metrics and logs
 HELM_VERSION=${HELM_VERSION:-"3.12.0"}                              # Helm version to download if not already installed
 KUBE_PROMETHEUS_STACK_VERSION=${KUBE_PROMETHEUS_STACK_VERSION:-"69.8.0"}  # kube-prometheus-stack Helm chart version
-FLUENT_BIT_VERSION=${FLUENT_BIT_VERSION:-"3.2.8"}                   # Fluent Bit Helm chart version (app version matches)
+FLUENT_BIT_CHART_VERSION=${FLUENT_BIT_CHART_VERSION:-"0.55.0"}       # Fluent Bit Helm chart version (fluent/fluent-bit, uses 0.x.x versioning)
+FLUENT_BIT_VERSION=${FLUENT_BIT_VERSION:-"4.2.2"}                   # Fluent Bit application/image version (appVersion in the chart above)
 PROMETHEUS_RETENTION=${PROMETHEUS_RETENTION:-"48h"}                  # In-cluster Prometheus retention (short; long-term lives on external host)
 PROMETHEUS_STORAGE_SIZE=${PROMETHEUS_STORAGE_SIZE:-"50Gi"}           # PVC size for in-cluster Prometheus
 PROMETHEUS_STORAGE_CLASS=${PROMETHEUS_STORAGE_CLASS:-"longhorn"}     # StorageClass for Prometheus and Alertmanager PVCs
 MONITOR_EXCLUDE_NS=${MONITOR_EXCLUDE_NS:-"kube-system kube-public kube-node-lease default monitoring"}  # Namespaces to skip during ServiceMonitor auto-discovery
-MONITOR_PORT_NAMES=${MONITOR_PORT_NAMES:-"metrics http-metrics prometheus monitoring prom"}              # Port names treated as Prometheus metrics endpoints
+MONITOR_PORT_NAMES=${MONITOR_PORT_NAMES:-"manager metrics http-metrics prometheus monitoring prom"}              # Port names treated as Prometheus metrics endpoints
 MONITOR_CONFIGS_DIR=${MONITOR_CONFIGS_DIR:-""}                                                          # Optional dir of additional ServiceMonitor YAML files to apply
 
 # --- INTERNAL VARIABLES - DO NOT EDIT --- #
@@ -301,13 +302,13 @@ mirrors:
   quay.io:
     endpoint:
       - "https://${REG_FQDN}:${REG_PORT}"
-  ${REG_FQDN}:${REG_PORT}:
+  registry.k8s.io:
     endpoint:
       - "https://${REG_FQDN}:${REG_PORT}"
-EOF
-        if [[ $INSTALL_DNS_UTILITY == "true" ]]; then
-            cat >> /etc/rancher/rke2/registries.yaml <<EOF
-  registry.k8s.io:
+  cr.fluentbit.io:
+    endpoint:
+      - "https://${REG_FQDN}:${REG_PORT}"
+  ${REG_FQDN}:${REG_PORT}:
     endpoint:
       - "https://${REG_FQDN}:${REG_PORT}"
 EOF
@@ -927,7 +928,7 @@ run_install_monitoring () {
     PROM_CHART_REF="prometheus-community/kube-prometheus-stack"
     FB_CHART_REF="fluent/fluent-bit"
     prom_version_flag="--version ${KUBE_PROMETHEUS_STACK_VERSION}"
-    fb_version_flag="--version ${FLUENT_BIT_VERSION}"
+    fb_version_flag="--version ${FLUENT_BIT_CHART_VERSION}"
   fi
 
   echo "  Creating monitoring namespace..."
@@ -953,6 +954,8 @@ prometheus:
               storage: ${PROMETHEUS_STORAGE_SIZE}
     retention: ${PROMETHEUS_RETENTION}
     retentionSize: "45GB"
+    externalLabels:
+      cluster: "${CLUSTER_NAME}"
     remoteWrite:
       - url: "http://${MONITORING_HOST}:${MONITORING_PROMETHEUS_PORT}/api/v1/write"
         queueConfig:
@@ -989,7 +992,7 @@ PROMEOF
   rm -f "$prom_values"
 
   # Install Fluent Bit
-  echo "  Installing Fluent Bit v${FLUENT_BIT_VERSION}..."
+  echo "  Installing Fluent Bit chart v${FLUENT_BIT_CHART_VERSION} (app v${FLUENT_BIT_VERSION})..."
   local fb_values
   fb_values=$(mktemp)
   cat > "$fb_values" <<FBEOF
@@ -1073,7 +1076,7 @@ config:
         Host                 ${MONITORING_HOST}
         Port                 ${MONITORING_LOKI_PORT}
         Labels               job=fluent-bit, cluster=${CLUSTER_NAME}
-        Label_Keys           \$kubernetes['namespace_name'],\$kubernetes['pod_name'],\$kubernetes['container_name']
+        Label_Keys           \$kubernetes['namespace_name'],\$kubernetes['container_name']
         Remove_Keys          kubernetes,stream
         Auto_Kubernetes_Labels Off
         Line_Format          json
@@ -1227,6 +1230,7 @@ download_rke2_utilities () {
     echo "  Downloading k8s dns utils manifest..."
     curl -sfL https://raw.githubusercontent.com/kubernetes/website/main/content/en/examples/admin/dns/dnsutils.yaml -o $WORKING_DIR/rke2-utilities/dnsutils.yaml
     cat $WORKING_DIR/rke2-utilities/dnsutils.yaml |grep image: |cut -d: -f2-3 | awk '{sub(/^ /, ""); print}' >> $WORKING_DIR/rke2-utilities/images/utility-images.txt
+    # Add Helm utility images (Longhorn, MetalLB, HAProxy) before saving the archive
     if [[ -f $WORKING_DIR/rke2-utilities/images/utility-images.txt ]]; then
         image_pull_push_check
         cd $WORKING_DIR/rke2-utilities
@@ -1244,8 +1248,58 @@ download_velero () {
     echo "velero/velero-plugin-for-aws:${VELERO_AWS_PLUGIN_VERSION}" >> $WORKING_DIR/rke2-utilities/images/utility-images.txt
 }
 
+extract_monitoring_images () {
+    # Extracts container images from kube-prometheus-stack and fluent-bit Helm charts into
+    # utility-images.txt so that image_pull_push.sh can save/push them for airgapped installs.
+    # Uses charts already in $WORKING_DIR/monitoring/ (written by download_monitoring_charts).
+    # If not present (online push without a prior save), pulls charts to a temp dir using helm.
+    mkdir -p $WORKING_DIR/rke2-utilities/images
+
+    local kps_chart="$WORKING_DIR/monitoring/kube-prometheus-stack-${KUBE_PROMETHEUS_STACK_VERSION}.tgz"
+    local fb_chart="$WORKING_DIR/monitoring/fluent-bit-${FLUENT_BIT_CHART_VERSION}.tgz"
+    local tmp_dir=""
+
+    if [[ ! -f "$kps_chart" ]] || [[ ! -f "$fb_chart" ]]; then
+        if ! command -v helm &>/dev/null; then
+            echo "  WARNING: helm not found and monitoring charts not pre-downloaded; skipping monitoring image extraction."
+            return 0
+        fi
+        echo "  Pulling monitoring charts temporarily to extract image list..."
+        tmp_dir=$(mktemp -d)
+        helm repo add prometheus-community https://prometheus-community.github.io/helm-charts &>/dev/null || true
+        helm repo add fluent https://fluent.github.io/helm-charts &>/dev/null || true
+        helm repo update &>/dev/null || true
+        helm pull prometheus-community/kube-prometheus-stack --version ${KUBE_PROMETHEUS_STACK_VERSION} -d "$tmp_dir" &>/dev/null
+        helm pull fluent/fluent-bit --version ${FLUENT_BIT_CHART_VERSION} -d "$tmp_dir" &>/dev/null
+        kps_chart="$tmp_dir/kube-prometheus-stack-${KUBE_PROMETHEUS_STACK_VERSION}.tgz"
+        fb_chart="$tmp_dir/fluent-bit-${FLUENT_BIT_CHART_VERSION}.tgz"
+    fi
+
+    echo "  Extracting images from kube-prometheus-stack v${KUBE_PROMETHEUS_STACK_VERSION} chart..."
+    helm template airgap-check "$kps_chart" \
+        | grep -E '^\s+image:' \
+        | awk '{print $2}' \
+        | tr -d '"' \
+        | grep -v '^$' \
+        | sort -u \
+        >> $WORKING_DIR/rke2-utilities/images/utility-images.txt
+
+    echo "  Extracting images from fluent-bit chart v${FLUENT_BIT_CHART_VERSION} (app v${FLUENT_BIT_VERSION})..."
+    helm template airgap-check "$fb_chart" \
+        | grep -E '^\s+image:' \
+        | awk '{print $2}' \
+        | tr -d '"' \
+        | grep -v '^$' \
+        | sort -u \
+        >> $WORKING_DIR/rke2-utilities/images/utility-images.txt
+
+    if [[ -n "$tmp_dir" ]]; then
+        rm -rf "$tmp_dir"
+    fi
+}
+
 download_monitoring_charts () {
-    echo "  Downloading monitoring Helm charts (kube-prometheus-stack v${KUBE_PROMETHEUS_STACK_VERSION}, fluent-bit v${FLUENT_BIT_VERSION})..."
+    echo "  Downloading monitoring Helm charts (kube-prometheus-stack v${KUBE_PROMETHEUS_STACK_VERSION}, fluent-bit chart v${FLUENT_BIT_CHART_VERSION} app v${FLUENT_BIT_VERSION})..."
     local helm_tar="helm-v${HELM_VERSION}-linux-amd64.tar.gz"
     # Save helm binary tarball so helm_check() can use it in air-gapped mode
     if [[ ! -f $WORKING_DIR/monitoring/${helm_tar} ]]; then
@@ -1262,8 +1316,10 @@ download_monitoring_charts () {
     helm repo update
     cd $WORKING_DIR/monitoring
     helm pull prometheus-community/kube-prometheus-stack --version ${KUBE_PROMETHEUS_STACK_VERSION}
-    helm pull fluent/fluent-bit --version ${FLUENT_BIT_VERSION}
+    helm pull fluent/fluent-bit --version ${FLUENT_BIT_CHART_VERSION}
     cd $base_dir
+    echo "  Extracting monitoring chart images to utility-images list..."
+    extract_monitoring_images
     echo "  Monitoring charts saved to $WORKING_DIR/monitoring/"
 }
 
@@ -1300,6 +1356,7 @@ push_utility_images () {
             curl -sfL https://raw.githubusercontent.com/kubernetes/website/main/content/en/examples/admin/dns/dnsutils.yaml -o $WORKING_DIR/rke2-utilities/dnsutils.yaml
             cat $WORKING_DIR/rke2-utilities/dnsutils.yaml |grep image: |cut -d: -f2-3 | awk '{sub(/^ /, ""); print}' >> $WORKING_DIR/rke2-utilities/images/utility-images.txt
         fi
+        extract_monitoring_images
         image_pull_push_check
         echo "--- Printing utility-images.txt"
         cat $WORKING_DIR/rke2-utilities/images/utility-images.txt
@@ -1395,6 +1452,15 @@ runtime_outputs () {
         echo "  16888 - Longhorn"
         echo "  7752  - Fluent Bit"
         echo "  13639 - Loki Logs"
+        echo ""
+        echo "Multi-cluster log filtering (LogQL):"
+        echo "  {cluster=\"${CLUSTER_NAME}\", job=\"fluent-bit\"}           # all k8s logs from this cluster"
+        echo "  {cluster=\"${CLUSTER_NAME}\", job=\"fluent-bit-systemd\"}    # systemd/host logs from this cluster"
+        echo "  {cluster=\"${CLUSTER_NAME}\"} |= \"my-pod-name\"            # find a specific pod (pod name is in the log body)"
+        echo ""
+        echo "To add a cluster filter to a Grafana dashboard:"
+        echo "  Dashboard Settings → Variables → Add variable"
+        echo "  Type: Query, Datasource: Loki, Query: label_values(cluster)"
     fi
     if [[ $INSTALL_MODE -eq 1 && $INSTALL_TYPE == "velero" ]]; then
         echo ""
