@@ -337,8 +337,6 @@ node-ip: "$MGMT_IP"
 kubelet-arg:
   - "max-pods=$MAX_PODS"
   - "resolv-conf=$resolv_conf_file"
-node-label:
-  - "node-role.kubernetes.io/worker=true"
 EOF
     if [ $ENABLE_CIS == true ]; then
         cat >> /etc/rancher/rke2/config.yaml <<EOF
@@ -1411,12 +1409,20 @@ runtime_outputs () {
             echo "server: https://$TLS_SAN:9345"
             echo "token: $join_token"
             echo "----"
+            echo "  For joing another server: './rke2_installer.sh join server -tls-san $TLS_SAN $join_token'."
+            echo "  For joining an agent node: './rke2_installer.sh join agent $TLS_SAN $join_token'."
+            echo "  Note: if using private registry, include -registry in the join command."
+            echo "  After joining an agent, apply the worker role with 'kubectl label node <node name> node-role.kubernetes.io/worker=true'."
         else
-            echo "To join more nodes to this cluster use the following config:"
+            echo "  To join more nodes to this cluster use the following config:"
             echo "----"
             echo "server: https://$host_ip:9345"
             echo "token: $join_token"
             echo "----"
+            echo "  For joining another server: './rke2_installer.sh join agent $host_ip $join_token'." 
+            echo "  For joining an agent node: './rke2_installer.sh join agent $host_ip $join_token'."
+            echo "  Note: if using private registry, include -registry in the join command."
+            echo "  After joining an agent, apply the worker role with 'kubectl label node <node name> node-role.kubernetes.io/worker=true'."
         fi
         echo "  Kube config stored in: /etc/rancher/rke2/rke2.yaml"
     fi
@@ -1426,6 +1432,7 @@ runtime_outputs () {
             echo "  Kube config stored in: /etc/rancher/rke2/rke2.yaml"
         else
             echo "  Agent install completed, check the status with 'kubectl get nodes' and 'kubectl get pods -A' on the server node for details."
+            echo "  Apply a worke role label with: 'kubectl label node <node name> node-role.kubernetes.io/worker=true'."
         fi
     fi
     if [[ $INSTALL_MODE -eq 1 && $INSTALL_TYPE == "monitoring" ]]; then
