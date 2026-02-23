@@ -1409,7 +1409,7 @@ runtime_outputs () {
             echo "server: https://$TLS_SAN:9345"
             echo "token: $join_token"
             echo "----"
-            echo "  For joing another server: './rke2_installer.sh join server -tls-san $TLS_SAN $join_token'."
+            echo "  For joing another server: './rke2_installer.sh join server -tls-san $TLS_SAN $TLS_SAN $join_token'."
             echo "  For joining an agent node: './rke2_installer.sh join agent $TLS_SAN $join_token'."
             echo "  Note: if using private registry, include -registry in the join command."
             echo "  After joining an agent, apply the worker role with 'kubectl label node <node name> node-role.kubernetes.io/worker=true'."
@@ -1419,7 +1419,7 @@ runtime_outputs () {
             echo "server: https://$host_ip:9345"
             echo "token: $join_token"
             echo "----"
-            echo "  For joining another server: './rke2_installer.sh join agent $host_ip $join_token'." 
+            echo "  For joining another server: './rke2_installer.sh join server $host_ip $join_token'." 
             echo "  For joining an agent node: './rke2_installer.sh join agent $host_ip $join_token'."
             echo "  Note: if using private registry, include -registry in the join command."
             echo "  After joining an agent, apply the worker role with 'kubectl label node <node name> node-role.kubernetes.io/worker=true'."
@@ -1432,7 +1432,7 @@ runtime_outputs () {
             echo "  Kube config stored in: /etc/rancher/rke2/rke2.yaml"
         else
             echo "  Agent install completed, check the status with 'kubectl get nodes' and 'kubectl get pods -A' on the server node for details."
-            echo "  Apply a worke role label with: 'kubectl label node <node name> node-role.kubernetes.io/worker=true'."
+            echo "  Apply a worke role label with: 'kubectl label node <node name> node-role.kubernetes.io/worker=true' from the server node."
         fi
     fi
     if [[ $INSTALL_MODE -eq 1 && $INSTALL_TYPE == "monitoring" ]]; then
