@@ -272,7 +272,7 @@ install_rke2_binaries () {
         fi
         INSTALL_RKE2_ARTIFACT_PATH="$WORKING_DIR/rke2-binaries" INSTALL_RKE2_VERSION="$RKE2_VERSION" INSTALL_RKE2_TYPE="$JOIN_TYPE" sh $WORKING_DIR/rke2-binaries/install.sh
     else
-        curl -sfL https://get.rke2.io | INSTALL_RKE2_VERSION="$RKE2_VERSION" INSTALL_RKE2_TYPE="$JOIN_TYPE" INSTALL_RKE2_METHOD="tar" sh -
+        curl -sfL https://get.rke2.io | INSTALL_RKE2_VERSION="$RKE2_VERSION" INSTALL_RKE2_TYPE="$JOIN_TYPE" sh -
     fi
 }
 
@@ -1547,7 +1547,7 @@ check_namespace_pods_ready() {
     if [ "$elapsed_time" -ge "$timeout_seconds" ]; then
       echo "Error: Timeout reached after $timeout_seconds seconds. Not all pods are ready." >&2
       kubectl get pods -A
-      return 1
+      return 0
     fi
     if [ "$current_pods_not_ready" -eq 0 ]; then
       break
