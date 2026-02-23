@@ -1540,7 +1540,7 @@ image_pull_push_check () {
 check_namespace_pods_ready() {
   # Run this function as 'check_namespace_pods_ready $namespace', no argument will default to kube-system
   # checks status of pods, deletes any completed pods, and loops until all pods are ready or 120s has elapsed
-  local timeout_seconds=300
+  local timeout_seconds=120
   local start_time=$(date +%s)
   local ns=${1:-"kube-system"}
   while true; do
