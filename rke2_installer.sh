@@ -178,7 +178,7 @@ display_args() {
 # -- Install & Join Definitions -- #
 
 run_install () {
-    if [[ ! $(hostname) =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]]; then
+    if [[ ! $(hostname) =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$ ]]; then
       echo "Error: Hostname '$(hostname)' is invalid."
       echo "It must match DNS-1123 subdomain format (i.e. lowercase alphanumeric characters, '-' or '.', and must start and end with an alphanumeric character)."
       exit 1
