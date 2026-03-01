@@ -338,7 +338,7 @@ kubelet-arg:
   - "max-pods=$MAX_PODS"
   - "resolv-conf=$resolv_conf_file"
 EOF
-    if [ $ENABLE_CIS == true ]; then
+    if [[ ${ENABLE_CIS,,} == "true" ]]; then
         cat >> /etc/rancher/rke2/config.yaml <<EOF
 profile: "cis"
 EOF
@@ -388,24 +388,24 @@ EOF
 data-dir: "$RKE2_DATA"
 EOF
     fi
-    if [[ $CONTROL_PLANE_TAINT == "true" ]]; then
+    if [[ ${CONTROL_PLANE_TAINT,,} == "true" ]]; then
         cat >> /etc/rancher/rke2/config.yaml <<EOF
 node-taint:
   - "node-role.kubernetes.io/control-plane:NoSchedule"
 EOF
     fi
-    if [ $INSTALL_INGRESS == false ]; then
+    if [[ ${INSTALL_INGRESS,,} == "false" ]]; then
         cat >> /etc/rancher/rke2/config.yaml <<EOF
 disable:
   - rke2-ingress-nginx
 EOF
     fi
-    if [[ $INSTALL_SERVICELB == true ]]; then
+    if [[ ${INSTALL_SERVICELB,,} == "true" ]]; then
         cat >> /etc/rancher/rke2/config.yaml <<EOF
 enable-servicelb: $INSTALL_SERVICELB
 EOF
     fi
-    if [ $ENABLE_CIS == true ]; then
+    if [[ ${ENABLE_CIS,,} == "true" ]]; then
         cat >> /etc/rancher/rke2/config.yaml <<EOF
 profile: "cis"
 EOF
@@ -460,19 +460,19 @@ EOF
 data-dir: "$RKE2_DATA"
 EOF
     fi
-    if [[ $CONTROL_PLANE_TAINT == "true" ]]; then
+    if [[ ${CONTROL_PLANE_TAINT,,} == "true" ]]; then
         cat >> /etc/rancher/rke2/config.yaml <<EOF
 node-taint:
   - "node-role.kubernetes.io/control-plane:NoSchedule"
 EOF
     fi
-    if [ $INSTALL_INGRESS == false ]; then
+    if [[ ${INSTALL_INGRESS,,} == "false" ]]; then
         cat >> /etc/rancher/rke2/config.yaml <<EOF
 disable:
   - rke2-ingress-nginx
 EOF
     fi
-    if [[ $INSTALL_SERVICELB == true ]]; then
+    if [[ ${INSTALL_SERVICELB,,} == "true" ]]; then
         cat >> /etc/rancher/rke2/config.yaml <<EOF
 enable-servicelb: $INSTALL_SERVICELB
 EOF
@@ -483,7 +483,7 @@ tls-san:
   - "$TLS_SAN"
 EOF
     fi
-    if [ $ENABLE_CIS == true ]; then
+    if [[ ${ENABLE_CIS,,} == "true" ]]; then
         cat >> /etc/rancher/rke2/config.yaml <<EOF
 profile: "cis"
 EOF
@@ -554,7 +554,7 @@ net.bridge.bridge-nf-call-ip6tables = 1
 net.bridge.bridge-nf-call-iptables = 1
 net.ipv4.ip_forward = 1
 EOF
-    if [[ $ENABLE_CIS == true ]]; then
+    if [[ ${ENABLE_CIS,,} == true ]]; then
         echo "  Enabling CIS host parameters"
         cp -f /usr/local/share/rke2/rke2-cis-sysctl.conf /etc/sysctl.d/60-rke2-cis.conf
         useradd -r -c "etcd user" -s /sbin/nologin -M etcd -U
@@ -651,13 +651,13 @@ EOF
 }
 
 apply_utilities () {
-    if [ $ENABLE_CIS == true ]; then
+    if [[ ${ENABLE_CIS,,} == "true" ]]; then
         for namespace in $(kubectl get namespaces -A -o=jsonpath="{.items[*]['metadata.name']}"); do
             echo "  Patching ${namespace} namespace for CIS compliance"
             kubectl patch serviceaccount default -n ${namespace} -p "$(cat $WORKING_DIR/rke2-utilities/account_update.yaml)"
         done
     fi
-    if [[ $INSTALL_LOCAL_PATH_PROVISIONER == "true" ]]; then
+    if [[ ${INSTALL_LOCAL_PATH_PROVISIONER,,} == "true" ]]; then
         echo "  Installing local-path-provisioner"
         # need to add check for registry and update yaml path
         if [[ $AIR_GAPPED_MODE -eq 0 ]]; then
@@ -670,7 +670,7 @@ apply_utilities () {
         check_namespace_pods_ready local-path-storage
         kubectl patch storageclass local-path -p '{"metadata": {"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
     fi
-    if [[ $INSTALL_DNS_UTILITY == "true" ]]; then
+    if [[ ${INSTALL_DNS_UTILITY,,} == "true" ]]; then
         echo "  Installing dnsutils"
         # need to add check for registry and update yaml path
         if [[ $AIR_GAPPED_MODE -eq 1 ]]; then
@@ -1168,7 +1168,7 @@ uninstall_rke2() {
             rm -rf -- "$KUBELET_DATA"
         fi
     fi
-    if [[ -n "$PVC_DATA" && "$PVC_DATA" != "default" && "$INSTALL_LOCAL_PATH_PROVISIONER" == "true" ]]; then
+    if [[ -n "$PVC_DATA" && "$PVC_DATA" != "default" && "${INSTALL_LOCAL_PATH_PROVISIONER,,}" == "true" ]]; then
         if [[ "$PVC_DATA" != /* || "$PVC_DATA" == "/" ]]; then
             echo "Refusing removal of dir PVC_DATA=$PVC_DATA"
         else
@@ -1218,7 +1218,7 @@ download_rke2_binaries () {
 
 download_rke2_utilities () {
     # check if local_path_provisioner should be downloaded
-    if [[ $INSTALL_LOCAL_PATH_PROVISIONER == "true" ]]; then
+    if [[ ${INSTALL_LOCAL_PATH_PROVISIONER,,} == "true" ]]; then
         echo "  Downloading local-path-provisioner manifest..."
         curl -sfL https://raw.githubusercontent.com/rancher/local-path-provisioner/$LOCAL_PATH_PROVISIONER_VERSION/deploy/local-path-storage.yaml -o $WORKING_DIR/rke2-utilities/local-path-storage.yaml
         cat $WORKING_DIR/rke2-utilities/local-path-storage.yaml |grep image: |cut -d: -f2-3 | awk '{sub(/^ /, ""); print}' >> $WORKING_DIR/rke2-utilities/images/utility-images.txt
@@ -1345,11 +1345,11 @@ push_utility_images () {
         local container_images_tar=$(basename $WORKING_DIR/rke2-utilities/container_images*.tar.gz)
         $WORKING_DIR/rke2-utilities/image_pull_push.sh -f $WORKING_DIR/rke2-utilities/$container_images_tar push $REGISTRY_INFO $REG_USER $REG_PASS
     elif [[ $AIR_GAPPED_MODE -eq 0 ]]; then
-        if [[ $INSTALL_LOCAL_PATH_PROVISIONER == "true" ]]; then
+        if [[ ${INSTALL_LOCAL_PATH_PROVISIONER,,} == "true" ]]; then
             curl -sfL https://raw.githubusercontent.com/rancher/local-path-provisioner/$LOCAL_PATH_PROVISIONER_VERSION/deploy/local-path-storage.yaml -o $WORKING_DIR/rke2-utilities/local-path-storage.yaml
             cat $WORKING_DIR/rke2-utilities/local-path-storage.yaml |grep image: |cut -d: -f2-3 | awk '{sub(/^ /, ""); print}' >> $WORKING_DIR/rke2-utilities/images/utility-images.txt
         fi
-        if [[ $INSTALL_DNS_UTILITY == "true" ]]; then
+        if [[ ${INSTALL_DNS_UTILITY,,} == "true" ]]; then
             curl -sfL https://raw.githubusercontent.com/kubernetes/website/main/content/en/examples/admin/dns/dnsutils.yaml -o $WORKING_DIR/rke2-utilities/dnsutils.yaml
             cat $WORKING_DIR/rke2-utilities/dnsutils.yaml |grep image: |cut -d: -f2-3 | awk '{sub(/^ /, ""); print}' >> $WORKING_DIR/rke2-utilities/images/utility-images.txt
         fi
