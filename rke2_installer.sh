@@ -1322,8 +1322,20 @@ download_monitoring_charts () {
 
 create_save_archive () {
     # saves downloaded files into rke2-save.tar.gz
+    cat > $base_dir/rke2-save-version.txt <<EOF
+# SeaweedFS Installer Save Archive
+# Created: $(date)
+#
+# RKE2 Version: $RKE2_VERSION
+# Local Path Provisioner: $LOCAL_PATH_PROVISIONER_VERSION
+# Velero Version: $VELERO_VERSION
+# Velero AWS Plugin Version: $VELERO_AWS_PLUGIN_VERSION
+# Prometheus Stack Version: $KUBE_PROMETHEUS_STACK_VERSION
+# Fluent Bit Chart Version: $FLUENT_BIT_CHART_VERSION
+# Fluent Bit Version: $FLUENT_BIT_VERSION
+EOF
     echo "  Creating rke2 archive..."
-    tar -czf rke2-save.tar.gz rke2-install rke2_installer.sh
+    tar -czf rke2-save.tar.gz rke2-install rke2_installer.sh rke2-save-version.txt
     echo "  Air-gapped archive 'rke2-save.tar.gz' created."
 }
 
@@ -1830,7 +1842,7 @@ if [[ $CNI_TYPE == "none" ]]; then
     CNI_NONE="true"
 fi
 # Verify AIR_GAPPED_MODE based on rke-save.tar.gz file presence
-[[ ! -f $base_dir/rke2-save.tar.gz ]] || AIR_GAPPED_MODE=1
+[[ ! -f $base_dir/rke2-save-version.txt ]] || AIR_GAPPED_MODE=1
 
 os_check
 display_args
