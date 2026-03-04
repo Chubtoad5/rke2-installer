@@ -36,22 +36,24 @@ VELERO_BACKUP_TTL=${VELERO_BACKUP_TTL:-"720h"}                       # Backup re
 VELERO_BACKUP_SCHEDULE=${VELERO_BACKUP_SCHEDULE:-"0 2 * * *"}        # Cron schedule for daily backups at 2 AM
 VSC_NAME=${VSC_NAME:-"longhorn-snapshot-vsc"}                        # VolumeSnapshotClass name for Longhorn CSI snapshots
 VSC_DRIVER=${VSC_DRIVER:-"driver.longhorn.io"}                       # CSI driver name for the VolumeSnapshotClass
+PUSH_SAVE_VELERO=${PUSH_SAVE_VELERO:-"true"}                         # Allow saving and pushing velero images to private registry
 
 # Monitoring Configuration
 MONITORING_HOST=${MONITORING_HOST:-""}                               # IP/FQDN of external monitoring Docker host (Loki + Grafana + Prometheus)
 MONITORING_LOKI_PORT=${MONITORING_LOKI_PORT:-"3100"}                 # Loki HTTP port on the monitoring host
 MONITORING_PROMETHEUS_PORT=${MONITORING_PROMETHEUS_PORT:-"9090"}     # Prometheus remote-write receiver port on the monitoring host
-CLUSTER_NAME=${CLUSTER_NAME:-"edge-lab"}                           # Cluster label applied to all metrics and logs
-HELM_VERSION=${HELM_VERSION:-"3.12.0"}                              # Helm version to download if not already installed
+CLUSTER_NAME=${CLUSTER_NAME:-"edge-lab"}                             # Cluster label applied to all metrics and logs
+HELM_VERSION=${HELM_VERSION:-"3.12.0"}                               # Helm version to download if not already installed
 KUBE_PROMETHEUS_STACK_VERSION=${KUBE_PROMETHEUS_STACK_VERSION:-"69.8.0"}  # kube-prometheus-stack Helm chart version
 FLUENT_BIT_CHART_VERSION=${FLUENT_BIT_CHART_VERSION:-"0.55.0"}       # Fluent Bit Helm chart version (fluent/fluent-bit, uses 0.x.x versioning)
-FLUENT_BIT_VERSION=${FLUENT_BIT_VERSION:-"4.2.2"}                   # Fluent Bit application/image version (appVersion in the chart above)
+FLUENT_BIT_VERSION=${FLUENT_BIT_VERSION:-"4.2.2"}                    # Fluent Bit application/image version (appVersion in the chart above)
 PROMETHEUS_RETENTION=${PROMETHEUS_RETENTION:-"48h"}                  # In-cluster Prometheus retention (short; long-term lives on external host)
 PROMETHEUS_STORAGE_SIZE=${PROMETHEUS_STORAGE_SIZE:-"50Gi"}           # PVC size for in-cluster Prometheus
 PROMETHEUS_STORAGE_CLASS=${PROMETHEUS_STORAGE_CLASS:-"longhorn"}     # StorageClass for Prometheus and Alertmanager PVCs
 MONITOR_EXCLUDE_NS=${MONITOR_EXCLUDE_NS:-"kube-system kube-public kube-node-lease default monitoring"}  # Namespaces to skip during ServiceMonitor auto-discovery
-MONITOR_PORT_NAMES=${MONITOR_PORT_NAMES:-"manager metrics http-metrics prometheus monitoring prom"}              # Port names treated as Prometheus metrics endpoints
-MONITOR_CONFIGS_DIR=${MONITOR_CONFIGS_DIR:-""}                                                          # Optional dir of additional ServiceMonitor YAML files to apply
+MONITOR_PORT_NAMES=${MONITOR_PORT_NAMES:-"manager metrics http-metrics prometheus monitoring prom"}     # Port names treated as Prometheus metrics endpoints
+MONITOR_CONFIGS_DIR=${MONITOR_CONFIGS_DIR:-""}                       # Optional dir of additional ServiceMonitor YAML files to apply
+PUSH_SAVE_MONITORING=${PUSH_SAVE_MONITORING:-"true"}                 # Allow saving and pushing monitoring images to private registry
 
 # --- INTERNAL VARIABLES - DO NOT EDIT --- #
 user_name=${SUDO_USER:-}
@@ -103,13 +105,13 @@ Commands:
     [monitoring]     Installs kube-prometheus-stack, Fluent Bit, and ServiceMonitors into an existing RKE2 cluster.
                      Requires MONITORING_HOST to be set to the IP/FQDN of the external monitoring Docker host.
   [uninstall]      : Uninstalls rke2 from the host.
-  [save]           : Prepares an offline tar package with all rke2 and velero install files and dependencies.
+  [save]           : Prepares an offline tar package with all rke2 install files and dependencies. Velero and monitoring are included based on PUSH_SAVE_* vars.
   [push]           : Pushes rke2 images to the specified registry. If an offline tar package is not found, it will first pull from the internet.
   [join]           : Joins the host to an existing cluster as a [server] or [agent]. [join-token-string] must be specified.
 
 Options:
   [agent|server <server-fqdn/ip> <join-token-string>]  : Only use with [join]
-  [-registry <registry:port> <username> <password>]    : Only use with [install], [install velero], [join], [push]
+  [-registry <registry:port> <username> <password>]    : Only use with [install], [join], [push]
   [-tls-san <server-fqdn-ip>]                          : Only use with [install], [join server]
 
 Examples:
@@ -127,9 +129,6 @@ Examples:
 
   Install Velero into an existing RKE2 cluster (requires VELERO_S3_* vars to be configured):
   sudo ./$SCRIPT_NAME install velero
-
-  Install Velero and push its images to a registry first (for air-gapped clusters with a mirror registry):
-  sudo ./$SCRIPT_NAME install velero push -registry my.registry.com:443 myusername mypassword
 
   Push images to a private registry from an offline tar package if it exists, or pull from the internet, but do not install rke2:
   sudo ./$SCRIPT_NAME push -registry my.registry.com:443 myusername mypassword
@@ -688,25 +687,6 @@ run_install_velero () {
   export KUBECONFIG=/root/.kube/config
   export PATH=$PATH:$RKE2_DATA/bin
 
-  # Push velero images to registry if push mode is active
-  if [[ $PUSH_MODE == "1" ]]; then
-    echo "  Checking for RKE2 registries.yaml..."
-    if [[ ! -f /etc/rancher/rke2/registries.yaml ]]; then
-      echo "Error: /etc/rancher/rke2/registries.yaml not found."
-      echo "  RKE2 must be installed with '-registry' to configure the docker.io mirror."
-      echo "  Run: ./rke2_installer.sh install velero push -registry <registry:port> <username> <password>"
-      exit 1
-    fi
-    echo "  Pushing Velero images to registry ${REGISTRY_INFO}..."
-    image_pull_push_check
-    cd $WORKING_DIR/velero
-    echo "velero/velero:${VELERO_VERSION}" > velero-images.txt
-    echo "velero/velero-plugin-for-aws:${VELERO_AWS_PLUGIN_VERSION}" >> velero-images.txt
-    $WORKING_DIR/rke2-utilities/image_pull_push.sh -f $WORKING_DIR/velero/velero-images.txt push $REGISTRY_INFO $REG_USER $REG_PASS
-    cd $base_dir
-    echo "  Velero images pushed to registry."
-  fi
-
   # Install Velero CLI binary
   echo "  Installing Velero CLI ${VELERO_VERSION}..."
   cd $WORKING_DIR/velero
@@ -1186,8 +1166,12 @@ uninstall_rke2() {
 run_save () {
     echo "--- Running save workflow"
     download_rke2_binaries
-    download_velero
-    download_monitoring_charts
+    if [[ ${PUSH_SAVE_VELERO,,} == "true" ]]; then
+        download_velero
+    fi
+    if [[ ${PUSH_SAVE_MONITORING,,} == "true" ]]; then
+        download_monitoring_charts
+    fi
     download_rke2_utilities
     create_save_archive
     echo "--- Finished save workflow"
@@ -1365,7 +1349,13 @@ push_utility_images () {
             curl -sfL https://raw.githubusercontent.com/kubernetes/website/main/content/en/examples/admin/dns/dnsutils.yaml -o $WORKING_DIR/rke2-utilities/dnsutils.yaml
             cat $WORKING_DIR/rke2-utilities/dnsutils.yaml |grep image: |cut -d: -f2-3 | awk '{sub(/^ /, ""); print}' >> $WORKING_DIR/rke2-utilities/images/utility-images.txt
         fi
-        download_monitoring_charts
+        if [[ ${PUSH_SAVE_VELERO,,} == "true" ]]; then
+            echo "velero/velero:${VELERO_VERSION}" >> $WORKING_DIR/rke2-utilities/images/utility-images.txt
+            echo "velero/velero-plugin-for-aws:${VELERO_AWS_PLUGIN_VERSION}" >> $WORKING_DIR/rke2-utilities/images/utility-images.txt
+        fi
+        if [[ ${PUSH_SAVE_MONITORING,,} == "true" ]]; then
+            download_monitoring_charts
+        fi
         image_pull_push_check
         echo "--- Printing utility-images.txt"
         cat $WORKING_DIR/rke2-utilities/images/utility-images.txt
@@ -1853,7 +1843,7 @@ create_working_dir
 if [[ $SAVE_MODE -eq 1 ]]; then
     run_debug run_save
 fi
-if [[ $PUSH_MODE -eq 1 && $INSTALL_TYPE != "velero" ]]; then
+if [[ $PUSH_MODE -eq 1 ]]; then
     run_debug run_push
 fi
 if [[ ($INSTALL_MODE -eq 1 && $INSTALL_TYPE == "rke2") || ($JOIN_MODE -eq 1 && $JOIN_TYPE == "agent") || ($JOIN_MODE -eq 1 && $JOIN_TYPE == "server") ]]; then
