@@ -1365,7 +1365,7 @@ push_utility_images () {
             curl -sfL https://raw.githubusercontent.com/kubernetes/website/main/content/en/examples/admin/dns/dnsutils.yaml -o $WORKING_DIR/rke2-utilities/dnsutils.yaml
             cat $WORKING_DIR/rke2-utilities/dnsutils.yaml |grep image: |cut -d: -f2-3 | awk '{sub(/^ /, ""); print}' >> $WORKING_DIR/rke2-utilities/images/utility-images.txt
         fi
-        extract_monitoring_images
+        download_monitoring_charts
         image_pull_push_check
         echo "--- Printing utility-images.txt"
         cat $WORKING_DIR/rke2-utilities/images/utility-images.txt
