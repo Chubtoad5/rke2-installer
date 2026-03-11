@@ -37,6 +37,7 @@ A step-by-step guide for manually installing RKE2 (Rancher Kubernetes Engine 2) 
   - [Registry Configuration Details](#registry-configuration-details)
 - [Part 6: TLS SAN Configuration](#part-6-tls-san-configuration)
 - [Part 7: Uninstalling RKE2](#part-7-uninstalling-rke2)
+- [Part 8: Cluster Upgrades](#part-8-cluster-upgrades)
 - [Appendix: Configuration Reference](#appendix-configuration-reference)
 
 ---
@@ -1174,6 +1175,112 @@ If you used custom data paths, remove those directories as well:
 # rm -rf /custom/kubelet/data
 # rm -rf /custom/pvc/data
 ```
+
+---
+
+## Part 8: Cluster Upgrades
+
+RKE2 clusters can be upgraded using the [system-upgrade-controller](https://docs.rke2.io/upgrades/automated) (SUC). The controller watches for upgrade `Plan` resources and performs rolling upgrades on matching nodes.
+
+### Installing the System-Upgrade-Controller
+
+Download and apply the controller manifests:
+
+```bash
+curl -sfL https://github.com/rancher/system-upgrade-controller/releases/latest/download/crd.yaml -O
+curl -sfL https://github.com/rancher/system-upgrade-controller/releases/latest/download/system-upgrade-controller.yaml -O
+
+kubectl apply -f crd.yaml -f system-upgrade-controller.yaml
+```
+
+Wait for the controller pod to be ready:
+
+```bash
+kubectl get pods -n system-upgrade
+```
+
+### Creating an Upgrade Plan
+
+Create a plan YAML that defines which nodes to upgrade and the target version. The example below upgrades all server nodes first, then all agent nodes.
+
+#### Using the stable channel
+
+```yaml
+# server-agent-upgrade.yaml
+apiVersion: upgrade.cattle.io/v1
+kind: Plan
+metadata:
+  name: server-plan
+  namespace: system-upgrade
+spec:
+  concurrency: 1
+  cordon: true
+  nodeSelector:
+    matchExpressions:
+    - key: node-role.kubernetes.io/control-plane
+      operator: In
+      values:
+      - "true"
+  serviceAccountName: system-upgrade
+  upgrade:
+    image: rancher/rke2-upgrade
+  channel: https://update.rke2.io/v1-release/channels/stable
+---
+apiVersion: upgrade.cattle.io/v1
+kind: Plan
+metadata:
+  name: agent-plan
+  namespace: system-upgrade
+spec:
+  concurrency: 1
+  cordon: true
+  nodeSelector:
+    matchExpressions:
+    - key: node-role.kubernetes.io/control-plane
+      operator: DoesNotExist
+  prepare:
+    args:
+    - prepare
+    - server-plan
+    image: rancher/rke2-upgrade
+  serviceAccountName: system-upgrade
+  upgrade:
+    image: rancher/rke2-upgrade
+  channel: https://update.rke2.io/v1-release/channels/stable
+```
+
+#### Using a specific version
+
+Replace the `channel:` line with `version:` in both plans:
+
+```yaml
+  version: v1.33.4+rke2r1
+```
+
+Apply the plan:
+
+```bash
+kubectl apply -f server-agent-upgrade.yaml
+```
+
+### Monitoring the Upgrade
+
+```bash
+kubectl get plans -n system-upgrade       # Check plan status
+kubectl get nodes                          # Watch node versions update
+kubectl get jobs -n system-upgrade         # View upgrade jobs
+```
+
+### Air-Gapped and Private Registry Considerations
+
+When upgrading in an air-gapped environment or with a private registry mirror:
+
+- The `rancher/rke2-upgrade` image and the system-upgrade-controller image must be available in your private registry
+- The RKE2 release images for the target version must also be in the registry so the upgraded nodes can pull them
+- Ensure your `/etc/rancher/rke2/registries.yaml` is configured to mirror `docker.io` through your private registry — the upgrade plans reference `rancher/rke2-upgrade` which will be pulled through the mirror automatically
+- Push the target version's RKE2 image list (`rke2-images-core.linux-amd64.txt` and `rke2-images-<cni>.linux-amd64.txt` from the [RKE2 releases page](https://github.com/rancher/rke2/releases)) to your registry before applying the upgrade plan
+
+> The `rke2_installer.sh` script's `save` and `push` commands handle all of this automatically. See the [README](README.md#cluster-upgrades) for details.
 
 ---
 

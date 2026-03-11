@@ -6,7 +6,7 @@ set -o nounset
 set -o pipefail
 
 # --- USER DEFINED VARIABLES ---#
-RKE2_VERSION=${RKE2_VERSION:-"v1.32.5+rke2r1"}
+RKE2_VERSION=${RKE2_VERSION:-"v1.34.5+rke2r1"}
 CNI_TYPE=${CNI_TYPE:-"canal"}                                                 # Valid values: calico, canal, cilium, none
 ENABLE_CIS=${ENABLE_CIS:-"false"}                                             # Enables Kubernetes specific CIS hardening
 CLUSTER_CIDR=${CLUSTER_CIDR:-"10.42.0.0/16"}
@@ -78,21 +78,25 @@ REG_FQDN=""
 REG_PORT=""
 REG_USER=""
 REG_PASS=""
+UPGRADE_MODE=0
+UPGRADE_TYPE=""
+UPGRADE_VERSION=""
 fqdn_pattern='^([a-z0-9]+(-[a-z0-9]+)*\.)+[a-z]{2,}$'
 ipv4_pattern='^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$'
 
 # --- USAGE FUNCTION --- #
-# Usage: $SCRIPT_NAME [install] [unintall] [save] [push] [join [server|agent] server-fqdn join-token-string] [-tls-san [server-fqdn-ip]] [-registry [registry:port username password]]
+# Usage: $SCRIPT_NAME [install] [unintall] [save] [push] [join [server|agent] server-fqdn join-token-string] [upgrade [server|agent|both] [stable|version]] [-tls-san [server-fqdn-ip]] [-registry [registry:port username password]]
 
 usage() {
     cat << EOF
 Usage: $SCRIPT_NAME [command command ...] [option option ...]
 
 Description:
-- At least one command of [install], [uninstall], [save], [push], or [join] must be specified. 
+- At least one command of [install], [uninstall], [save], [push], [join], or [upgrade] must be specified.
 - [push] requires [-registry]. Project path must pre-exist (i.e. my.registry.com:443/rancher).
 - [join] requires a type, [server-fqdn/ip], and a valid [join-token-string].
-- [-registry] option with [install] or [join], configures rke2 uses registry as a mirror.
+- [upgrade] requires a type [server|agent|both] and a version [stable|version].
+- [-registry] option with [install], [join], or [upgrade], configures rke2 uses registry as a mirror.
 - [-tls-san] option with [install] or [join server] configures the fqdn/ip as an extra tls-san.
 - Edit $SCRIPT_NAME 'USER DEFINED VARIABLES' before running. See README.md for details.
 
@@ -108,10 +112,13 @@ Commands:
   [save]           : Prepares an offline tar package with all rke2 install files and dependencies. Velero and monitoring are included based on PUSH_SAVE_* vars.
   [push]           : Pushes rke2 images to the specified registry. If an offline tar package is not found, it will first pull from the internet.
   [join]           : Joins the host to an existing cluster as a [server] or [agent]. [join-token-string] must be specified.
+  [upgrade]        : Upgrades the RKE2 cluster using the system-upgrade-controller.
+    [server|agent|both] Specifies which nodes to upgrade.
+    [stable|version]    Use 'stable' for latest stable channel, or specify a version (e.g. v1.33.4+rke2r1).
 
 Options:
   [agent|server <server-fqdn/ip> <join-token-string>]  : Only use with [join]
-  [-registry <registry:port> <username> <password>]    : Only use with [install], [join], [push]
+  [-registry <registry:port> <username> <password>]    : Only use with [install], [join], [push], [upgrade]
   [-tls-san <server-fqdn-ip>]                          : Only use with [install], [join server]
 
 Examples:
@@ -138,6 +145,15 @@ Examples:
 
   Create an offline tar package for installing rke2 and velero later in an air-gapped environment:
   sudo ./$SCRIPT_NAME save
+
+  Upgrade all cluster nodes to the stable release:
+  sudo ./$SCRIPT_NAME upgrade both stable
+
+  Upgrade only server nodes to a specific version:
+  sudo ./$SCRIPT_NAME upgrade server v1.33.4+rke2r1
+
+  Upgrade agent nodes using a private registry:
+  sudo ./$SCRIPT_NAME upgrade agent stable -registry my.registry.com:443 myusername mypassword
 
   Uninstall rke2 instance from the host:
   sudo ./$SCRIPT_NAME uninstall
@@ -171,6 +187,11 @@ display_args() {
     if [[ $INSTALL_TYPE == "monitoring" ]]; then
         echo "  MONITORING_HOST: $MONITORING_HOST"
         echo "  CLUSTER_NAME: $CLUSTER_NAME"
+    fi
+    if [[ $UPGRADE_MODE -eq 1 ]]; then
+        echo "  UPGRADE_MODE: $UPGRADE_MODE"
+        echo "  UPGRADE_TYPE: $UPGRADE_TYPE"
+        echo "  UPGRADE_VERSION: $UPGRADE_VERSION"
     fi
 }
 
@@ -681,6 +702,201 @@ apply_utilities () {
     fi
 }
 
+# -- Upgrade Definitions -- #
+
+run_upgrade () {
+    echo "--- Running upgrade workflow"
+    export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
+    export PATH=$PATH:/var/lib/rancher/rke2/bin
+
+    # Kubectl precheck - upgrade requires an existing cluster
+    if ! kubectl get nodes &>/dev/null; then
+        echo "Error: kubectl cannot reach the cluster. Ensure RKE2 is installed and running before upgrading."
+        exit 1
+    fi
+
+    if [[ $REGISTRY_MODE -eq 1 ]]; then
+        # Verify registries.yaml exists and contains the specified registry
+        if [[ ! -f /etc/rancher/rke2/registries.yaml ]]; then
+            echo "Error: /etc/rancher/rke2/registries.yaml not found. Registry must be configured before upgrading."
+            exit 1
+        fi
+        if ! grep -q "$REGISTRY_INFO" /etc/rancher/rke2/registries.yaml; then
+            echo "Error: Registry '$REGISTRY_INFO' not found in /etc/rancher/rke2/registries.yaml."
+            exit 1
+        fi
+        # Only push images when online (airgapped assumes images already pushed)
+        if [[ $AIR_GAPPED_MODE -eq 0 ]]; then
+            run_debug push_upgrade_images
+        fi
+    fi
+
+    run_debug install_system_upgrade_controller
+    run_debug create_upgrade_plan
+
+    echo "--- Finished upgrade workflow"
+}
+
+install_system_upgrade_controller () {
+    echo "  Checking for system-upgrade-controller..."
+    if kubectl get deployment -n system-upgrade system-upgrade-controller &>/dev/null; then
+        echo "  system-upgrade-controller is already installed."
+        return 0
+    fi
+
+    echo "  Installing system-upgrade-controller..."
+    if [[ $AIR_GAPPED_MODE -eq 1 ]]; then
+        if [[ ! -f $WORKING_DIR/rke2-utilities/crd.yaml || ! -f $WORKING_DIR/rke2-utilities/system-upgrade-controller.yaml ]]; then
+            echo "Error: system-upgrade-controller manifests not found in air-gapped archive."
+            echo "  Re-run 'save' to include upgrade artifacts."
+            exit 1
+        fi
+        kubectl apply -f $WORKING_DIR/rke2-utilities/crd.yaml -f $WORKING_DIR/rke2-utilities/system-upgrade-controller.yaml
+    else
+        curl -sfL https://github.com/rancher/system-upgrade-controller/releases/latest/download/crd.yaml -o $WORKING_DIR/rke2-utilities/crd.yaml
+        curl -sfL https://github.com/rancher/system-upgrade-controller/releases/latest/download/system-upgrade-controller.yaml -o $WORKING_DIR/rke2-utilities/system-upgrade-controller.yaml
+        kubectl apply -f $WORKING_DIR/rke2-utilities/crd.yaml -f $WORKING_DIR/rke2-utilities/system-upgrade-controller.yaml
+    fi
+
+    check_namespace_pods_ready "system-upgrade"
+    echo "  system-upgrade-controller installed successfully."
+}
+
+create_upgrade_plan () {
+    echo "  Creating upgrade plan(s)..."
+
+    # Determine version vs channel directive
+    local version_directive
+    if [[ "$UPGRADE_VERSION" == "stable" ]]; then
+        version_directive="  channel: https://update.rke2.io/v1-release/channels/stable"
+    else
+        version_directive="  version: $UPGRADE_VERSION"
+    fi
+
+    # Apply server plan if type is server or both
+    if [[ "$UPGRADE_TYPE" == "server" || "$UPGRADE_TYPE" == "both" ]]; then
+        echo "  Applying server upgrade plan..."
+        cat <<PLANEOF | kubectl apply -f -
+apiVersion: upgrade.cattle.io/v1
+kind: Plan
+metadata:
+  name: server-plan
+  namespace: system-upgrade
+spec:
+  concurrency: 1
+  cordon: true
+  nodeSelector:
+    matchExpressions:
+    - key: node-role.kubernetes.io/control-plane
+      operator: In
+      values:
+      - "true"
+  serviceAccountName: system-upgrade
+  upgrade:
+    image: rancher/rke2-upgrade
+$version_directive
+PLANEOF
+    fi
+
+    # Apply agent plan if type is agent or both
+    if [[ "$UPGRADE_TYPE" == "agent" || "$UPGRADE_TYPE" == "both" ]]; then
+        echo "  Applying agent upgrade plan..."
+        cat <<PLANEOF | kubectl apply -f -
+apiVersion: upgrade.cattle.io/v1
+kind: Plan
+metadata:
+  name: agent-plan
+  namespace: system-upgrade
+spec:
+  concurrency: 1
+  cordon: true
+  nodeSelector:
+    matchExpressions:
+    - key: node-role.kubernetes.io/control-plane
+      operator: DoesNotExist
+  prepare:
+    args:
+    - prepare
+    - server-plan
+    image: rancher/rke2-upgrade
+  serviceAccountName: system-upgrade
+  upgrade:
+    image: rancher/rke2-upgrade
+$version_directive
+PLANEOF
+    fi
+
+    echo "  Upgrade plan(s) applied successfully."
+}
+
+push_upgrade_images () {
+    echo "  Pushing upgrade images to registry..."
+    image_pull_push_check
+
+    # Resolve the upgrade version tag for the rke2-upgrade image
+    local upgrade_tag
+    if [[ "$UPGRADE_VERSION" == "stable" ]]; then
+        upgrade_tag=$(curl -sfL -o /dev/null -w '%{url_effective}' https://update.rke2.io/v1-release/channels/stable | awk -F/ '{gsub(/\+/,"-",$NF); print $NF}')
+        echo "  Resolved stable version tag: $upgrade_tag"
+    else
+        upgrade_tag=$(echo "$UPGRADE_VERSION" | sed 's/+/-/')
+    fi
+
+    # Download SUC manifest to extract the controller image
+    if [[ ! -f $WORKING_DIR/rke2-utilities/system-upgrade-controller.yaml ]]; then
+        curl -sfL https://github.com/rancher/system-upgrade-controller/releases/latest/download/system-upgrade-controller.yaml -o $WORKING_DIR/rke2-utilities/system-upgrade-controller.yaml
+    fi
+    local suc_image=$(grep 'rancher/system-upgrade-controller' $WORKING_DIR/rke2-utilities/system-upgrade-controller.yaml | awk '{print $2}')
+
+    # Build upgrade-images.txt
+    local upgrade_images_file="$WORKING_DIR/rke2-utilities/images/upgrade-images.txt"
+    echo "rancher/rke2-upgrade:${upgrade_tag}" > "$upgrade_images_file"
+    echo "$suc_image" >> "$upgrade_images_file"
+
+    echo "--- Printing upgrade-images.txt"
+    cat "$upgrade_images_file"
+    echo "---"
+
+    # Push upgrade images
+    $WORKING_DIR/rke2-utilities/image_pull_push.sh -f "$upgrade_images_file" push $REGISTRY_INFO $REG_USER $REG_PASS
+
+    # Push RKE2 core+CNI images for the target version (same method as push_rke2_images online path)
+    local upgrade_translated_version
+    if [[ "$UPGRADE_VERSION" == "stable" ]]; then
+        # Convert the resolved stable tag back to URL-encoded format
+        local stable_version=$(curl -sfL -o /dev/null -w '%{url_effective}' https://update.rke2.io/v1-release/channels/stable | awk -F/ '{print $NF}')
+        upgrade_translated_version=$(echo "$stable_version" | sed 's/+/%2B/')
+    else
+        upgrade_translated_version=$(echo "$UPGRADE_VERSION" | sed 's/+/%2B/')
+    fi
+
+    echo "  Downloading and pushing rke2 core images for upgrade version..."
+    curl -sfL https://github.com/rancher/rke2/releases/download/$upgrade_translated_version/rke2-images-core.linux-amd64.txt -o $WORKING_DIR/rke2-core-images/rke2-images-core-upgrade.linux-amd64.txt
+    $WORKING_DIR/rke2-utilities/image_pull_push.sh -f $WORKING_DIR/rke2-core-images/rke2-images-core-upgrade.linux-amd64.txt push $REGISTRY_INFO $REG_USER $REG_PASS
+
+    if [[ $CNI_NONE == "false" ]]; then
+        echo "  Downloading and pushing rke2 cni images for upgrade version..."
+        curl -sfL https://github.com/rancher/rke2/releases/download/$upgrade_translated_version/rke2-images-$CNI_TYPE.linux-amd64.txt -o $WORKING_DIR/rke2-cni-images/rke2-images-$CNI_TYPE-upgrade.linux-amd64.txt
+        $WORKING_DIR/rke2-utilities/image_pull_push.sh -f $WORKING_DIR/rke2-cni-images/rke2-images-$CNI_TYPE-upgrade.linux-amd64.txt push $REGISTRY_INFO $REG_USER $REG_PASS
+    fi
+}
+
+download_upgrade_artifacts () {
+    echo "  Downloading system-upgrade-controller manifests..."
+    curl -sfL https://github.com/rancher/system-upgrade-controller/releases/latest/download/crd.yaml -o $WORKING_DIR/rke2-utilities/crd.yaml
+    curl -sfL https://github.com/rancher/system-upgrade-controller/releases/latest/download/system-upgrade-controller.yaml -o $WORKING_DIR/rke2-utilities/system-upgrade-controller.yaml
+
+    # Extract SUC controller image from manifest and add to utility-images list
+    local suc_image=$(grep 'rancher/system-upgrade-controller' $WORKING_DIR/rke2-utilities/system-upgrade-controller.yaml | awk '{print $2}')
+    echo "  Adding SUC controller image to utility-images list: $suc_image"
+    echo "$suc_image" >> $WORKING_DIR/rke2-utilities/images/utility-images.txt
+
+    # Resolve stable version for rke2-upgrade image tag
+    local stable_tag=$(curl -sfL -o /dev/null -w '%{url_effective}' https://update.rke2.io/v1-release/channels/stable | awk -F/ '{gsub(/\+/,"-",$NF); print $NF}')
+    echo "  Adding rke2-upgrade image to utility-images list: rancher/rke2-upgrade:$stable_tag"
+    echo "rancher/rke2-upgrade:$stable_tag" >> $WORKING_DIR/rke2-utilities/images/utility-images.txt
+}
+
 # -- Velero Install Definitions -- #
 
 run_install_velero () {
@@ -1172,6 +1388,7 @@ run_save () {
     if [[ ${PUSH_SAVE_MONITORING,,} == "true" ]]; then
         download_monitoring_charts
     fi
+    download_upgrade_artifacts
     download_rke2_utilities
     create_save_archive
     echo "--- Finished save workflow"
@@ -1317,6 +1534,7 @@ create_save_archive () {
 # Prometheus Stack Version: $KUBE_PROMETHEUS_STACK_VERSION
 # Fluent Bit Chart Version: $FLUENT_BIT_CHART_VERSION
 # Fluent Bit Version: $FLUENT_BIT_VERSION
+# Upgrade Artifacts: included
 EOF
     echo "  Creating rke2 archive..."
     tar -czf rke2-save.tar.gz rke2-install rke2_installer.sh rke2-save-version.txt
@@ -1356,6 +1574,14 @@ push_utility_images () {
         if [[ ${PUSH_SAVE_MONITORING,,} == "true" ]]; then
             download_monitoring_charts
         fi
+        # Add upgrade images (SUC controller + rke2-upgrade)
+        if [[ ! -f $WORKING_DIR/rke2-utilities/system-upgrade-controller.yaml ]]; then
+            curl -sfL https://github.com/rancher/system-upgrade-controller/releases/latest/download/system-upgrade-controller.yaml -o $WORKING_DIR/rke2-utilities/system-upgrade-controller.yaml
+        fi
+        local suc_image=$(grep 'rancher/system-upgrade-controller' $WORKING_DIR/rke2-utilities/system-upgrade-controller.yaml | awk '{print $2}')
+        echo "$suc_image" >> $WORKING_DIR/rke2-utilities/images/utility-images.txt
+        local stable_tag=$(curl -sfL -o /dev/null -w '%{url_effective}' https://update.rke2.io/v1-release/channels/stable | awk -F/ '{gsub(/\+/,"-",$NF); print $NF}')
+        echo "rancher/rke2-upgrade:$stable_tag" >> $WORKING_DIR/rke2-utilities/images/utility-images.txt
         image_pull_push_check
         echo "--- Printing utility-images.txt"
         cat $WORKING_DIR/rke2-utilities/images/utility-images.txt
@@ -1497,6 +1723,14 @@ runtime_outputs () {
         echo "  - S3 credentials are correct (VELERO_S3_ACCESS_KEY / VELERO_S3_SECRET_KEY)"
         echo "  - kubectl logs deployment/velero -n velero | tail -20"
     fi
+    if [[ $UPGRADE_MODE -eq 1 ]]; then
+        echo ""
+        echo "### UPGRADE INITIATED ###"
+        echo "  Upgrade type: $UPGRADE_TYPE"
+        echo "  Upgrade version: $UPGRADE_VERSION"
+        echo "  Monitor progress: kubectl get plans -n system-upgrade"
+        echo "  Watch nodes: kubectl get nodes -w"
+    fi
 }
 
 create_working_dir () {
@@ -1596,7 +1830,7 @@ run_debug() {
 }
 
 cleanup () {
-    if [[ $INSTALL_MODE -eq 1 || $JOIN_MODE -eq 1 ]]; then
+    if [[ $INSTALL_MODE -eq 1 || $JOIN_MODE -eq 1 || $UPGRADE_MODE -eq 1 ]]; then
         echo "  Installation detected, no cleanup required..."
     else
         echo "  Cleaning up..."
@@ -1653,6 +1887,24 @@ while [[ "$#" -gt 0 ]]; do
             ;;
         push)
             PUSH_MODE=1
+            shift
+            ;;
+        upgrade)
+            UPGRADE_MODE=1
+            UPGRADE_TYPE="${2:-}"
+            UPGRADE_VERSION="${3:-}"
+            if [[ -z "$UPGRADE_TYPE" || ! "$UPGRADE_TYPE" =~ ^(server|agent|both)$ ]]; then
+                echo "Error: 'upgrade' command requires a type. Format: upgrade [server|agent|both] [stable|version]"
+                echo "Type './$SCRIPT_NAME -h' for help."
+                exit 1
+            fi
+            if [[ -z "$UPGRADE_VERSION" ]]; then
+                echo "Error: 'upgrade' command requires a version. Format: upgrade [server|agent|both] [stable|v1.x.x+rke2r1]"
+                echo "Type './$SCRIPT_NAME -h' for help."
+                exit 1
+            fi
+            shift
+            shift
             shift
             ;;
         join)
@@ -1714,10 +1966,25 @@ while [[ "$#" -gt 0 ]]; do
 done
 # Verify uninstall is not used with any other mode
 if [[ "$UNINSTALL_MODE" == "1" ]]; then
-    if [[ "$INSTALL_MODE" == "1" || "$SAVE_MODE" == "1" || "$PUSH_MODE" == "1" || "$JOIN_MODE" == "1" || "$REGISTRY_MODE" == "1" ]]; then
+    if [[ "$INSTALL_MODE" == "1" || "$SAVE_MODE" == "1" || "$PUSH_MODE" == "1" || "$JOIN_MODE" == "1" || "$REGISTRY_MODE" == "1" || "$UPGRADE_MODE" == "1" ]]; then
         echo "Error:'uninstall' command cannot be used with other commands."
         echo "Type './$SCRIPT_NAME -h' for help."
         exit 1
+    fi
+fi
+# Verify UPGRADE_MODE is not used with INSTALL_MODE, SAVE_MODE, JOIN_MODE
+if [[ "$UPGRADE_MODE" == "1" ]]; then
+    if [[ "$INSTALL_MODE" == "1" || "$SAVE_MODE" == "1" || "$JOIN_MODE" == "1" ]]; then
+        echo "Error: 'upgrade' command cannot be used with 'install', 'save', or 'join'."
+        echo "Type './$SCRIPT_NAME -h' for help."
+        exit 1
+    fi
+    if [[ "$UPGRADE_VERSION" != "stable" ]]; then
+        if [[ ! "$UPGRADE_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+\+rke2r[0-9]+$ ]]; then
+            echo "Error: Upgrade version must be 'stable' or a valid RKE2 version (e.g. v1.33.4+rke2r1)."
+            echo "Type './$SCRIPT_NAME -h' for help."
+            exit 1
+        fi
     fi
 fi
 # Verify PUSH_MODE has registry info and not used with JOIN_MODE
@@ -1771,9 +2038,9 @@ if [[ "$INSTALL_MODE" == "1" && "$INSTALL_TYPE" == "monitoring" ]]; then
         exit 1
     fi
 fi
-# Verify REGISTRY_MODE is used with one of PUSH_MODE, INSTALL_MODE or JOIN_MODE
-if [[ "$REGISTRY_MODE" == "1" && "$PUSH_MODE" != "1" && "$INSTALL_MODE" != "1" && "$JOIN_MODE" != "1" ]]; then
-    echo "Error: 'Registry config must be used with either 'push', 'join', or 'install'."
+# Verify REGISTRY_MODE is used with one of PUSH_MODE, INSTALL_MODE, JOIN_MODE, or UPGRADE_MODE
+if [[ "$REGISTRY_MODE" == "1" && "$PUSH_MODE" != "1" && "$INSTALL_MODE" != "1" && "$JOIN_MODE" != "1" && "$UPGRADE_MODE" != "1" ]]; then
+    echo "Error: 'Registry config must be used with either 'push', 'join', 'install', or 'upgrade'."
     echo "Type './$SCRIPT_NAME -h' for help."
     exit 1
 fi
@@ -1856,6 +2123,9 @@ fi
 if [[ $INSTALL_MODE -eq 1 && $INSTALL_TYPE == "monitoring" ]]; then
   echo "  Installing monitoring stack (kube-prometheus-stack + Fluent Bit)..."
   run_install_monitoring
+fi
+if [[ $UPGRADE_MODE -eq 1 ]]; then
+    run_upgrade
 fi
 cleanup
 runtime_outputs

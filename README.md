@@ -19,6 +19,7 @@ A flexible RKE2 installer for Linux systems that supports online and air-gapped 
   - [CIS Hardening](#cis-hardening)
   - [Velero Backup](#velero-backup)
   - [Monitoring Stack](#monitoring-stack)
+- [Cluster Upgrades](#cluster-upgrades)
 - [Air-Gapped Deployments](#air-gapped-deployments)
 - [Multi-Node Clusters](#multi-node-clusters)
 - [Examples](#examples)
@@ -41,6 +42,7 @@ A flexible RKE2 installer for Linux systems that supports online and air-gapped 
 - Optional control-plane taint for multi-node workload separation
 - Optional Velero backup with S3 and CSI snapshot support
 - Optional in-cluster monitoring stack (kube-prometheus-stack + Fluent Bit)
+- Automated cluster upgrades via the system-upgrade-controller
 - Automatic host configuration (swap, sysctl, firewall, NetworkManager, multipath)
 - Uninstall support for server and agent nodes
 
@@ -158,6 +160,9 @@ sudo ./rke2_installer.sh [command ...] [option ...]
 | `push` | Push RKE2 and utility images to a private registry. Requires `-registry`. Can be combined with `save`. |
 | `join agent <server-fqdn> <token>` | Join this host to an existing cluster as a worker agent node. |
 | `join server <server-fqdn> <token>` | Join this host to an existing cluster as an additional control-plane server. |
+| `upgrade server [stable\|version]` | Upgrade server (control-plane) nodes to the specified version. |
+| `upgrade agent [stable\|version]` | Upgrade agent (worker) nodes to the specified version. |
+| `upgrade both [stable\|version]` | Upgrade all nodes — servers first, then agents. |
 
 ---
 
@@ -166,7 +171,7 @@ sudo ./rke2_installer.sh [command ...] [option ...]
 | Option | Description |
 |---|---|
 | `-tls-san <fqdn-or-ip>` | Add an extra TLS SAN to the API server certificate. Use with `install` or `join server`. |
-| `-registry <registry:port> <username> <password>` | Configure a private registry as a pull-through mirror. Use with `install`, `install velero`, `join`, or `push`. |
+| `-registry <registry:port> <username> <password>` | Configure a private registry as a pull-through mirror. Use with `install`, `install velero`, `join`, `push`, or `upgrade`. |
 
 ---
 
@@ -357,6 +362,63 @@ sudo ./rke2_installer.sh install monitoring
 
 ---
 
+## Cluster Upgrades
+
+The `upgrade` command uses the [system-upgrade-controller](https://docs.rke2.io/upgrades/automated) to perform automated, rolling upgrades of your RKE2 cluster. The controller is installed automatically if not already present.
+
+```
+sudo ./rke2_installer.sh upgrade [server|agent|both] [stable|version] [-registry ...]
+```
+
+| Argument | Description |
+|---|---|
+| `server` | Upgrade only server (control-plane) nodes |
+| `agent` | Upgrade only agent (worker) nodes |
+| `both` | Upgrade all nodes — servers are upgraded first, then agents |
+| `stable` | Use the latest stable RKE2 release channel |
+| `v1.x.x+rke2r1` | Upgrade to a specific RKE2 version |
+
+When `both` is specified, the agent upgrade plan waits for the server plan to complete before proceeding.
+
+#### Examples
+
+```bash
+# Upgrade all nodes to the latest stable release
+sudo ./rke2_installer.sh upgrade both stable
+
+# Upgrade only server nodes to a specific version
+sudo ./rke2_installer.sh upgrade server v1.33.4+rke2r1
+
+# Upgrade with a private registry (pushes upgrade images first)
+sudo ./rke2_installer.sh upgrade both stable -registry my.registry.com:443 myuser mypassword
+```
+
+#### Post-Upgrade Verification
+
+```bash
+kubectl get plans -n system-upgrade    # Check upgrade plan status
+kubectl get nodes                       # Verify node versions
+```
+
+#### Air-Gapped Upgrades
+
+The `save` command automatically includes the system-upgrade-controller manifests and upgrade images. For air-gapped environments with a private registry:
+
+1. On an internet-connected machine, run `save` and `push` to populate the registry with upgrade images
+2. On the air-gapped host, run `upgrade` with `-registry` — the script will skip image downloads and use the pre-pushed images
+
+```bash
+# Online machine: save and push (includes upgrade artifacts)
+sudo ./rke2_installer.sh save push -registry my.registry.com:443 myuser mypassword
+
+# Air-gapped host: upgrade using the registry
+sudo ./rke2_installer.sh upgrade both stable -registry my.registry.com:443 myuser mypassword
+```
+
+> When `-registry` is used with `upgrade`, the script verifies that `/etc/rancher/rke2/registries.yaml` exists and contains the specified registry.
+
+---
+
 ## Air-Gapped Deployments
 
 Use the `save` command on an internet-connected machine to download all required files, then transfer the archive to the air-gapped host.
@@ -371,6 +433,7 @@ This creates `rke2-save.tar.gz` containing:
 - RKE2 binaries and images (core + CNI)
 - Velero CLI and images
 - Monitoring Helm charts (kube-prometheus-stack + Fluent Bit) and images
+- System-upgrade-controller manifests and upgrade images
 - Utility manifests (local-path-provisioner, dnsutils)
 - Helm binary
 
@@ -452,6 +515,15 @@ sudo ./rke2_installer.sh join agent my.rke2-server.lab <join-token>
 
 # Join as additional server node
 sudo ./rke2_installer.sh join server my.rke2-server.lab <join-token>
+
+# Upgrade all nodes to the latest stable release
+sudo ./rke2_installer.sh upgrade both stable
+
+# Upgrade server nodes to a specific version
+sudo ./rke2_installer.sh upgrade server v1.33.4+rke2r1
+
+# Upgrade with a private registry
+sudo ./rke2_installer.sh upgrade both stable -registry my.registry.com:443 myuser mypassword
 
 # Create offline archive for air-gapped deployment
 sudo ./rke2_installer.sh save
