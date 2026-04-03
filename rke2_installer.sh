@@ -301,7 +301,7 @@ create_registry_config () {
         echo "  Configuring private registry for RKE2..."
         CERTS_DIR="/etc/rancher/rke2/certs.d/${REG_FQDN}:${REG_PORT}"
         mkdir -p "$CERTS_DIR"
-        if openssl s_client -showcerts -connect "$REGISTRY_INFO" < /dev/null 2>/dev/null | openssl x509 -outform PEM > "$CERTS_DIR/ca.crt"; then
+        if openssl s_client -showcerts -connect "$REGISTRY_INFO" < /dev/null 2>/dev/null | sed -n '/BEGIN CERTIFICATE/,/END CERTIFICATE/p' > "$CERTS_DIR/ca.crt"; then
             echo "  Certificate saved to $CERTS_DIR."
         else
             echo "Error: Failed to retrieve certificate from '$REG_FQDN'. Please ensure the registry is accessible and the port is correct."
