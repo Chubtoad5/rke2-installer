@@ -7,7 +7,8 @@ set -o pipefail
 
 # --- USER DEFINED VARIABLES ---#
 RKE2_VERSION=${RKE2_VERSION:-"v1.34.5+rke2r1"}
-CNI_TYPE=${CNI_TYPE:-"canal"}                                                 # Valid values: calico, canal, cilium, none
+CNI_TYPE=${CNI_TYPE:-"calico"}                                                # Valid values: calico, canal, cilium, none
+CALICO_EBPF=${CALICO_EBPF:-"true"}                                           # Enable eBPF dataplane for Calico CNI (requires kernel >= 5.3, disables kube-proxy)
 ENABLE_CIS=${ENABLE_CIS:-"false"}                                             # Enables Kubernetes specific CIS hardening
 CLUSTER_CIDR=${CLUSTER_CIDR:-"10.42.0.0/16"}
 SERVICE_CIDR=${SERVICE_CIDR:-"10.43.0.0/16"}
@@ -183,6 +184,10 @@ display_args() {
     echo "  REG_PORT: $REG_PORT"
     echo "  REG_USER: $REG_USER"
     echo "  REG_PASS: $REG_PASS"
+    echo "  CNI_TYPE: $CNI_TYPE"
+    if [[ $CNI_TYPE == "calico" ]]; then
+        echo "  CALICO_EBPF: $CALICO_EBPF"
+    fi
     echo "  OS: $OS_ID"
     if [[ $INSTALL_TYPE == "monitoring" ]]; then
         echo "  MONITORING_HOST: $MONITORING_HOST"
@@ -378,6 +383,7 @@ create_server_join_config () {
     fi
     echo "  Generating /etc/rancher/rke2/config.yaml for server join"
     cat > /etc/rancher/rke2/config.yaml <<EOF
+cni: "$CNI_TYPE"
 server: https://${JOIN_SERVER_FQDN}:9345
 token: "$JOIN_TOKEN"
 write-kubeconfig-mode: "0600"
@@ -428,6 +434,11 @@ EOF
     if [[ ${ENABLE_CIS,,} == "true" ]]; then
         cat >> /etc/rancher/rke2/config.yaml <<EOF
 profile: "cis"
+EOF
+    fi
+    if [[ $CNI_TYPE == "calico" && ${CALICO_EBPF,,} == "true" ]]; then
+        cat >> /etc/rancher/rke2/config.yaml <<EOF
+disable-kube-proxy: true
 EOF
     fi
     if [[ $TLS_SAN_MODE -eq 1 ]]; then
@@ -516,6 +527,25 @@ metadata:
 automountServiceAccountToken: false
 EOF
     fi
+    if [[ $CNI_TYPE == "calico" && ${CALICO_EBPF,,} == "true" ]]; then
+        cat >> /etc/rancher/rke2/config.yaml <<EOF
+disable-kube-proxy: true
+EOF
+        echo "  Generating $RKE2_DATA/server/manifests/rke2-calico-helmchartconfig.yaml (eBPF + VXLAN)"
+        cat > $RKE2_DATA/server/manifests/rke2-calico-helmchartconfig.yaml <<EOF
+apiVersion: helm.cattle.io/v1
+kind: HelmChartConfig
+metadata:
+  name: rke2-calico
+  namespace: kube-system
+spec:
+  valuesContent: |-
+    installation:
+      calicoNetwork:
+        linuxDataplane: BPF
+        bgp: Disabled
+EOF
+    fi
     echo "  Generating $RKE2_DATA/server/manifests/rke2-coredns-helmchartconfig.yaml"
     cat > $RKE2_DATA/server/manifests/rke2-coredns-helmchartconfig.yaml <<EOF
 apiVersion: helm.cattle.io/v1
@@ -588,10 +618,20 @@ EOF
     fi
 # Configure NetworkManager to ignore CNI interfaces if it is in use
     if systemctl is-active --quiet NetworkManager; then
-        echo "  NetworkManager is active. Creating rke2-canal.conf..."
-        cat > /etc/NetworkManager/conf.d/rke2-canal.conf <<EOF
+        echo "  NetworkManager is active. Creating rke2-cni.conf..."
+        local nm_unmanaged="interface-name:cali*;interface-name:tunl*;interface-name:vxlan.calico;interface-name:vxlan-v6.calico;interface-name:wireguard.cali;interface-name:wg-v6.cali"
+        if [[ $CNI_TYPE == "canal" ]]; then
+            nm_unmanaged="interface-name:flannel*;${nm_unmanaged}"
+        fi
+        if [[ $CNI_TYPE == "calico" && ${CALICO_EBPF,,} == "true" ]]; then
+            nm_unmanaged="${nm_unmanaged};interface-name:bpf*"
+        fi
+        if [[ $CNI_TYPE == "cilium" ]]; then
+            nm_unmanaged="interface-name:cilium*;interface-name:lxc*;${nm_unmanaged}"
+        fi
+        cat > /etc/NetworkManager/conf.d/rke2-cni.conf <<EOF
 [keyfile]
-unmanaged-devices=interface-name:flannel*;interface-name:cali*;interface-name:tunl*;interface-name:vxlan.calico;interface-name:vxlan-v6.calico;interface-name:wireguard.cali;interface-name:wg-v6.cali
+unmanaged-devices=${nm_unmanaged}
 EOF
         echo "  Restarting NetworkManager to apply changes..."
         systemctl restart NetworkManager
@@ -2097,6 +2137,20 @@ fi
 CNI_NONE="false"
 if [[ $CNI_TYPE == "none" ]]; then
     CNI_NONE="true"
+fi
+# Verify CALICO_EBPF is only used with calico CNI, and check kernel version
+if [[ ${CALICO_EBPF,,} == "true" ]]; then
+    if [[ $CNI_TYPE != "calico" ]]; then
+        echo "Error: CALICO_EBPF=true requires CNI_TYPE=calico. Current CNI_TYPE=$CNI_TYPE."
+        exit 1
+    fi
+    KERNEL_MAJOR=$(uname -r | cut -d. -f1)
+    KERNEL_MINOR=$(uname -r | cut -d. -f2)
+    if [[ $KERNEL_MAJOR -lt 5 || ($KERNEL_MAJOR -eq 5 && $KERNEL_MINOR -lt 3) ]]; then
+        echo "Error: Calico eBPF dataplane requires Linux kernel >= 5.3. Detected: $(uname -r)."
+        echo "Set CALICO_EBPF=false to use standard iptables dataplane."
+        exit 1
+    fi
 fi
 # Verify AIR_GAPPED_MODE based on rke-save.tar.gz file presence
 [[ ! -f $base_dir/rke2-save-version.txt ]] || AIR_GAPPED_MODE=1
