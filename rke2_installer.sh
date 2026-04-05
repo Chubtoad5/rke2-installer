@@ -272,6 +272,12 @@ start_rke2_service () {
         ln -s $RKE2_DATA/bin/kubectl /usr/bin/kubectl || true
         ln -s $RKE2_DATA/bin/ctr /usr/bin/ctr || true
         ln -s $RKE2_DATA/bin/crictl /usr/bin/crictl || true
+        if [[ $INSTALL_MODE -eq 1 && $CNI_TYPE == "calico" && ${CALICO_EBPF,,} == "true" ]]; then
+            echo "  Patching tigera-operator to use host API server endpoint (eBPF bypass)..."
+            kubectl set env deployment/tigera-operator -n tigera-operator \
+                KUBERNETES_SERVICE_HOST="$MGMT_IP" \
+                KUBERNETES_SERVICE_PORT="6443"
+        fi
         check_namespace_pods_ready
     fi
 }
@@ -544,6 +550,39 @@ spec:
       calicoNetwork:
         linuxDataplane: BPF
         bgp: Disabled
+      calicoKubeControllersDeployment:
+        spec:
+          template:
+            spec:
+              containers:
+              - name: calico-kube-controllers
+                env:
+                - name: KUBERNETES_SERVICE_HOST
+                  value: "$MGMT_IP"
+                - name: KUBERNETES_SERVICE_PORT
+                  value: "6443"
+      calicoNodeDaemonSet:
+        spec:
+          template:
+            spec:
+              containers:
+              - name: calico-node
+                env:
+                - name: KUBERNETES_SERVICE_HOST
+                  value: "$MGMT_IP"
+                - name: KUBERNETES_SERVICE_PORT
+                  value: "6443"
+      typhaDeployment:
+        spec:
+          template:
+            spec:
+              containers:
+              - name: calico-typha
+                env:
+                - name: KUBERNETES_SERVICE_HOST
+                  value: "$MGMT_IP"
+                - name: KUBERNETES_SERVICE_PORT
+                  value: "6443"
 EOF
     fi
     echo "  Generating $RKE2_DATA/server/manifests/rke2-coredns-helmchartconfig.yaml"
