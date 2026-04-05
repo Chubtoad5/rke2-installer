@@ -273,6 +273,18 @@ start_rke2_service () {
         ln -s $RKE2_DATA/bin/ctr /usr/bin/ctr || true
         ln -s $RKE2_DATA/bin/crictl /usr/bin/crictl || true
         if [[ $INSTALL_MODE -eq 1 && $CNI_TYPE == "calico" && ${CALICO_EBPF,,} == "true" ]]; then
+            echo "  Waiting for tigera-operator deployment to be created..."
+            local ebpf_timeout=120
+            local ebpf_start=$(date +%s)
+            while ! kubectl get deployment tigera-operator -n tigera-operator &>/dev/null; do
+                local ebpf_elapsed=$(($(date +%s) - ebpf_start))
+                if [[ $ebpf_elapsed -ge $ebpf_timeout ]]; then
+                    echo "Error: Timed out waiting for tigera-operator deployment after ${ebpf_timeout}s."
+                    exit 1
+                fi
+                echo "  - Waiting for tigera-operator namespace and deployment... (${ebpf_elapsed}s/${ebpf_timeout}s)"
+                sleep 5
+            done
             echo "  Patching tigera-operator to use host API server endpoint (eBPF bypass)..."
             kubectl set env deployment/tigera-operator -n tigera-operator \
                 KUBERNETES_SERVICE_HOST="$MGMT_IP" \
