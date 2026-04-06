@@ -549,6 +549,13 @@ EOF
         cat >> /etc/rancher/rke2/config.yaml <<EOF
 disable-kube-proxy: true
 EOF
+        # Detect the network interface that owns MGMT_IP for Calico node autodetection
+        CALICO_IFACE=$(ip -o addr show | awk -v ip="$MGMT_IP" '$4 ~ ip {print $2; exit}')
+        if [[ -z "$CALICO_IFACE" ]]; then
+            echo "Error: Could not detect network interface for MGMT_IP=$MGMT_IP."
+            exit 1
+        fi
+        echo "  Detected interface '$CALICO_IFACE' for MGMT_IP=$MGMT_IP"
         echo "  Generating $RKE2_DATA/server/manifests/rke2-calico-helmchartconfig.yaml (eBPF + VXLAN)"
         cat > $RKE2_DATA/server/manifests/rke2-calico-helmchartconfig.yaml <<EOF
 apiVersion: helm.cattle.io/v1
@@ -562,6 +569,8 @@ spec:
       calicoNetwork:
         linuxDataplane: BPF
         bgp: Disabled
+        nodeAddressAutodetectionV4:
+          interface: "$CALICO_IFACE"
       calicoKubeControllersDeployment:
         spec:
           template:
