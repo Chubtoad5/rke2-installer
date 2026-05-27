@@ -380,6 +380,7 @@ create_server_join_config () {
     cat > /etc/rancher/rke2/config.yaml <<EOF
 server: https://${JOIN_SERVER_FQDN}:9345
 token: "$JOIN_TOKEN"
+cni: "$CNI_TYPE"
 write-kubeconfig-mode: "0600"
 service-node-port-range: "443-40000"
 cluster-cidr: "$CLUSTER_CIDR"
