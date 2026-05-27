@@ -58,17 +58,37 @@ A flexible RKE2 installer for Linux systems that supports online and air-gapped 
 
 ## Quick Start
 
+`rke2-installer` is a **standalone** tool — it stands up a complete single-node RKE2 Kubernetes cluster
+on its own. (It is also used under the hood by `automation-platform-tools`, but you don't need that to
+use it here.)
+
+**Prerequisites**
+- A Linux host with `root` / `sudo` (see [Supported Operating Systems](#supported-operating-systems))
+- A static IP (or DHCP reservation) and a valid hostname
+- Internet access for an online install — or a `save` archive for air-gapped (see
+  [Air-Gapped Deployments](#air-gapped-deployments))
+
+**1. Get the script**
 ```bash
 git clone https://github.com/Chubtoad5/rke2-installer.git
 cd rke2-installer
 chmod +x rke2_installer.sh
 ```
 
-Edit the `USER DEFINED VARIABLES` section at the top of `rke2_installer.sh` as needed, then run as root:
+**2. (Optional) adjust settings, then install as root.** The defaults give you a working single-node
+cluster with the NGINX ingress controller, Klipper load balancer, and Local Path storage class:
 
 ```bash
 sudo ./rke2_installer.sh install
 ```
+
+You can also override any variable inline, e.g.
+`sudo RKE2_VERSION=v1.34.5+rke2r1 ./rke2_installer.sh install`.
+
+**Want more than one node?** Install the first server as above, then on each additional machine run
+`join server <fqdn> <token>` (control-plane) or `join agent <fqdn> <token>` (worker). The token lives at
+`/var/lib/rancher/rke2/server/node-token` on the first server. See
+[Multi-Node Clusters](#multi-node-clusters).
 
 ---
 
@@ -80,7 +100,7 @@ All configuration is done by editing the `USER DEFINED VARIABLES` section at the
 
 | Variable | Default | Description |
 |---|---|---|
-| `RKE2_VERSION` | `v1.32.5+rke2r1` | RKE2 version to install |
+| `RKE2_VERSION` | `v1.34.5+rke2r1` | RKE2 version to install |
 | `CNI_TYPE` | `canal` | CNI plugin: `calico`, `canal`, `cilium`, or `none` |
 | `CLUSTER_CIDR` | `10.42.0.0/16` | Pod network CIDR |
 | `SERVICE_CIDR` | `10.43.0.0/16` | Service network CIDR |
