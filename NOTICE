@@ -1,0 +1,26 @@
+RKE2 Installer
+Copyright (C) 2026 Chubtoad5
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This is an original automation script. It installs and orchestrates the following
+third-party open-source software, each under its own license (all credit to their
+respective authors):
+
+  Rancher RKE2            Apache-2.0   https://github.com/rancher/rke2
+   incl. containerd, CoreDNS, Calico/Flannel (canal), ingress-nginx,
+   metrics-server                     all Apache-2.0
+  Helm                    Apache-2.0   https://github.com/helm/helm
+  local-path-provisioner  Apache-2.0   https://github.com/rancher/local-path-provisioner
+  system-upgrade-controller Apache-2.0 https://github.com/rancher/system-upgrade-controller
+  Velero                  Apache-2.0   https://github.com/vmware-tanzu/velero
+  Fluent Bit              Apache-2.0   https://github.com/fluent/fluent-bit
+  kube-prometheus-stack   Apache-2.0   https://github.com/prometheus-community/helm-charts
+
+When the `save`/`push` modes build an air-gap bundle or push to a registry, they
+redistribute the RKE2 binary and image tarballs (Apache-2.0 — retain copyright and
+any bundled NOTICE files). The optional monitoring path (`install monitoring`)
+deploys kube-prometheus-stack, which pulls **Grafana (AGPL-3.0)**; if a bundle
+includes the Grafana image, also provide the corresponding source or a written
+offer per the AGPL (the AGPL §13 network clause applies only if Grafana is
+modified — unmodified upstream images do not trigger it).

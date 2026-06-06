@@ -554,3 +554,18 @@ sudo ./rke2_installer.sh push -registry my.registry.com:443 myuser mypassword
 # Uninstall RKE2 from the host
 sudo ./rke2_installer.sh uninstall
 ```
+
+---
+
+## Upstream / Credits
+
+This project automates the following open-source software; all credit to their authors. See [NOTICE](NOTICE) for
+the full third-party list + licenses.
+
+- Rancher RKE2 + bundled containerd / CoreDNS / Calico-Flannel (canal) / ingress-nginx / metrics-server — Apache-2.0
+- Helm, Velero, local-path-provisioner, system-upgrade-controller, Fluent Bit — Apache-2.0
+- kube-prometheus-stack (Apache-2.0 chart) — note its monitoring path deploys **Grafana (AGPL-3.0)**; provide source/offer if the Grafana image is bundled
+
+## License
+
+Licensed under the **Apache License 2.0** — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
