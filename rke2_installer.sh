@@ -54,6 +54,7 @@ MONITOR_EXCLUDE_NS=${MONITOR_EXCLUDE_NS:-"kube-system kube-public kube-node-leas
 MONITOR_PORT_NAMES=${MONITOR_PORT_NAMES:-"manager metrics http-metrics prometheus monitoring prom"}     # Port names treated as Prometheus metrics endpoints
 MONITOR_CONFIGS_DIR=${MONITOR_CONFIGS_DIR:-""}                       # Optional dir of additional ServiceMonitor YAML files to apply
 PUSH_SAVE_MONITORING=${PUSH_SAVE_MONITORING:-"true"}                 # Allow saving and pushing monitoring images to private registry
+LICENSE_OFFER_CONTACT=${LICENSE_OFFER_CONTACT:-"the Chubtoad5 project via https://github.com/Chubtoad5"}  # contact named in the bundle's GPL/AGPL written offer
 
 # --- INTERNAL VARIABLES - DO NOT EDIT --- #
 user_name=${SUDO_USER:-}
@@ -1522,6 +1523,58 @@ download_monitoring_charts () {
     echo "  Monitoring charts saved to $WORKING_DIR/monitoring/"
 }
 
+# Write a LICENSES/ dir into the air-gap archive: a third-party manifest plus (when the
+# monitoring stack is bundled) an AGPLv3 written offer for Grafana, which kube-prometheus-stack
+# deploys. Satisfies the AGPL "corresponding source or written offer" requirement.
+generate_bundle_licenses () {
+    local dir="$base_dir/LICENSES"
+    rm -rf "$dir"; mkdir -p "$dir"
+    {
+        echo "Third-party components redistributed in this RKE2 air-gap bundle"
+        echo "Generated: $(date)"
+        echo ""
+        echo "Rancher RKE2 ${RKE2_VERSION} (incl. containerd, CoreDNS, Calico/Flannel"
+        echo "  'canal', ingress-nginx, metrics-server) ........ Apache-2.0  https://github.com/rancher/rke2"
+        echo "Helm, local-path-provisioner ${LOCAL_PATH_PROVISIONER_VERSION}, system-upgrade-controller,"
+        echo "  Velero ${VELERO_VERSION}, Fluent Bit ${FLUENT_BIT_VERSION} ........ Apache-2.0"
+        if [[ ${PUSH_SAVE_MONITORING,,} == "true" ]]; then
+            echo "kube-prometheus-stack ${KUBE_PROMETHEUS_STACK_VERSION} (chart) .. Apache-2.0  https://github.com/prometheus-community/helm-charts"
+            echo "  -> deploys Grafana ............................. AGPL-3.0   https://github.com/grafana/grafana  (see WRITTEN_OFFER.txt)"
+        fi
+        echo ""
+        echo "The installer scripts are Apache-2.0 (Chubtoad5). Permissive components retain"
+        echo "their copyright/license + NOTICE files inside the image/binary tarballs."
+    } > "$dir/THIRD_PARTY_NOTICES.txt"
+    if [[ ${PUSH_SAVE_MONITORING,,} == "true" ]]; then
+        cat > "$dir/WRITTEN_OFFER.txt" <<EOF
+WRITTEN OFFER FOR CORRESPONDING SOURCE CODE (AGPL-3.0)
+
+This air-gap bundle, when built with the monitoring stack (PUSH_SAVE_MONITORING=true),
+redistributes Grafana (deployed by kube-prometheus-stack ${KUBE_PROMETHEUS_STACK_VERSION})
+in object (image) form. Grafana is licensed under the GNU Affero General Public License,
+version 3.
+
+In accordance with AGPLv3 section 6, the distributor of this bundle hereby makes a
+written offer, valid for three (3) years from the date this bundle was created
+($(date +%Y-%m-%d)), to give any third party who possesses this bundle a complete
+machine-readable copy of the corresponding source code, for a charge no more than the
+cost of physically performing the source distribution.
+
+Grafana is redistributed UNMODIFIED; the AGPLv3 section 13 remote-source obligation
+(which applies to modified versions only) therefore does not apply.
+
+Upstream source: https://github.com/grafana/grafana
+
+To request the source on a physical medium, contact: ${LICENSE_OFFER_CONTACT}
+
+This offer is independent of the Apache-2.0 license covering the installer scripts.
+EOF
+        echo "  Wrote LICENSES/ (manifest + AGPL written offer for Grafana)."
+    else
+        echo "  Wrote LICENSES/ (third-party manifest; monitoring not bundled)."
+    fi
+}
+
 create_save_archive () {
     # saves downloaded files into rke2-save.tar.gz
     cat > $base_dir/rke2-save-version.txt <<EOF
@@ -1537,8 +1590,9 @@ create_save_archive () {
 # Fluent Bit Version: $FLUENT_BIT_VERSION
 # Upgrade Artifacts: included
 EOF
+    generate_bundle_licenses
     echo "  Creating rke2 archive..."
-    tar -czf rke2-save.tar.gz rke2-install rke2_installer.sh rke2-save-version.txt
+    tar -czf rke2-save.tar.gz rke2-install rke2_installer.sh rke2-save-version.txt LICENSES
     echo "  Air-gapped archive 'rke2-save.tar.gz' created."
 }
 
