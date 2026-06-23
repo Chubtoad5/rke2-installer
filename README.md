@@ -131,7 +131,7 @@ All configuration is done by editing the `USER DEFINED VARIABLES` section at the
 |---|---|---|
 | `VELERO_VERSION` | `v1.17.1` | Velero CLI/server version |
 | `VELERO_AWS_PLUGIN_VERSION` | `v1.13.0` | Velero AWS plugin version (used for S3 backend) |
-| `VELERO_BUCKET` | `velero` | S3 bucket name for backup storage |
+| `VELERO_BUCKET` | `velero` | S3 bucket name for backup storage. In a multi-cluster environment set this per cluster (e.g. `VELERO_BUCKET=$CLUSTER_NAME`) to avoid backup collision. The installer prints a warning if `VELERO_BUCKET` is left at the default `velero` while `CLUSTER_NAME` has been customised. |
 | `VELERO_S3_URL` | *(required)* | S3 endpoint URL, e.g. `https://s3.example.com:8333` |
 | `VELERO_S3_ACCESS_KEY` | *(required)* | S3 access key |
 | `VELERO_S3_SECRET_KEY` | *(required)* | S3 secret key |
