@@ -2084,6 +2084,18 @@ if [[ "$INSTALL_MODE" == "1" && "$INSTALL_TYPE" == "velero" ]]; then
         echo "Type './$SCRIPT_NAME -h' for help."
         exit 1
     fi
+    # Preflight: warn if VELERO_BUCKET is still the default while CLUSTER_NAME has been customised.
+    # In a multi-cluster environment each cluster needs its own Velero bucket to avoid backup
+    # collision; the default 'velero' bucket may also not exist on the target SWFS (BSL Unavailable).
+    if [[ "$VELERO_BUCKET" == "velero" && "$CLUSTER_NAME" != "edge-lab" ]]; then
+        echo ""
+        echo "  WARNING: VELERO_BUCKET is still the default ('velero') but CLUSTER_NAME is '${CLUSTER_NAME}'."
+        echo "  In a multi-cluster environment each cluster should have its own Velero bucket to avoid"
+        echo "  backup collision. Set VELERO_BUCKET=<cluster-id> to match CLUSTER_NAME."
+        echo "  Continuing in 10 seconds — Ctrl-C to abort and fix."
+        echo ""
+        sleep 10
+    fi
 fi
 # Verify MONITORING_HOST is set when installing monitoring
 if [[ "$INSTALL_MODE" == "1" && "$INSTALL_TYPE" == "monitoring" ]]; then
