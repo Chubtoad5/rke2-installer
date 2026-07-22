@@ -2293,6 +2293,41 @@ os_check () {
     fi
 }
 
+require_cmds () {
+    # RK-9: verify required commands up front (minimal cloud images lack several of
+    # these) instead of failing obscurely mid-install. Prints a per-distro install hint.
+    local missing="" c
+    for c in "$@"; do
+        if ! command -v "$c" &>/dev/null; then
+            missing="$missing $c"
+        fi
+    done
+    if [[ -n "$missing" ]]; then
+        echo "Error: required command(s) not found:$missing"
+        case "$OS_ID" in
+            ubuntu|debian)
+                echo "  Install with: sudo apt-get update && sudo apt-get install -y$missing" ;;
+            rhel|centos|rocky|almalinux|fedora)
+                echo "  Install with: sudo dnf install -y$missing" ;;
+            sles|opensuse-leap)
+                echo "  Install with: sudo zypper install -y$missing" ;;
+        esac
+        exit 1
+    fi
+}
+
+preflight_checks () {
+    local cmds="tar gzip awk sed grep"
+    if [[ $AIR_GAPPED_MODE -eq 0 ]]; then
+        cmds="$cmds curl"
+    fi
+    if [[ $REGISTRY_MODE -eq 1 ]]; then
+        cmds="$cmds openssl"
+    fi
+    # shellcheck disable=SC2086
+    require_cmds $cmds
+}
+
 image_pull_push_check () {
     if [[ ! -f $WORKING_DIR/rke2-utilities/image_pull_push.sh ]]; then
         echo "  Downloading image_pull_push.sh..."
@@ -2653,6 +2688,7 @@ fi
 [[ ! -f $base_dir/rke2-save-version.txt ]] || AIR_GAPPED_MODE=1
 
 os_check
+preflight_checks
 display_args
 if [[ $UNINSTALL_MODE -eq 1 ]]; then
   run_debug uninstall_rke2
