@@ -286,7 +286,12 @@ start_rke2_service () {
         ln -s $RKE2_DATA/bin/kubectl /usr/bin/kubectl || true
         ln -s $RKE2_DATA/bin/ctr /usr/bin/ctr || true
         ln -s $RKE2_DATA/bin/crictl /usr/bin/crictl || true
-        check_namespace_pods_ready
+        # Hard-fail: the rest of the install (utilities, add-ons) depends on a ready control plane.
+        if ! check_namespace_pods_ready; then
+            echo "Error: kube-system pods did not become ready within the timeout. The cluster may still be"
+            echo "  converging - inspect with 'kubectl get pods -A' and re-run '$SCRIPT_NAME install' once it settles."
+            exit 1
+        fi
     fi
 }
 
@@ -703,7 +708,12 @@ apply_utilities () {
            sed -i "s|\"paths\":\[\s*\"[^\"]*\"\s*\]|\"paths\":[\"${PVC_DATA}/local-path-provisioner\"]|g" $WORKING_DIR/rke2-utilities/local-path-storage.yaml
         fi    
         kubectl apply -f $WORKING_DIR/rke2-utilities/local-path-storage.yaml
-        check_namespace_pods_ready local-path-storage
+        # Hard-fail: the storageclass patch below and dependent PVCs need a live provisioner.
+        if ! check_namespace_pods_ready local-path-storage; then
+            echo "Error: local-path-provisioner pods did not become ready within the timeout."
+            echo "  Inspect with 'kubectl get pods -n local-path-storage'."
+            exit 1
+        fi
         kubectl patch storageclass local-path -p '{"metadata": {"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
     fi
     if [[ ${INSTALL_DNS_UTILITY,,} == "true" ]]; then
@@ -714,7 +724,11 @@ apply_utilities () {
         else
             kubectl apply -f https://raw.githubusercontent.com/kubernetes/website/main/content/en/examples/admin/dns/dnsutils.yaml
         fi
-        check_namespace_pods_ready default
+        # Warn-and-continue: 'default' may contain unrelated user workloads and dnsutils is a
+        # non-critical troubleshooting pod - do not fail the install over it.
+        if ! check_namespace_pods_ready default; then
+            echo "  WARNING: pods in the 'default' namespace are not all ready; continuing (dnsutils is non-critical)."
+        fi
     fi
 }
 
@@ -774,7 +788,12 @@ install_system_upgrade_controller () {
         kubectl apply -f $WORKING_DIR/rke2-utilities/crd.yaml -f $WORKING_DIR/rke2-utilities/system-upgrade-controller.yaml
     fi
 
-    check_namespace_pods_ready "system-upgrade"
+    # Hard-fail: upgrade plans are useless without a running controller.
+    if ! check_namespace_pods_ready "system-upgrade"; then
+        echo "Error: system-upgrade-controller did not become ready within the timeout."
+        echo "  Inspect with 'kubectl get pods -n system-upgrade'."
+        exit 1
+    fi
     echo "  system-upgrade-controller installed successfully."
 }
 
@@ -982,7 +1001,12 @@ CREDEOF
 
   # Verify installation
   echo "  Verifying Velero installation..."
-  check_namespace_pods_ready "velero"
+  # Hard-fail: a scheduled backup against a broken Velero deployment is worse than no install.
+  if ! check_namespace_pods_ready "velero"; then
+      echo "Error: Velero pods did not become ready within the timeout."
+      echo "  Inspect with 'kubectl get pods -n velero' and re-run '$SCRIPT_NAME install velero'."
+      exit 1
+  fi
 
   # Create scheduled backup
   echo "  Creating scheduled backup '${VELERO_BACKUP_SCHEDULE}'..."
@@ -1343,7 +1367,13 @@ FBEOF
   # Auto-discover and apply ServiceMonitors for metrics-exposing services
   generate_service_monitors
 
-  check_namespace_pods_ready "monitoring"
+  # Hard-fail: both charts were installed with --wait, so a timeout here means the
+  # monitoring stack regressed after install - surface it instead of blessing it.
+  if ! check_namespace_pods_ready "monitoring"; then
+      echo "Error: monitoring pods did not become ready within the timeout."
+      echo "  Inspect with 'kubectl get pods -n monitoring'."
+      exit 1
+  fi
 }
 
 # -- Uninstall Definitions -- #
@@ -1845,6 +1875,7 @@ image_pull_push_check () {
 check_namespace_pods_ready() {
   # Run this function as 'check_namespace_pods_ready $namespace', no argument will default to kube-system
   # checks status of pods, deletes any completed pods, and loops until all pods are ready or 120s has elapsed
+  # Returns 1 on timeout (matches the ap-tools copy); callers decide fail-hard vs warn-and-continue.
   local timeout_seconds=120
   local start_time=$(date +%s)
   local ns=${1:-"kube-system"}
@@ -1859,7 +1890,7 @@ check_namespace_pods_ready() {
     if [ "$elapsed_time" -ge "$timeout_seconds" ]; then
       echo "Error: Timeout reached after $timeout_seconds seconds. Not all pods are ready." >&2
       kubectl get pods -A
-      return 0
+      return 1
     fi
     if [ "$current_pods_not_ready" -eq 0 ]; then
       break
