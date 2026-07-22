@@ -85,6 +85,7 @@ UPGRADE_TYPE=""
 UPGRADE_VERSION=""
 SKIP_CORE_INSTALL=0
 SERVICE_ACTION="start"
+SELINUX_ENFORCING="false"
 fqdn_pattern='^([a-z0-9]+(-[a-z0-9]+)*\.)+[a-z]{2,}$'
 ipv4_pattern='^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$'
 TMP_DIR=$(mktemp -d /tmp/rke2-installer.XXXXXX)
@@ -210,6 +211,7 @@ display_args() {
     echo "  REG_USER: $REG_USER"
     echo "  REG_PASS: $REG_PASS"
     echo "  OS: $OS_ID"
+    echo "  SELINUX_ENFORCING: $SELINUX_ENFORCING"
     if [[ $INSTALL_TYPE == "monitoring" ]]; then
         echo "  MONITORING_HOST: $MONITORING_HOST"
         echo "  CLUSTER_NAME: $CLUSTER_NAME"
@@ -241,6 +243,7 @@ run_install () {
         if [[ $SKIP_CORE_INSTALL -eq 0 ]]; then
             run_debug install_rke2_binaries
         fi
+        run_debug ensure_selinux_policy
         run_debug config_host_settings
         run_debug start_rke2_service "$SERVICE_ACTION"
         run_debug apply_utilities
@@ -251,6 +254,7 @@ run_install () {
         if [[ $SKIP_CORE_INSTALL -eq 0 ]]; then
             run_debug install_rke2_binaries
         fi
+        run_debug ensure_selinux_policy
         run_debug config_host_settings
         run_debug start_rke2_service "$SERVICE_ACTION"
     fi
@@ -260,6 +264,7 @@ run_install () {
         if [[ $SKIP_CORE_INSTALL -eq 0 ]]; then
             run_debug install_rke2_binaries
         fi
+        run_debug ensure_selinux_policy
         run_debug config_host_settings
         run_debug start_rke2_service "$SERVICE_ACTION"
     fi
@@ -335,6 +340,52 @@ reconcile_existing_install () {
         echo "  or align the environment variables with the running configuration."
         exit 1
     fi
+}
+
+ensure_selinux_policy () {
+    # RK-3: RKE2 needs the rke2-selinux/container-selinux policies when SELinux is
+    # enforcing. The upstream rpm install method (Rocky/RHEL online default) pulls
+    # rke2-selinux in via its own repos automatically. The tar method - forced in
+    # air-gap mode by INSTALL_RKE2_ARTIFACT_PATH, and used on SUSE hosts even online -
+    # installs NO policy: bringing the cluster up like that yields AVC-broken
+    # workloads. Verify/repair BEFORE the service is started.
+    if [[ "$SELINUX_ENFORCING" != "true" ]]; then
+        echo "  SELinux is not enforcing; no SELinux policy required."
+        return 0
+    fi
+    echo "  SELinux is enforcing; verifying RKE2 SELinux policies..."
+    if ! command -v rpm &>/dev/null; then
+        echo "  WARNING: SELinux is enforcing but this is not an rpm-based host; cannot verify the"
+        echo "  rke2-selinux policy. RKE2 workloads may hit AVC denials - verify SELinux policy manually."
+        return 0
+    fi
+    if rpm -q rke2-selinux &>/dev/null; then
+        echo "  rke2-selinux policy present ($(rpm -q rke2-selinux))."
+        return 0
+    fi
+    if [[ $AIR_GAPPED_MODE -eq 0 ]]; then
+        echo "  rke2-selinux not installed (tar-method install); attempting install from configured repos..."
+        if command -v dnf &>/dev/null; then
+            dnf install -y container-selinux rke2-selinux || true
+        elif command -v yum &>/dev/null; then
+            yum install -y container-selinux rke2-selinux || true
+        elif command -v zypper &>/dev/null; then
+            zypper --non-interactive install container-selinux rke2-selinux || true
+        fi
+    fi
+    if rpm -q rke2-selinux &>/dev/null; then
+        echo "  rke2-selinux policy installed."
+        return 0
+    fi
+    echo "Error: SELinux is enforcing but the 'rke2-selinux' policy is not installed, and it could not be"
+    echo "  installed automatically (air-gapped/tar-method installs cannot fetch it). Starting RKE2 now"
+    echo "  would produce AVC-denied (broken) workloads. Remediation - choose ONE, then re-run:"
+    echo "   1) Install the policies from local media/repos:"
+    echo "        dnf|yum|zypper install -y container-selinux rke2-selinux"
+    echo "      (offline: download from https://github.com/rancher/rke2-selinux/releases and 'rpm -ivh' them)"
+    echo "   2) Or set SELinux to permissive mode:"
+    echo "        setenforce 0    (and set SELINUX=permissive in /etc/selinux/config to persist)"
+    exit 1
 }
 
 install_kubeconfigs_and_links () {
@@ -503,6 +554,11 @@ EOF
 data-dir: "$RKE2_DATA"
 EOF
         fi
+        if [[ "$SELINUX_ENFORCING" == "true" ]]; then
+            cat >> "$dest" <<EOF
+selinux: true
+EOF
+        fi
         if [[ ${ENABLE_CIS,,} == "true" ]]; then
             cat >> "$dest" <<EOF
 profile: "cis"
@@ -539,6 +595,11 @@ EOF
     if [[ $RKE2_DATA != "/var/lib/rancher/rke2" ]]; then
         cat >> "$dest" <<EOF
 data-dir: "$RKE2_DATA"
+EOF
+    fi
+    if [[ "$SELINUX_ENFORCING" == "true" ]]; then
+        cat >> "$dest" <<EOF
+selinux: true
 EOF
     fi
     if [[ ${CONTROL_PLANE_TAINT,,} == "true" ]]; then
@@ -1914,6 +1975,11 @@ os_check () {
     if [[ ! "$OS_ID" =~ ^(ubuntu|debian|rhel|centos|rocky|almalinux|fedora|sles|opensuse-leap)$ ]]; then
         echo "Unknown or unsupported OS $OS_ID."
         exit 1
+    fi
+    # RK-3: detect SELinux enforcement once (Rocky 9/10 default; Leap 16 defaults to SELinux too)
+    SELINUX_ENFORCING="false"
+    if command -v getenforce &>/dev/null && [[ "$(getenforce 2>/dev/null || true)" == "Enforcing" ]]; then
+        SELINUX_ENFORCING="true"
     fi
 }
 
