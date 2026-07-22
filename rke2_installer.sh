@@ -239,6 +239,7 @@ run_install () {
     if [[ $PVC_DATA == "default" ]]; then PVC_DATA="/opt/local-path-provisioner"; else mkdir -p "$PVC_DATA"; fi
     reconcile_existing_install
     run_debug create_registry_config
+    reconcile_registry_config_change
     if [[ $INSTALL_MODE -eq 1 ]]; then
         echo "--- Installing RKE2 ---"
         run_debug create_config_files
@@ -294,6 +295,13 @@ reconcile_existing_install () {
     fi
     systemctl is-active --quiet "$requested_svc" || return 0
     echo "--- $requested_svc is already active: entering reconcile mode ---"
+    # Snapshot the live registry config so a changed -registry on a running node is
+    # detected after create_registry_config rewrites it (see reconcile_registry_config_change).
+    RECONCILE_REGISTRIES_PRE=""
+    if [[ -f /etc/rancher/rke2/registries.yaml ]]; then
+        RECONCILE_REGISTRIES_PRE="$TMP_DIR/registries.yaml.pre"
+        cp /etc/rancher/rke2/registries.yaml "$RECONCILE_REGISTRIES_PRE"
+    fi
     # Version check: 'install' never changes the version of a running node.
     local rke2_bin running_version=""
     for rke2_bin in "$RKE2_DATA/bin/rke2" /usr/local/bin/rke2 /usr/bin/rke2; do
@@ -340,6 +348,38 @@ reconcile_existing_install () {
         fi
         echo "  Re-run with RKE2_RECONFIGURE=true to apply the new configuration and restart the service,"
         echo "  or align the environment variables with the running configuration."
+        exit 1
+    fi
+}
+
+reconcile_registry_config_change () {
+    # Companion to reconcile_existing_install: on the reconcile path,
+    # create_registry_config may have just rewritten /etc/rancher/rke2/registries.yaml,
+    # but the running containerd only picks it up on a service restart. Apply the same
+    # RKE2_RECONFIGURE contract as config.yaml changes; without the opt-in, revert the
+    # file so disk and the running service stay consistent.
+    [[ "${SKIP_CORE_INSTALL:-0}" -eq 1 ]] || return 0
+    local live="/etc/rancher/rke2/registries.yaml"
+    local pre="${RECONCILE_REGISTRIES_PRE:-}"
+    [[ -f "$live" || -n "$pre" ]] || return 0
+    if [[ -n "$pre" && -f "$live" ]] && cmp -s "$pre" "$live"; then
+        return 0
+    fi
+    if [[ -z "$pre" && ! -s "$live" ]]; then
+        return 0
+    fi
+    if [[ "${RKE2_RECONFIGURE,,}" == "true" ]]; then
+        echo "  registries.yaml changed on a running node and RKE2_RECONFIGURE=true: the service will be restarted to apply it."
+        SERVICE_ACTION="restart"
+    else
+        if [[ -n "$pre" ]]; then
+            cp "$pre" "$live"
+        else
+            rm -f "$live"
+        fi
+        echo "Error: the requested registry configuration differs from the running node's registries.yaml."
+        echo "  The on-disk change was reverted to keep disk and the running service consistent."
+        echo "  Re-run with RKE2_RECONFIGURE=true to apply the registry change and restart the service."
         exit 1
     fi
 }
@@ -1219,7 +1259,7 @@ run_install_velero () {
   echo "  Installing Velero CLI ${VELERO_VERSION}..."
   cd $WORKING_DIR/velero
   if [[ $AIR_GAPPED_MODE == "0" ]]; then
-    curl -L https://github.com/vmware-tanzu/velero/releases/download/${VELERO_VERSION}/velero-${VELERO_VERSION}-linux-amd64.tar.gz \
+    curl -fL https://github.com/vmware-tanzu/velero/releases/download/${VELERO_VERSION}/velero-${VELERO_VERSION}-linux-amd64.tar.gz \
       -o velero-${VELERO_VERSION}-linux-amd64.tar.gz
   fi
   tar -xzf velero-${VELERO_VERSION}-linux-amd64.tar.gz
@@ -1926,7 +1966,7 @@ download_rke2_utilities () {
 
 download_velero () {
     echo "  Downloading Velero CLI ${VELERO_VERSION}..."
-    curl -L https://github.com/vmware-tanzu/velero/releases/download/${VELERO_VERSION}/velero-${VELERO_VERSION}-linux-amd64.tar.gz \
+    curl -fL https://github.com/vmware-tanzu/velero/releases/download/${VELERO_VERSION}/velero-${VELERO_VERSION}-linux-amd64.tar.gz \
         -o $WORKING_DIR/velero/velero-${VELERO_VERSION}-linux-amd64.tar.gz
     echo "  Adding Velero images to utility-images list..."
     echo "velero/velero:${VELERO_VERSION}" >> $WORKING_DIR/rke2-utilities/images/utility-images.txt
