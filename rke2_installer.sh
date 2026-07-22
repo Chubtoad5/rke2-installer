@@ -23,6 +23,7 @@ KUBELET_DATA=${KUBELET_DATA:-"default"}                                       # 
 PVC_DATA=${PVC_DATA:-"default"}                                               # Path where storage class PVCs are stored, update with valid local path
 CONTROL_PLANE_TAINT=${CONTROL_PLANE_TAINT:-"false"}                           # Set to true to taint the control-plane node for multi-node clusters and workload separation
 RKE2_RECONFIGURE=${RKE2_RECONFIGURE:-"false"}                                 # Set to true to allow 'install'/'join' on a RUNNING node to apply a changed config.yaml and restart the rke2 service
+NTP_SERVERS=${NTP_SERVERS:-}                                                  # Optional space/comma-separated NTP server list applied during 'install'/'join'; empty = leave the OS default time source unchanged
 DEBUG=${DEBUG:-"1"}
 
 # Velero Backup Configuration
@@ -695,6 +696,57 @@ spec:
 EOF
 }
 
+# Configure a user-defined NTP source on every node (install + join agent + join server).
+# Clock skew across nodes breaks etcd and TLS. Only acts when NTP_SERVERS is set; otherwise
+# the OS default time source is left untouched. Auto-detects the time daemon: chrony if
+# present (Rocky/RHEL/SLES default; /etc/chrony.conf on Rocky, /etc/chrony/chrony.conf on
+# Ubuntu), else systemd-timesyncd (the Ubuntu/Debian default incl. minimal images).
+# Idempotent: marker-tagged lines are removed before re-appending. Ported from ap-tools'
+# configure_node_ntp(); the '# ap-tools NTP' marker and the 10-ap-tools.conf drop-in name
+# are kept INTENTIONALLY identical so hosts previously configured by ap-tools reconcile
+# here instead of accumulating duplicate entries.
+configure_node_ntp () {
+  if [[ -z "${NTP_SERVERS// /}" ]]; then
+    echo "  NTP_SERVERS not set; leaving the OS default time source unchanged."
+    return 0
+  fi
+  # Normalise comma or space separated input to a clean space-separated list
+  local ntp_list
+  ntp_list=$(echo "$NTP_SERVERS" | tr ',' ' ' | xargs)
+  echo "  Configuring user-defined NTP servers: $ntp_list"
+  timedatectl set-ntp true 2>/dev/null || true
+  if command -v chronyd >/dev/null 2>&1 || systemctl list-unit-files --no-legend 2>/dev/null | grep -q '^chronyd\.service'; then
+    # chrony path (RHEL/Rocky/SLES default; Ubuntu when chrony is installed)
+    local chrony_conf="/etc/chrony/chrony.conf"
+    [[ -f /etc/chrony.conf ]] && chrony_conf="/etc/chrony.conf"
+    sed -i '/# ap-tools NTP$/d' "$chrony_conf" 2>/dev/null || true
+    local s
+    for s in $ntp_list; do
+      echo "server $s iburst # ap-tools NTP" >> "$chrony_conf"
+    done
+    systemctl enable chronyd 2>/dev/null || true
+    systemctl restart chronyd 2>/dev/null || systemctl restart chrony 2>/dev/null || true
+    chronyc makestep >/dev/null 2>&1 || true
+    state_set RKE2I_NTP_CONFIGURED "chrony"
+  elif systemctl list-unit-files --no-legend 2>/dev/null | grep -q '^systemd-timesyncd\.service'; then
+    # systemd-timesyncd path (Ubuntu/Debian default)
+    mkdir -p /etc/systemd/timesyncd.conf.d
+    printf '[Time]\nNTP=%s\n' "$ntp_list" > /etc/systemd/timesyncd.conf.d/10-ap-tools.conf
+    systemctl enable systemd-timesyncd 2>/dev/null || true
+    systemctl restart systemd-timesyncd 2>/dev/null || true
+    state_set RKE2I_NTP_CONFIGURED "timesyncd"
+  else
+    # Neither daemon present: warn loudly instead of silently succeeding.
+    echo "  WARNING: NTP_SERVERS is set but neither chrony nor systemd-timesyncd is present on this host."
+    echo "  Time synchronization was NOT configured. Install chrony (apt/dnf/zypper install chrony) and"
+    echo "  re-run, or configure NTP manually - clock skew across nodes breaks etcd and TLS."
+    return 0
+  fi
+  # Give the daemon a moment, then report
+  sleep 2
+  echo "  NTP configured. Current status: $(timedatectl show -p NTP -p NTPSynchronized 2>/dev/null | tr '\n' ' ')"
+}
+
 state_set () {
     # state_set KEY VALUE - idempotent key=value write to the install-state file (RK-13)
     local key="$1" val="$2"
@@ -895,6 +947,8 @@ EOF
         echo "  - WARNING: OS not explicitly handled for firewall configuration."
         echo "    Please manually verify the firewall service is stopped and disabled."
     fi
+# Configure user-defined NTP servers (no-op when NTP_SERVERS is empty/unset)
+    configure_node_ntp
 }
 
 apply_utilities () {
@@ -1698,6 +1752,22 @@ uninstall_rke2() {
         if [[ "${RKE2I_ETCD_USER_CREATED:-false}" == "true" ]] && id etcd &>/dev/null; then
             echo "  Removing etcd user (created by this installer)..."
             userdel etcd 2>/dev/null || true
+        fi
+        # NTP (W11): remove the marker-tagged lines/drop-in added by configure_node_ntp.
+        if [[ "${RKE2I_NTP_CONFIGURED:-none}" != "none" ]]; then
+            echo "  Removing NTP configuration added by this installer..."
+            local ntp_conf
+            for ntp_conf in /etc/chrony/chrony.conf /etc/chrony.conf; do
+                if [[ -f "$ntp_conf" ]]; then
+                    sed -i '/# ap-tools NTP$/d' "$ntp_conf"
+                fi
+            done
+            rm -f /etc/systemd/timesyncd.conf.d/10-ap-tools.conf
+            if [[ "${RKE2I_NTP_CONFIGURED}" == "chrony" ]]; then
+                systemctl restart chronyd 2>/dev/null || systemctl restart chrony 2>/dev/null || true
+            else
+                systemctl restart systemd-timesyncd 2>/dev/null || true
+            fi
         fi
     fi
     systemctl daemon-reload 2>/dev/null || true
