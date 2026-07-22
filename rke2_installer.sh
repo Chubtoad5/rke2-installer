@@ -696,14 +696,36 @@ EOF
 
 config_host_settings () {
     # Common kubernetes requirments
+    # RK-7: probe per module. overlay and br_netfilter are hard requirements; dm_crypt and
+    # nfs are only needed for encrypted/NFS-backed storage and are absent from minimal
+    # kernels - warn with the exact kernel package to install instead of aborting.
     echo "  Enabling overlay, br_netfilter, dm_crypt, and nfs modules"
-    cat > /etc/modules-load.d/40-k8s.conf <<EOF
-overlay
-br_netfilter
-dm_crypt
-nfs
-EOF
-    modprobe -a overlay br_netfilter dm_crypt nfs
+    local loaded_mods="" missing_optional="" mod
+    for mod in overlay br_netfilter dm_crypt nfs; do
+        if modprobe "$mod" 2>/dev/null; then
+            loaded_mods="$loaded_mods $mod"
+        else
+            case "$mod" in
+                overlay|br_netfilter)
+                    echo "Error: required kernel module '$mod' could not be loaded. RKE2 cannot run without it."
+                    exit 1
+                    ;;
+                *)
+                    missing_optional="$missing_optional $mod"
+                    ;;
+            esac
+        fi
+    done
+    if [[ -n "$missing_optional" ]]; then
+        echo "  WARNING: optional kernel module(s) not available:$missing_optional"
+        echo "  They are only needed for NFS-backed or encrypted (dm-crypt) storage. To add them,"
+        echo "  install the extra kernel-modules package for your running kernel and re-run:"
+        echo "    Ubuntu/Debian:  apt-get install -y linux-modules-extra-\$(uname -r)"
+        echo "    RHEL/Rocky:     dnf install -y kernel-modules-extra"
+        echo "    SUSE/Leap:      zypper install -y kernel-default   (minimal images ship kernel-default-base)"
+    fi
+    # Persist only the modules that actually loaded so systemd-modules-load stays clean at boot.
+    printf '%s\n' $loaded_mods > /etc/modules-load.d/40-k8s.conf
     echo "  Disabling swap space"
     swapoff -a
     sed -i -e '/swap/d' /etc/fstab
