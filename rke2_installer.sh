@@ -22,6 +22,7 @@ RKE2_DATA=${RKE2_DATA:-"default"}                                             # 
 KUBELET_DATA=${KUBELET_DATA:-"default"}                                       # Path where kubelet data is stored, update with valid local path
 PVC_DATA=${PVC_DATA:-"default"}                                               # Path where storage class PVCs are stored, update with valid local path
 CONTROL_PLANE_TAINT=${CONTROL_PLANE_TAINT:-"false"}                           # Set to true to taint the control-plane node for multi-node clusters and workload separation
+RKE2_RECONFIGURE=${RKE2_RECONFIGURE:-"false"}                                 # Set to true to allow 'install'/'join' on a RUNNING node to apply a changed config.yaml and restart the rke2 service
 DEBUG=${DEBUG:-"1"}
 
 # Velero Backup Configuration
@@ -82,6 +83,8 @@ REG_PASS=""
 UPGRADE_MODE=0
 UPGRADE_TYPE=""
 UPGRADE_VERSION=""
+SKIP_CORE_INSTALL=0
+SERVICE_ACTION="start"
 fqdn_pattern='^([a-z0-9]+(-[a-z0-9]+)*\.)+[a-z]{2,}$'
 ipv4_pattern='^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$'
 TMP_DIR=$(mktemp -d /tmp/rke2-installer.XXXXXX)
@@ -230,62 +233,157 @@ run_install () {
     if [[ $RKE2_DATA == "default" ]]; then RKE2_DATA="/var/lib/rancher/rke2"; else mkdir -p "$RKE2_DATA"; fi
     if [[ $KUBELET_DATA == "default" ]]; then KUBELET_DATA="/var/lib/kubelet"; else mkdir -p "$KUBELET_DATA"; fi
     if [[ $PVC_DATA == "default" ]]; then PVC_DATA="/opt/local-path-provisioner"; else mkdir -p "$PVC_DATA"; fi
+    reconcile_existing_install
     run_debug create_registry_config
     if [[ $INSTALL_MODE -eq 1 ]]; then
         echo "--- Installing RKE2 ---"
         run_debug create_config_files
-        run_debug install_rke2_binaries
+        if [[ $SKIP_CORE_INSTALL -eq 0 ]]; then
+            run_debug install_rke2_binaries
+        fi
         run_debug config_host_settings
-        run_debug start_rke2_service
+        run_debug start_rke2_service "$SERVICE_ACTION"
         run_debug apply_utilities
     fi
     if [[ $JOIN_MODE -eq 1 && $JOIN_TYPE == "agent" ]]; then
         echo "--- Joining RKE2 agent ---"
         run_debug create_agent_join_config
-        run_debug install_rke2_binaries
+        if [[ $SKIP_CORE_INSTALL -eq 0 ]]; then
+            run_debug install_rke2_binaries
+        fi
         run_debug config_host_settings
-        run_debug start_rke2_service
+        run_debug start_rke2_service "$SERVICE_ACTION"
     fi
     if [[ $JOIN_MODE -eq 1 && $JOIN_TYPE == "server" ]]; then
         echo "--- Joining RKE2 server ---"
         run_debug create_server_join_config
-        run_debug install_rke2_binaries
+        if [[ $SKIP_CORE_INSTALL -eq 0 ]]; then
+            run_debug install_rke2_binaries
+        fi
         run_debug config_host_settings
-        run_debug start_rke2_service
+        run_debug start_rke2_service "$SERVICE_ACTION"
     fi
 }
 
+reconcile_existing_install () {
+    # RK-2: make 'install'/'join' resumable on a host where RKE2 is already running.
+    # Outcomes:
+    #   - fresh host                          -> normal install (no-op here)
+    #   - other role's service active         -> hard error (uninstall first)
+    #   - running version != RKE2_VERSION     -> hard error directing to 'upgrade'
+    #   - join to a different cluster server  -> hard error (uninstall first)
+    #   - rendered config == live config      -> skip core install, re-run idempotent post-steps
+    #   - rendered config != live config      -> apply + service restart, but ONLY when
+    #                                            RKE2_RECONFIGURE=true; otherwise a clear error
+    local requested_svc="rke2-server.service" other_svc="rke2-agent.service"
+    if [[ $JOIN_MODE -eq 1 && $JOIN_TYPE == "agent" ]]; then
+        requested_svc="rke2-agent.service"
+        other_svc="rke2-server.service"
+    fi
+    if systemctl is-active --quiet "$other_svc"; then
+        echo "Error: $other_svc is active on this host, but this invocation manages $requested_svc."
+        echo "  This host already runs a different RKE2 role. Run 'sudo ./$SCRIPT_NAME uninstall' first."
+        exit 1
+    fi
+    systemctl is-active --quiet "$requested_svc" || return 0
+    echo "--- $requested_svc is already active: entering reconcile mode ---"
+    # Version check: 'install' never changes the version of a running node.
+    local rke2_bin running_version=""
+    for rke2_bin in "$RKE2_DATA/bin/rke2" /usr/local/bin/rke2 /usr/bin/rke2; do
+        if [[ -x "$rke2_bin" ]]; then
+            running_version=$("$rke2_bin" --version 2>/dev/null | awk '/^rke2 version/ {print $3}') || true
+            break
+        fi
+    done
+    if [[ -n "$running_version" && "$running_version" != "$RKE2_VERSION" ]]; then
+        echo "Error: RKE2 $running_version is already running, but RKE2_VERSION=$RKE2_VERSION was requested."
+        echo "  'install' does not change the version of a running node."
+        echo "  Use: sudo ./$SCRIPT_NAME upgrade [server|agent|both] $RKE2_VERSION"
+        exit 1
+    fi
+    # Foreign-cluster guard: joining a different cluster requires uninstall, always.
+    if [[ $JOIN_MODE -eq 1 && -f /etc/rancher/rke2/config.yaml ]]; then
+        local existing_server
+        existing_server=$(awk -F'https://' '/^server:/ {print $2}' /etc/rancher/rke2/config.yaml | cut -d: -f1)
+        if [[ -n "$existing_server" && "$existing_server" != "$JOIN_SERVER_FQDN" ]]; then
+            echo "Error: this node is already joined to cluster server '$existing_server', but a join to"
+            echo "  '$JOIN_SERVER_FQDN' was requested. Joining a different cluster requires 'sudo ./$SCRIPT_NAME uninstall' first."
+            exit 1
+        fi
+    fi
+    # Config diff: render the requested config and compare with the live one.
+    local rendered="$TMP_DIR/config.yaml.rendered"
+    render_rke2_config "$rendered"
+    if cmp -s "$rendered" /etc/rancher/rke2/config.yaml; then
+        echo "  Existing /etc/rancher/rke2/config.yaml matches the requested configuration."
+        echo "  Skipping core RKE2 install; re-running idempotent post-install steps."
+        SKIP_CORE_INSTALL=1
+        SERVICE_ACTION="start"
+    elif [[ "${RKE2_RECONFIGURE,,}" == "true" ]]; then
+        echo "  Requested configuration differs from the running node and RKE2_RECONFIGURE=true:"
+        echo "  applying the new configuration and restarting $requested_svc."
+        SKIP_CORE_INSTALL=1
+        SERVICE_ACTION="restart"
+    else
+        echo "Error: RKE2 is running but the requested configuration differs from /etc/rancher/rke2/config.yaml."
+        if [[ $INSTALL_MODE -eq 1 ]] && command -v diff &>/dev/null; then
+            echo "--- diff (running vs requested) ---"
+            diff /etc/rancher/rke2/config.yaml "$rendered" || true
+            echo "-----------------------------------"
+        fi
+        echo "  Re-run with RKE2_RECONFIGURE=true to apply the new configuration and restart the service,"
+        echo "  or align the environment variables with the running configuration."
+        exit 1
+    fi
+}
+
+install_kubeconfigs_and_links () {
+    mkdir -p /root/.kube
+    cp /etc/rancher/rke2/rke2.yaml /root/.kube/config
+    chmod 600 /root/.kube/config
+    if [[ -n "$user_name" && "$user_name" != "root" && -d "/home/$user_name" ]]; then
+        mkdir -p /home/$user_name/.kube
+        cp /etc/rancher/rke2/rke2.yaml /home/$user_name/.kube/config
+        chown $user_name:$user_name /home/$user_name/.kube/config
+        chmod 600 /home/$user_name/.kube/config
+    fi
+    export KUBECONFIG=/root/.kube/config
+    export PATH=$PATH:$RKE2_DATA/bin
+    # RK-17: -sfn repairs dangling/wrong symlinks on re-runs, but never clobber a
+    # real binary the user installed at these paths.
+    local tool
+    for tool in kubectl ctr crictl; do
+        if [[ ! -e "/usr/bin/$tool" || -L "/usr/bin/$tool" ]]; then
+            ln -sfn "$RKE2_DATA/bin/$tool" "/usr/bin/$tool"
+        fi
+    done
+}
+
 start_rke2_service () {
+    # $1 = systemctl action: 'start' (default; a no-op on an already-running service,
+    # used by the reconcile skip path) or 'restart' (RKE2_RECONFIGURE apply path).
+    local action="${1:-start}"
     local svc="rke2-server.service"
     if [[ $JOIN_TYPE == "agent" ]]; then
         svc="rke2-agent.service"
     fi
     systemctl enable "$svc"
-    echo "  Starting rke2 service, this may take several minutes..."
-    if ! systemctl start "$svc"; then
-        echo "Error: rke2 service failed to start. Exiting script."
+    if [[ "$action" == "restart" ]]; then
+        echo "  Restarting rke2 service to apply the updated configuration..."
+    else
+        echo "  Starting rke2 service, this may take several minutes..."
+    fi
+    if ! systemctl "$action" "$svc"; then
+        echo "Error: rke2 service failed to $action. Exiting script."
         exit 1
     fi
-    echo "  rke2 service started successfully."
+    echo "  rke2 service ${action}ed successfully."
     if [[ $JOIN_TYPE == "agent" ]]; then
         echo "  Agent install completed, check the status with 'kubectl get nodes' and 'kubectl get pods -A' on the server for details."
     else
         echo "  Waiting for pods to start..."
         sleep 15
-        mkdir -p /root/.kube
-        cp /etc/rancher/rke2/rke2.yaml /root/.kube/config
-        chmod 600 /root/.kube/config
-        if [[ -n "$user_name" && "$user_name" != "root" && -d "/home/$user_name" ]]; then
-            mkdir -p /home/$user_name/.kube
-            cp /etc/rancher/rke2/rke2.yaml /home/$user_name/.kube/config
-            chown $user_name:$user_name /home/$user_name/.kube/config
-            chmod 600 /home/$user_name/.kube/config
-        fi
-        export KUBECONFIG=/root/.kube/config
-        export PATH=$PATH:$RKE2_DATA/bin
-        ln -s $RKE2_DATA/bin/kubectl /usr/bin/kubectl || true
-        ln -s $RKE2_DATA/bin/ctr /usr/bin/ctr || true
-        ln -s $RKE2_DATA/bin/crictl /usr/bin/crictl || true
+        install_kubeconfigs_and_links
         # Hard-fail: the rest of the install (utilities, add-ons) depends on a ready control plane.
         if ! check_namespace_pods_ready; then
             echo "Error: kube-system pods did not become ready within the timeout. The cluster may still be"
