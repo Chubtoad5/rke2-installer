@@ -362,8 +362,15 @@ EOF
     fi
 }
 
-create_agent_join_config () {
+render_rke2_config () {
+    # Single source of truth for /etc/rancher/rke2/config.yaml generation (install server,
+    # join server, and join agent were ~90% duplicated and had drifted - the agent copy was
+    # missing data-dir/root-dir). Renders the config for the current invocation into the
+    # file given as \$1; also used to diff against a running cluster in reconcile mode.
+    local dest="$1"
+    local resolv_conf_file
     if [[ -L /etc/resolv.conf ]]; then
+        local resolv_link
         resolv_link=$(readlink -f /etc/resolv.conf)
         if [[ "$resolv_link" == "/run/systemd/resolve/stub-resolv.conf" ]]; then
             resolv_conf_file="/run/systemd/resolve/resolv.conf"
@@ -373,167 +380,115 @@ create_agent_join_config () {
     else
         resolv_conf_file="/etc/resolv.conf"
     fi
-    echo "  Generating /etc/rancher/rke2/config.yaml for agent"
-    cat > /etc/rancher/rke2/config.yaml <<EOF
+    : > "$dest"
+    if [[ $JOIN_MODE -eq 1 ]]; then
+        cat >> "$dest" <<EOF
 server: https://${JOIN_SERVER_FQDN}:9345
 token: "$JOIN_TOKEN"
+EOF
+    fi
+    if [[ $JOIN_MODE -eq 1 && $JOIN_TYPE == "agent" ]]; then
+        # Agent node config
+        cat >> "$dest" <<EOF
 node-ip: "$MGMT_IP"
 kubelet-arg:
   - "max-pods=$MAX_PODS"
   - "resolv-conf=$resolv_conf_file"
 EOF
+        if [[ $KUBELET_DATA != "/var/lib/kubelet" ]]; then
+            cat >> "$dest" <<EOF
+  - root-dir=$KUBELET_DATA
+EOF
+        fi
+        if [[ $RKE2_DATA != "/var/lib/rancher/rke2" ]]; then
+            cat >> "$dest" <<EOF
+data-dir: "$RKE2_DATA"
+EOF
+        fi
+        if [[ ${ENABLE_CIS,,} == "true" ]]; then
+            cat >> "$dest" <<EOF
+profile: "cis"
+EOF
+        fi
+        return 0
+    fi
+    # Server config (initial install and join server)
+    cat >> "$dest" <<EOF
+cni: "$CNI_TYPE"
+write-kubeconfig-mode: "0600"
+service-node-port-range: "443-40000"
+cluster-cidr: "$CLUSTER_CIDR"
+service-cidr: "$SERVICE_CIDR"
+advertise-address: "$MGMT_IP"
+node-ip: "$MGMT_IP"
+etcd-extra-env:
+  - "ETCD_AUTO_COMPACTION_RETENTION=72h"
+  - "ETCD_AUTO_COMPACTION_MODE=periodic"
+kube-apiserver-arg:
+  - "audit-log-path=/var/log/rke2-apiserver-audit.log"
+  - "audit-log-maxage=30"
+  - "audit-log-maxbackup=10"
+  - "audit-log-maxsize=200"
+kubelet-arg:
+  - "max-pods=$MAX_PODS"
+  - "resolv-conf=$resolv_conf_file"
+EOF
+    if [[ $KUBELET_DATA != "/var/lib/kubelet" ]]; then
+        cat >> "$dest" <<EOF
+  - root-dir=$KUBELET_DATA
+EOF
+    fi
+    if [[ $RKE2_DATA != "/var/lib/rancher/rke2" ]]; then
+        cat >> "$dest" <<EOF
+data-dir: "$RKE2_DATA"
+EOF
+    fi
+    if [[ ${CONTROL_PLANE_TAINT,,} == "true" ]]; then
+        cat >> "$dest" <<EOF
+node-taint:
+  - "node-role.kubernetes.io/control-plane:NoSchedule"
+EOF
+    fi
+    if [[ ${INSTALL_INGRESS,,} == "false" ]]; then
+        cat >> "$dest" <<EOF
+disable:
+  - rke2-ingress-nginx
+EOF
+    fi
+    if [[ ${INSTALL_SERVICELB,,} == "true" ]]; then
+        cat >> "$dest" <<EOF
+enable-servicelb: $INSTALL_SERVICELB
+EOF
+    fi
+    if [[ $TLS_SAN_MODE -eq 1 ]]; then
+        cat >> "$dest" <<EOF
+tls-san:
+  - "$TLS_SAN"
+EOF
+    fi
     if [[ ${ENABLE_CIS,,} == "true" ]]; then
-        cat >> /etc/rancher/rke2/config.yaml <<EOF
+        cat >> "$dest" <<EOF
 profile: "cis"
 EOF
     fi
+}
+
+create_agent_join_config () {
+    echo "  Generating /etc/rancher/rke2/config.yaml for agent"
+    render_rke2_config /etc/rancher/rke2/config.yaml
 }
 
 create_server_join_config () {
-    if [[ -L /etc/resolv.conf ]]; then
-        resolv_link=$(readlink -f /etc/resolv.conf)
-        if [[ "$resolv_link" == "/run/systemd/resolve/stub-resolv.conf" ]]; then
-            resolv_conf_file="/run/systemd/resolve/resolv.conf"
-        else
-            resolv_conf_file="$resolv_link"
-        fi
-    else
-        resolv_conf_file="/etc/resolv.conf"
-    fi
     echo "  Generating /etc/rancher/rke2/config.yaml for server join"
-    cat > /etc/rancher/rke2/config.yaml <<EOF
-server: https://${JOIN_SERVER_FQDN}:9345
-token: "$JOIN_TOKEN"
-cni: "$CNI_TYPE"
-write-kubeconfig-mode: "0600"
-service-node-port-range: "443-40000"
-cluster-cidr: "$CLUSTER_CIDR"
-service-cidr: "$SERVICE_CIDR"
-advertise-address: "$MGMT_IP"
-node-ip: "$MGMT_IP"
-etcd-extra-env:
-  - "ETCD_AUTO_COMPACTION_RETENTION=72h"
-  - "ETCD_AUTO_COMPACTION_MODE=periodic"
-kube-apiserver-arg:
-  - "audit-log-path=/var/log/rke2-apiserver-audit.log"
-  - "audit-log-maxage=30"
-  - "audit-log-maxbackup=10"
-  - "audit-log-maxsize=200"
-kubelet-arg:
-  - "max-pods=$MAX_PODS"
-  - "resolv-conf=$resolv_conf_file"
-EOF
-    if [[ $KUBELET_DATA != "/var/lib/kubelet" ]]; then
-        cat >> /etc/rancher/rke2/config.yaml <<EOF
-  - root-dir=$KUBELET_DATA
-EOF
-    fi
-    if [[ $RKE2_DATA != "/var/lib/rancher/rke2" ]]; then
-        cat >> /etc/rancher/rke2/config.yaml <<EOF
-data-dir: "$RKE2_DATA"
-EOF
-    fi
-    if [[ ${CONTROL_PLANE_TAINT,,} == "true" ]]; then
-        cat >> /etc/rancher/rke2/config.yaml <<EOF
-node-taint:
-  - "node-role.kubernetes.io/control-plane:NoSchedule"
-EOF
-    fi
-    if [[ ${INSTALL_INGRESS,,} == "false" ]]; then
-        cat >> /etc/rancher/rke2/config.yaml <<EOF
-disable:
-  - rke2-ingress-nginx
-EOF
-    fi
-    if [[ ${INSTALL_SERVICELB,,} == "true" ]]; then
-        cat >> /etc/rancher/rke2/config.yaml <<EOF
-enable-servicelb: $INSTALL_SERVICELB
-EOF
-    fi
-    if [[ ${ENABLE_CIS,,} == "true" ]]; then
-        cat >> /etc/rancher/rke2/config.yaml <<EOF
-profile: "cis"
-EOF
-    fi
-    if [[ $TLS_SAN_MODE -eq 1 ]]; then
-        cat >> /etc/rancher/rke2/config.yaml <<EOF
-tls-san:
-  - "$TLS_SAN"
-EOF
-    fi
+    render_rke2_config /etc/rancher/rke2/config.yaml
 }
 
 create_config_files () {
-    if [[ -L /etc/resolv.conf ]]; then
-        resolv_link=$(readlink -f /etc/resolv.conf)
-        if [[ "$resolv_link" == "/run/systemd/resolve/stub-resolv.conf" ]]; then
-            resolv_conf_file="/run/systemd/resolve/resolv.conf"
-        else
-            resolv_conf_file="$resolv_link"
-        fi
-    else
-        resolv_conf_file="/etc/resolv.conf"
-    fi
     echo "  Generating /etc/rancher/rke2/config.yaml"
-    cat > /etc/rancher/rke2/config.yaml <<EOF
-cni: "$CNI_TYPE"
-write-kubeconfig-mode: "0600"
-service-node-port-range: "443-40000"
-cluster-cidr: "$CLUSTER_CIDR"
-service-cidr: "$SERVICE_CIDR"
-advertise-address: "$MGMT_IP"
-node-ip: "$MGMT_IP"
-etcd-extra-env:
-  - "ETCD_AUTO_COMPACTION_RETENTION=72h"
-  - "ETCD_AUTO_COMPACTION_MODE=periodic"
-kube-apiserver-arg:
-  - "audit-log-path=/var/log/rke2-apiserver-audit.log"
-  - "audit-log-maxage=30"
-  - "audit-log-maxbackup=10"
-  - "audit-log-maxsize=200"
-kubelet-arg:
-  - "max-pods=$MAX_PODS"
-  - "resolv-conf=$resolv_conf_file"
-EOF
-    if [[ $KUBELET_DATA != "/var/lib/kubelet" ]]; then
-        cat >> /etc/rancher/rke2/config.yaml <<EOF
-  - root-dir=$KUBELET_DATA
-EOF
-    fi
-    if [[ $RKE2_DATA != "/var/lib/rancher/rke2" ]]; then
-        cat >> /etc/rancher/rke2/config.yaml <<EOF
-data-dir: "$RKE2_DATA"
-EOF
-    fi
-    if [[ ${CONTROL_PLANE_TAINT,,} == "true" ]]; then
-        cat >> /etc/rancher/rke2/config.yaml <<EOF
-node-taint:
-  - "node-role.kubernetes.io/control-plane:NoSchedule"
-EOF
-    fi
-    if [[ ${INSTALL_INGRESS,,} == "false" ]]; then
-        cat >> /etc/rancher/rke2/config.yaml <<EOF
-disable:
-  - rke2-ingress-nginx
-EOF
-    fi
-    if [[ ${INSTALL_SERVICELB,,} == "true" ]]; then
-        cat >> /etc/rancher/rke2/config.yaml <<EOF
-enable-servicelb: $INSTALL_SERVICELB
-EOF
-    fi
-    if [[ $TLS_SAN_MODE -eq 1 ]]; then
-        cat >> /etc/rancher/rke2/config.yaml <<EOF
-tls-san:
-  - "$TLS_SAN"
-EOF
-    fi
+    render_rke2_config /etc/rancher/rke2/config.yaml
     if [[ ${ENABLE_CIS,,} == "true" ]]; then
-        cat >> /etc/rancher/rke2/config.yaml <<EOF
-profile: "cis"
-EOF
-        echo "  Generating $WORKING_DIR/rke-utilities/account_update.yaml"
-        cat > $WORKING_DIR/rke-utilities/account_update.yaml <<EOF
+        echo "  Generating $WORKING_DIR/rke2-utilities/account_update.yaml"
+        cat > $WORKING_DIR/rke2-utilities/account_update.yaml <<EOF
 apiVersion: v1
 kind: ServiceAccount
 metadata:
