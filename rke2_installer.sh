@@ -84,6 +84,28 @@ UPGRADE_TYPE=""
 UPGRADE_VERSION=""
 fqdn_pattern='^([a-z0-9]+(-[a-z0-9]+)*\.)+[a-z]{2,}$'
 ipv4_pattern='^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$'
+TMP_DIR=$(mktemp -d /tmp/rke2-installer.XXXXXX)
+RUN_DEBUG_STEP=""
+RUN_DEBUG_LOG="$TMP_DIR/run-debug.log"
+
+# EXIT trap: report the failing step (replaying captured output when DEBUG=0) and
+# clean up temp files. Captures the exit code FIRST and re-exits with it so failures
+# are never masked by the trap's own commands.
+on_exit () {
+    local rc=$?
+    if [[ $rc -ne 0 && -n "$RUN_DEBUG_STEP" ]]; then
+        echo "Error: step '$RUN_DEBUG_STEP' failed with exit code $rc." >&2
+        if [[ "$DEBUG" != "1" && -s "$RUN_DEBUG_LOG" ]]; then
+            echo "--- Last output from '$RUN_DEBUG_STEP' ---" >&2
+            tail -n 40 "$RUN_DEBUG_LOG" >&2
+            echo "--- (re-run with DEBUG=1 for full output) ---" >&2
+        fi
+    fi
+    rm -rf "$TMP_DIR"
+    rm -f "$base_dir/.rke2-save.tar.gz.partial"
+    exit "$rc"
+}
+trap on_exit EXIT
 
 # --- USAGE FUNCTION --- #
 # Usage: $SCRIPT_NAME [install] [unintall] [save] [push] [join [server|agent] server-fqdn join-token-string] [upgrade [server|agent|both] [stable|version]] [-tls-san [server-fqdn-ip]] [-registry [registry:port username password]]
@@ -234,21 +256,17 @@ run_install () {
 }
 
 start_rke2_service () {
+    local svc="rke2-server.service"
     if [[ $JOIN_TYPE == "agent" ]]; then
-        systemctl enable rke2-agent.service
-        echo "  Starting rke2 service, this may take several minutes..."
-        systemctl start rke2-agent.service
-    else
-        systemctl enable rke2-server.service
-        echo "  Starting rke2 service, this may take several minutes..."
-        systemctl start rke2-server.service
+        svc="rke2-agent.service"
     fi
-    if [ $? -ne 0 ]; then
+    systemctl enable "$svc"
+    echo "  Starting rke2 service, this may take several minutes..."
+    if ! systemctl start "$svc"; then
         echo "Error: rke2 service failed to start. Exiting script."
-        exit 1 
-    else
-        echo "  rke2 service started successfully."
+        exit 1
     fi
+    echo "  rke2 service started successfully."
     if [[ $JOIN_TYPE == "agent" ]]; then
         echo "  Agent install completed, check the status with 'kubectl get nodes' and 'kubectl get pods -A' on the server for details."
     else
@@ -581,13 +599,11 @@ EOF
         cp -f /usr/local/share/rke2/rke2-cis-sysctl.conf /etc/sysctl.d/60-rke2-cis.conf
         useradd -r -c "etcd user" -s /sbin/nologin -M etcd -U
     fi
-    systemctl restart systemd-sysctl
-    if [ $? -ne 0 ]; then
+    if ! systemctl restart systemd-sysctl; then
         echo "Error: systemd-sysctl.service failed to restart."
-        exit 1 
-    else
-        echo "  systemd-sysctl.service restarted successfully"
+        exit 1
     fi
+    echo "  systemd-sysctl.service restarted successfully"
 # Configure NetworkManager to ignore CNI interfaces if it is in use
     if systemctl is-active --quiet NetworkManager; then
         echo "  NetworkManager is active. Creating rke2-canal.conf..."
@@ -596,13 +612,11 @@ EOF
 unmanaged-devices=interface-name:flannel*;interface-name:cali*;interface-name:tunl*;interface-name:vxlan.calico;interface-name:vxlan-v6.calico;interface-name:wireguard.cali;interface-name:wg-v6.cali
 EOF
         echo "  Restarting NetworkManager to apply changes..."
-        systemctl restart NetworkManager
-        if [ $? -ne 0 ]; then
+        if ! systemctl restart NetworkManager; then
             echo "Error: NetworkManager failed to restart."
-            exit 1 
-        else
-            echo "  NetworkManager restarted successfully"
+            exit 1
         fi
+        echo "  NetworkManager restarted successfully"
     fi
 # Disable multipath services
     if systemctl list-unit-files --no-legend --no-pager | grep -q "multipathd.service"; then
@@ -1859,29 +1873,28 @@ check_namespace_pods_ready() {
 }
 
 run_debug() {
-  # Use this to hide the output of functions or helper scripts when they are not needed.
+  # Runs a step while preserving 'set -e' semantics INSIDE the called function
+  # (wrapping "$@" in an if/&&/|| condition would suppress errexit for the whole
+  # call tree and let mid-function failures continue silently \u2014 the old failure
+  # branch here was dead code for the same reason). On failure, errexit aborts the
+  # script and the on_exit trap reports the failing step; with DEBUG=0 the step's
+  # captured output is replayed by the trap so failures are never silent.
+  RUN_DEBUG_STEP="$*"
   if [ "$DEBUG" = "1" ]; then
-    local GREEN=$(tput setaf 2)
-    local RED=$(tput setaf 1)
-    local NC=$(tput sgr0)
+    local GREEN RED NC
+    GREEN=$(tput setaf 2 2>/dev/null || true)
+    NC=$(tput sgr0 2>/dev/null || true)
     local CHECKMARK='\u2714'
-    local CROSSMARK='\u2717'
-    local SUCCESS_MSG=${2:-"Success"}
-    local ERROR_MSG=${3:-"Error"}
+    local SUCCESS_MSG="Success"
     echo "--- Running '$*' with DEBUG enabled ---"
     "$@"
-    local status=$?
-    if [ "$status" -eq 0 ]; then
-        echo -e "--- DEBUG: Finished '$*' ${GREEN}${CHECKMARK} ${SUCCESS_MSG}${NC} ---"
-    else
-        echo -e "--- DEBUG: Finished '$*' ${RED}${CROSSMARK} ${ERROR_MSG}${NC} ---" >&2
-    fi
-    return $status
+    echo -e "--- DEBUG: Finished '$*' ${GREEN}${CHECKMARK} ${SUCCESS_MSG}${NC} ---"
   else
-    # If DEBUG is false, execute the command/function and redirect all
-    "$@" > /dev/null 2>&1
-    return $?
+    # DEBUG=0: capture output so the on_exit trap can replay it if the step fails.
+    : > "$RUN_DEBUG_LOG"
+    "$@" > "$RUN_DEBUG_LOG" 2>&1
   fi
+  RUN_DEBUG_STEP=""
 }
 
 cleanup () {
