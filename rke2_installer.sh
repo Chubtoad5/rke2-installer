@@ -1222,6 +1222,14 @@ run_install_velero () {
   fi
   echo "  Snapshot controller is running."
 
+  # RK-11: the default VSC_DRIVER (driver.longhorn.io) assumes the ap-tools stack.
+  # Velero still installs and does object backups without it, so warn loudly rather than fail.
+  if ! kubectl get csidriver "$VSC_DRIVER" &>/dev/null; then
+      echo "  WARNING: CSI driver '$VSC_DRIVER' is not registered in this cluster (default assumes Longhorn"
+      echo "  installed by ap-tools). CSI volume snapshots WILL FAIL until VSC_DRIVER/VSC_NAME are set to an"
+      echo "  installed CSI driver ('kubectl get csidrivers'). Object/resource backups are unaffected."
+  fi
+
   # Create VolumeSnapshotClass for Longhorn
   echo "  Creating VolumeSnapshotClass '${VSC_NAME}'..."
   cat <<SNAPEOF | kubectl apply -f -
@@ -1438,6 +1446,27 @@ run_install_monitoring () {
 
   echo "  Creating monitoring namespace..."
   kubectl create namespace monitoring --dry-run=client -o yaml | kubectl apply -f -
+
+  # RK-11: the default PROMETHEUS_STORAGE_CLASS ('longhorn') assumes the ap-tools stack.
+  # Standalone clusters fail 10 minutes into the helm --wait on a Pending PVC instead.
+  # Verify the StorageClass up front: fall back to the cluster default if the requested
+  # one is missing, and fail fast when there is no default either.
+  if ! kubectl get storageclass "$PROMETHEUS_STORAGE_CLASS" &>/dev/null; then
+      local default_sc
+      default_sc=$(kubectl get storageclass \
+        -o jsonpath='{.items[?(@.metadata.annotations.storageclass\.kubernetes\.io/is-default-class=="true")].metadata.name}' \
+        2>/dev/null | awk '{print $1}')
+      if [[ -n "$default_sc" ]]; then
+          echo "  WARNING: StorageClass '$PROMETHEUS_STORAGE_CLASS' not found; using the cluster default '$default_sc' instead."
+          PROMETHEUS_STORAGE_CLASS="$default_sc"
+      else
+          echo "Error: StorageClass '$PROMETHEUS_STORAGE_CLASS' not found and the cluster has no default StorageClass."
+          echo "  Prometheus PVCs would stay Pending until the helm install times out (10m)."
+          echo "  Set PROMETHEUS_STORAGE_CLASS to an existing StorageClass ('kubectl get storageclass')"
+          echo "  or install a storage provisioner (e.g. INSTALL_LOCAL_PATH_PROVISIONER=true) first."
+          exit 1
+      fi
+  fi
 
   # Install kube-prometheus-stack
   echo "  Installing kube-prometheus-stack v${KUBE_PROMETHEUS_STACK_VERSION}..."
