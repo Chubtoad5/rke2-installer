@@ -204,14 +204,14 @@ display_args() {
     echo "  JOIN_MODE: $JOIN_MODE"
     echo "  JOIN_TYPE: $JOIN_TYPE"
     echo "  JOIN_SERVER_FQDN: $JOIN_SERVER_FQDN"
-    echo "  JOIN_TOKEN: $JOIN_TOKEN"
+    echo "  JOIN_TOKEN: ${JOIN_TOKEN:+<hidden>}"
     echo "  PUSH_MODE: $PUSH_MODE"
     echo "  REGISTRY_MODE: $REGISTRY_MODE"
     echo "  REGISTRY_INFO: $REGISTRY_INFO"
     echo "  REG_FQDN: $REG_FQDN"
     echo "  REG_PORT: $REG_PORT"
     echo "  REG_USER: $REG_USER"
-    echo "  REG_PASS: $REG_PASS"
+    echo "  REG_PASS: ${REG_PASS:+<hidden>}"
     echo "  OS: $OS_ID"
     echo "  SELINUX_ENFORCING: $SELINUX_ENFORCING"
     if [[ $INSTALL_TYPE == "monitoring" ]]; then
@@ -482,7 +482,8 @@ create_registry_config () {
             echo "Error: Failed to retrieve certificate from '$REG_FQDN'. Please ensure the registry is accessible and the port is correct."
             exit 1
         fi
-        cat > /etc/rancher/rke2/registries.yaml <<EOF
+        # registries.yaml carries the registry credentials - write it 0600 (RK-8).
+        ( umask 077; cat > /etc/rancher/rke2/registries.yaml <<EOF
 configs:
   ${REG_FQDN}:${REG_PORT}:
     auth:
@@ -507,6 +508,8 @@ mirrors:
     endpoint:
       - "https://${REG_FQDN}:${REG_PORT}"
 EOF
+        )
+        chmod 600 /etc/rancher/rke2/registries.yaml
         echo "  Private registry configuration written to /etc/rancher/rke2/registries.yaml"
     else
         echo "  Private registry not enabled. Skipping registry configuration."
@@ -1234,13 +1237,16 @@ parameters:
   type: snap
 SNAPEOF
 
-  # Create S3 credentials file
+  # Create S3 credentials file in the script's private temp dir (0700), mode 0600,
+  # instead of a fixed world-guessable /tmp path (RK-8). Removed on any exit via the trap.
   echo "  Creating Velero S3 credentials..."
-  cat > /tmp/credentials-velero <<CREDEOF
+  local velero_creds="$TMP_DIR/credentials-velero"
+  ( umask 077; cat > "$velero_creds" <<CREDEOF
 [default]
 aws_access_key_id=${VELERO_S3_ACCESS_KEY}
 aws_secret_access_key=${VELERO_S3_SECRET_KEY}
 CREDEOF
+  )
 
   # Install Velero into the cluster
   echo "  Installing Velero server into the cluster..."
@@ -1250,14 +1256,14 @@ CREDEOF
     --bucket ${VELERO_BUCKET} \
     --backup-location-config \
       region=us-east-1,s3ForcePathStyle=true,s3Url=${VELERO_S3_URL},checksumAlgorithm="",insecureSkipTLSVerify=true \
-    --secret-file /tmp/credentials-velero \
+    --secret-file "$velero_creds" \
     --features=EnableCSI \
     --use-node-agent \
     --use-volume-snapshots=true \
     --wait
 
   # Clean up credentials file
-  rm -f /tmp/credentials-velero
+  rm -f "$velero_creds"
 
   # Verify installation
   echo "  Verifying Velero installation..."
@@ -2103,7 +2109,8 @@ runtime_outputs () {
         echo "  Copy the archive to an air-gapped host runing the same version of $OS_ID and extract it with 'tar -xzf rke2-save.tar.gz'."
     fi
     if [[ $INSTALL_MODE -eq 1 && $INSTALL_TYPE == "rke2" ]]; then
-        local join_token=$(cat $RKE2_DATA/server/node-token)
+        # RK-8: never print the join token itself - point at the token file instead
+        # (install logs are routinely captured by callers like ap-tools).
         local host_ip=$(hostname -I |awk '{print $1}')
         echo "  RKE2 Server installed successfully."
         echo "  Verify API is reachable at:"
@@ -2116,20 +2123,20 @@ runtime_outputs () {
             echo "  To join more nodes to this cluster use the following config:"
             echo "----"
             echo "server: https://$TLS_SAN:9345"
-            echo "token: $join_token"
+            echo "token: <contents of $RKE2_DATA/server/node-token>"
             echo "----"
-            echo "  For joing another server: './rke2_installer.sh join server -tls-san $TLS_SAN $TLS_SAN $join_token'."
-            echo "  For joining an agent node: './rke2_installer.sh join agent $TLS_SAN $join_token'."
+            echo "  For joining another server: './rke2_installer.sh join server -tls-san $TLS_SAN $TLS_SAN \$(sudo cat $RKE2_DATA/server/node-token)'."
+            echo "  For joining an agent node: './rke2_installer.sh join agent $TLS_SAN \$(sudo cat $RKE2_DATA/server/node-token)'."
             echo "  Note: if using private registry, include -registry in the join command."
             echo "  After joining an agent, apply the worker role with 'kubectl label node <node name> node-role.kubernetes.io/worker=true'."
         else
             echo "  To join more nodes to this cluster use the following config:"
             echo "----"
             echo "server: https://$host_ip:9345"
-            echo "token: $join_token"
+            echo "token: <contents of $RKE2_DATA/server/node-token>"
             echo "----"
-            echo "  For joining another server: './rke2_installer.sh join server $host_ip $join_token'." 
-            echo "  For joining an agent node: './rke2_installer.sh join agent $host_ip $join_token'."
+            echo "  For joining another server: './rke2_installer.sh join server $host_ip \$(sudo cat $RKE2_DATA/server/node-token)'."
+            echo "  For joining an agent node: './rke2_installer.sh join agent $host_ip \$(sudo cat $RKE2_DATA/server/node-token)'."
             echo "  Note: if using private registry, include -registry in the join command."
             echo "  After joining an agent, apply the worker role with 'kubectl label node <node name> node-role.kubernetes.io/worker=true'."
         fi
