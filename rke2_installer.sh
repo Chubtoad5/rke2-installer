@@ -461,7 +461,13 @@ install_rke2_binaries () {
         rm -rf $WORKING_DIR/rke2-cni-images/images
         if [[ $REGISTRY_MODE -eq 0 ]]; then
             echo "  extracting rke2-utilities archive..."
-            tar -xzf $WORKING_DIR/rke2-utilities/container_images_*.tar.gz -C $WORKING_DIR/rke2-utilities
+            local utilities_tar
+            if ! utilities_tar=$(select_newest "$WORKING_DIR"/rke2-utilities/container_images_*.tar.gz); then
+                echo "Error: no container_images_*.tar.gz archive found in $WORKING_DIR/rke2-utilities."
+                echo "  Re-run 'save' on a connected host to build a complete archive."
+                exit 1
+            fi
+            tar -xzf "$utilities_tar" -C $WORKING_DIR/rke2-utilities
             cp $WORKING_DIR/rke2-utilities/images/images.tar.gz $RKE2_DATA/agent/images
             rm -rf $WORKING_DIR/rke2-utilities/images
         fi
@@ -1850,6 +1856,9 @@ uninstall_rke2() {
 
 run_save () {
     echo "--- Running save workflow"
+    # RK-14: regenerate the utility-images list from scratch each run instead of
+    # appending to a previous run's list ('>>' growth across re-runs).
+    : > $WORKING_DIR/rke2-utilities/images/utility-images.txt
     download_rke2_binaries
     if [[ ${PUSH_SAVE_VELERO,,} == "true" ]]; then
         download_velero
@@ -1900,6 +1909,7 @@ download_rke2_utilities () {
     # Add Helm utility images (Longhorn, MetalLB, HAProxy) before saving the archive
     if [[ -f $WORKING_DIR/rke2-utilities/images/utility-images.txt ]]; then
         image_pull_push_check
+        sort -u -o $WORKING_DIR/rke2-utilities/images/utility-images.txt $WORKING_DIR/rke2-utilities/images/utility-images.txt
         cd $WORKING_DIR/rke2-utilities
         ./image_pull_push.sh -f images/utility-images.txt save
         cd $base_dir
@@ -2044,8 +2054,10 @@ EOF
 
 create_save_archive () {
     # saves downloaded files into rke2-save.tar.gz
+    # NOTE: rke2-save-version.txt doubles as the air-gap sentinel - its presence in the
+    # invocation directory is what flips later runs into AIR_GAPPED_MODE (not the tar.gz).
     cat > $base_dir/rke2-save-version.txt <<EOF
-# SeaweedFS Installer Save Archive
+# RKE2 Installer Save Archive
 # Created: $(date)
 #
 # RKE2 Version: $RKE2_VERSION
@@ -2059,7 +2071,14 @@ create_save_archive () {
 EOF
     generate_bundle_licenses
     echo "  Creating rke2 archive..."
-    tar -czf rke2-save.tar.gz rke2-install rke2_installer.sh rke2-save-version.txt LICENSES
+    # RK-12: tar with explicit -C dirs so invocation by absolute path from another cwd
+    # works (the script itself may live outside $base_dir). RK-14: write to a temp file
+    # and mv into place so an interrupted save never leaves a truncated archive behind.
+    local script_dir tmp_archive
+    script_dir=$(cd "$(dirname "$0")" && pwd)
+    tmp_archive="$base_dir/.rke2-save.tar.gz.partial"
+    tar -czf "$tmp_archive" -C "$base_dir" rke2-install rke2-save-version.txt LICENSES -C "$script_dir" "$SCRIPT_NAME"
+    mv -f "$tmp_archive" "$base_dir/rke2-save.tar.gz"
     echo "  Air-gapped archive 'rke2-save.tar.gz' created."
 }
 
@@ -2078,9 +2097,17 @@ run_push () {
 push_utility_images () {
     echo "  Checking for utility images to push..."
     if [[ $AIR_GAPPED_MODE -eq 1 ]]; then
-        local container_images_tar=$(basename $WORKING_DIR/rke2-utilities/container_images*.tar.gz)
-        $WORKING_DIR/rke2-utilities/image_pull_push.sh -f $WORKING_DIR/rke2-utilities/$container_images_tar push $REGISTRY_INFO $REG_USER $REG_PASS
+        local container_images_tar
+        if ! container_images_tar=$(select_newest "$WORKING_DIR"/rke2-utilities/container_images_*.tar.gz); then
+            echo "Error: no container_images_*.tar.gz archive found in $WORKING_DIR/rke2-utilities."
+            echo "  Re-run 'save' on a connected host to build a complete archive."
+            exit 1
+        fi
+        $WORKING_DIR/rke2-utilities/image_pull_push.sh -f "$container_images_tar" push $REGISTRY_INFO $REG_USER $REG_PASS
     elif [[ $AIR_GAPPED_MODE -eq 0 ]]; then
+        # RK-14: regenerate the image list from scratch each run instead of appending
+        # to whatever a previous run left behind ('>>' growth).
+        : > $WORKING_DIR/rke2-utilities/images/utility-images.txt
         if [[ ${INSTALL_LOCAL_PATH_PROVISIONER,,} == "true" ]]; then
             curl -sfL https://raw.githubusercontent.com/rancher/local-path-provisioner/$LOCAL_PATH_PROVISIONER_VERSION/deploy/local-path-storage.yaml -o $WORKING_DIR/rke2-utilities/local-path-storage.yaml
             cat $WORKING_DIR/rke2-utilities/local-path-storage.yaml |grep image: |cut -d: -f2-3 | awk '{sub(/^ /, ""); print}' >> $WORKING_DIR/rke2-utilities/images/utility-images.txt
@@ -2105,6 +2132,7 @@ push_utility_images () {
         local stable_tag=$(curl -sfL -o /dev/null -w '%{url_effective}' https://update.rke2.io/v1-release/channels/stable | awk -F/ '{gsub(/\+/,"-",$NF); print $NF}')
         echo "rancher/rke2-upgrade:$stable_tag" >> $WORKING_DIR/rke2-utilities/images/utility-images.txt
         image_pull_push_check
+        sort -u -o $WORKING_DIR/rke2-utilities/images/utility-images.txt $WORKING_DIR/rke2-utilities/images/utility-images.txt
         echo "--- Printing utility-images.txt"
         cat $WORKING_DIR/rke2-utilities/images/utility-images.txt
         echo "---"
@@ -2116,20 +2144,34 @@ push_utility_images () {
 
 push_rke2_images () {
     if [[ $AIR_GAPPED_MODE -eq 1 ]]; then
+        # RK-14: these archives have fixed names - address them directly instead of
+        # globbing, so stale/duplicate archives can never be picked nondeterministically.
         echo "  Pushing rke2 core images"
-        local container_images_tar=$(basename $WORKING_DIR/rke2-core-images/*.tar.gz)
-        $WORKING_DIR/rke2-utilities/image_pull_push.sh -f $WORKING_DIR/rke2-core-images/$container_images_tar push $REGISTRY_INFO $REG_USER $REG_PASS
-        echo "  Pushing rke2 cni images"
-        local container_images_tar=$(basename $WORKING_DIR/rke2-cni-images/*.tar.gz)
-        $WORKING_DIR/rke2-utilities/image_pull_push.sh -f $WORKING_DIR/rke2-cni-images/$container_images_tar push $REGISTRY_INFO $REG_USER $REG_PASS
+        local core_images_tar="$WORKING_DIR/rke2-core-images/rke2-core-images.tar.gz"
+        if [[ ! -f "$core_images_tar" ]]; then
+            echo "Error: $core_images_tar not found. Re-run 'save' to build a complete archive."
+            exit 1
+        fi
+        $WORKING_DIR/rke2-utilities/image_pull_push.sh -f "$core_images_tar" push $REGISTRY_INFO $REG_USER $REG_PASS
+        if [[ $CNI_NONE == "false" ]]; then
+            echo "  Pushing rke2 cni images"
+            local cni_images_tar="$WORKING_DIR/rke2-cni-images/rke2-$CNI_TYPE-images.tar.gz"
+            if [[ ! -f "$cni_images_tar" ]]; then
+                echo "Error: $cni_images_tar not found (CNI_TYPE=$CNI_TYPE). Re-run 'save' with the same CNI_TYPE."
+                exit 1
+            fi
+            $WORKING_DIR/rke2-utilities/image_pull_push.sh -f "$cni_images_tar" push $REGISTRY_INFO $REG_USER $REG_PASS
+        fi
     else
         echo "  Downloading and pushing rke2 core images"
         curl -sfL https://github.com/rancher/rke2/releases/download/$TRANSLATED_VERSION/rke2-images-core.linux-amd64.txt -o $WORKING_DIR/rke2-core-images/rke2-images-core.linux-amd64.txt
         image_pull_push_check
         $WORKING_DIR/rke2-utilities/image_pull_push.sh -f $WORKING_DIR/rke2-core-images/rke2-images-core.linux-amd64.txt push $REGISTRY_INFO $REG_USER $REG_PASS
-        echo "  Downloading and pushing rke2 cni images"
-        curl -sfL https://github.com/rancher/rke2/releases/download/$TRANSLATED_VERSION/rke2-images-$CNI_TYPE.linux-amd64.txt -o $WORKING_DIR/rke2-cni-images/rke2-images-$CNI_TYPE.linux-amd64.txt
-        $WORKING_DIR/rke2-utilities/image_pull_push.sh -f $WORKING_DIR/rke2-cni-images/rke2-images-$CNI_TYPE.linux-amd64.txt push $REGISTRY_INFO $REG_USER $REG_PASS
+        if [[ $CNI_NONE == "false" ]]; then
+            echo "  Downloading and pushing rke2 cni images"
+            curl -sfL https://github.com/rancher/rke2/releases/download/$TRANSLATED_VERSION/rke2-images-$CNI_TYPE.linux-amd64.txt -o $WORKING_DIR/rke2-cni-images/rke2-images-$CNI_TYPE.linux-amd64.txt
+            $WORKING_DIR/rke2-utilities/image_pull_push.sh -f $WORKING_DIR/rke2-cni-images/rke2-images-$CNI_TYPE.linux-amd64.txt push $REGISTRY_INFO $REG_USER $REG_PASS
+        fi
     fi
 }
 
@@ -2291,6 +2333,28 @@ os_check () {
     if command -v getenforce &>/dev/null && [[ "$(getenforce 2>/dev/null || true)" == "Enforcing" ]]; then
         SELINUX_ENFORCING="true"
     fi
+}
+
+select_newest () {
+    # RK-14: deterministic archive selection. Prints the newest existing file among the
+    # expanded glob args (by mtime); returns 1 if none exist; warns when several match
+    # (previously an unquoted glob fed multiple paths into basename/tar and misparsed).
+    local newest="" count=0 f
+    for f in "$@"; do
+        if [[ -f "$f" ]]; then
+            count=$((count+1))
+            if [[ -z "$newest" || "$f" -nt "$newest" ]]; then
+                newest="$f"
+            fi
+        fi
+    done
+    if [[ $count -eq 0 ]]; then
+        return 1
+    fi
+    if [[ $count -gt 1 ]]; then
+        echo "  WARNING: $count archives match; using newest: $(basename "$newest")" >&2
+    fi
+    echo "$newest"
 }
 
 require_cmds () {
