@@ -11,6 +11,7 @@ A flexible RKE2 installer for Linux systems that supports online and air-gapped 
 - [Quick Start](#quick-start)
 - [Configuration Variables](#configuration-variables)
 - [Commands Reference](#commands-reference)
+- [Re-Runs, Reconcile and Uninstall Behavior](#re-runs-reconcile-and-uninstall-behavior)
 - [Options Reference](#options-reference)
 - [Optional Components](#optional-components)
   - [NGINX Ingress Controller](#nginx-ingress-controller)
@@ -43,8 +44,10 @@ A flexible RKE2 installer for Linux systems that supports online and air-gapped 
 - Optional Velero backup with S3 and CSI snapshot support
 - Optional in-cluster monitoring stack (kube-prometheus-stack + Fluent Bit)
 - Automated cluster upgrades via the system-upgrade-controller
-- Automatic host configuration (swap, sysctl, firewall, NetworkManager, multipath)
-- Uninstall support for server and agent nodes
+- Automatic host configuration (swap, sysctl, firewall, NetworkManager, multipath, optional NTP)
+- SELinux-aware on enforcing hosts (Rocky/RHEL, openSUSE Leap 16): configures `selinux: true` and verifies the `rke2-selinux` policy before starting the cluster
+- Re-run safe: `install`/`join` on an already-running node reconciles instead of failing (see [Re-Runs, Reconcile and Uninstall Behavior](#re-runs-reconcile-and-uninstall-behavior))
+- Uninstall support for server and agent nodes, restoring recorded pre-install host state (swap, firewall, multipathd, NTP)
 
 ---
 
@@ -111,7 +114,9 @@ All configuration is done by editing the `USER DEFINED VARIABLES` section at the
 | `PVC_DATA` | `default` | Custom path for local-path-provisioner PVCs. Default: `/opt/local-path-provisioner` |
 | `CONTROL_PLANE_TAINT` | `false` | Set `true` to taint the control-plane node (recommended for multi-node clusters) |
 | `ENABLE_CIS` | `false` | Enable CIS Kubernetes hardening profile |
-| `DEBUG` | `1` | Set to `1` for verbose output, `0` to suppress |
+| `RKE2_RECONFIGURE` | `false` | Set `true` to allow `install`/`join` on a **running** node to apply a changed `config.yaml` and restart the rke2 service. With the default `false`, a config change on a running node fails with a diff instead (see [Re-Runs, Reconcile and Uninstall Behavior](#re-runs-reconcile-and-uninstall-behavior)) |
+| `NTP_SERVERS` | *(empty)* | Optional space/comma-separated NTP server list applied during `install`/`join` (chrony or systemd-timesyncd auto-detected). Empty = the host's time source is left completely untouched. Same semantics as the `ap-tools` variable of the same name |
+| `DEBUG` | `1` | Set to `1` for verbose output, `0` to suppress (failures still print the failed step's captured output) |
 
 ### Optional Component Settings (on by default)
 
@@ -151,7 +156,7 @@ All configuration is done by editing the `USER DEFINED VARIABLES` section at the
 | `MONITORING_LOKI_PORT` | `3100` | Loki HTTP port on the external monitoring host |
 | `MONITORING_PROMETHEUS_PORT` | `9090` | Prometheus remote-write receiver port |
 | `CLUSTER_NAME` | `edge-lab` | Cluster label applied to all metrics and logs for multi-cluster filtering |
-| `HELM_VERSION` | `3.12.0` | Helm version to install if not already present |
+| `HELM_VERSION` | `4.0.1` | Helm version to install if not already present (default bumped from 3.12.0; still overridable) |
 | `KUBE_PROMETHEUS_STACK_VERSION` | `69.8.0` | kube-prometheus-stack Helm chart version |
 | `FLUENT_BIT_CHART_VERSION` | `0.55.0` | Fluent Bit Helm chart version |
 | `FLUENT_BIT_VERSION` | `4.2.2` | Fluent Bit application/image version |
@@ -183,6 +188,44 @@ sudo ./rke2_installer.sh [command ...] [option ...]
 | `upgrade server [stable\|version]` | Upgrade server (control-plane) nodes to the specified version. |
 | `upgrade agent [stable\|version]` | Upgrade agent (worker) nodes to the specified version. |
 | `upgrade both [stable\|version]` | Upgrade all nodes — servers first, then agents. |
+
+---
+
+## Re-Runs, Reconcile and Uninstall Behavior
+
+**`install`/`join` on a node that is already running RKE2 no longer fails.** The installer renders the
+requested `config.yaml` and compares it with the live `/etc/rancher/rke2/config.yaml`:
+
+| Situation | Behavior |
+|---|---|
+| Fresh host | Normal install |
+| Same config, same version | Core install is skipped; the idempotent post-steps re-run (config/manifests, host settings, kubeconfig copies, symlink repair, utilities). Useful to resume an interrupted install |
+| Config differs, `RKE2_RECONFIGURE=false` (default) | Clear error with a diff (install mode); nothing is changed |
+| Config differs, `RKE2_RECONFIGURE=true` | New config is written and the rke2 service is **restarted** |
+| Requested `RKE2_VERSION` differs from the running version | Error directing you to the `upgrade` command |
+| `join` pointed at a different cluster server | Error — a node cannot switch clusters; `uninstall` first |
+| The host runs the other RKE2 role (server vs agent) | Error — `uninstall` first |
+
+**Pod-readiness timeouts now fail the command.** If pods are not ready within 120s the install exits
+non-zero (previously it printed an error but exited 0). The only warn-and-continue site is the
+non-critical `dnsutils` check in the `default` namespace. Re-running `install` after the cluster
+settles completes the remaining steps.
+
+**Uninstall restores recorded host state.** The first install writes
+`/etc/rke2-installer/install-state.env` (mode 0600) recording the pre-install state of swap,
+multipathd, UFW/firewalld, the NetworkManager CNI conf, and the CIS `etcd` user. `uninstall`:
+
+- stops the rke2 services **before** removing anything, and finds the upstream uninstaller for both
+  tar-method (`/usr/local/bin`) and rpm-method (`/usr/bin`, Rocky/RHEL online) installs — removing the
+  RKE2 rpm packages on rpm-method hosts
+- removes `/etc/rancher/rke2` (including `registries.yaml`, which holds registry credentials)
+- removes only the kubeconfig **files** it wrote (`/root/.kube/config`, `~user/.kube/config`) — never
+  the whole `.kube` directory
+- restores swap (fstab entries are commented out with a `# rke2-installer-swap` marker at install, not
+  deleted), re-enables multipathd/UFW/firewalld only if they were enabled before install, removes the
+  `etcd` user only if this tool created it, and removes any NTP config this tool added
+- hosts installed by an older version (no state file) get file cleanup only; host-setting restoration
+  is skipped with a note
 
 ---
 
