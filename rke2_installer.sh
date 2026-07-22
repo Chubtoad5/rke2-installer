@@ -257,7 +257,7 @@ start_rke2_service () {
         mkdir -p /root/.kube
         cp /etc/rancher/rke2/rke2.yaml /root/.kube/config
         chmod 600 /root/.kube/config
-        if [[ -n "$user_name" ]]; then
+        if [[ -n "$user_name" && "$user_name" != "root" && -d "/home/$user_name" ]]; then
             mkdir -p /home/$user_name/.kube
             cp /etc/rancher/rke2/rke2.yaml /home/$user_name/.kube/config
             chown $user_name:$user_name /home/$user_name/.kube/config
@@ -1901,8 +1901,19 @@ if [[ $EUID -ne 0 ]]; then
    echo "Type './$SCRIPT_NAME -h' for help."
    exit 1
 fi
+# Resolve the invoking user without dying on non-tty invocations (cloud-init, ansible,
+# systemd units): SUDO_USER -> logname -> owner of the working directory -> root.
 if [[ -z "$user_name" ]]; then
-    user_name=$(logname)
+    user_name=$(logname 2>/dev/null || true)
+fi
+if [[ -z "$user_name" ]]; then
+    user_name=$(stat -c '%U' "$PWD" 2>/dev/null || true)
+    if [[ "$user_name" == "UNKNOWN" ]]; then
+        user_name=""
+    fi
+fi
+if [[ -z "$user_name" ]]; then
+    user_name="root"
 fi
 
 # Update non-default install paths
