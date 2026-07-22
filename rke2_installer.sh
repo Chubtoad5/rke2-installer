@@ -1005,6 +1005,14 @@ apply_utilities () {
 
 run_upgrade () {
     echo "--- Running upgrade workflow"
+    # RK-18: the 'stable' channel is resolved by the cluster from update.rke2.io -
+    # unreachable in air-gapped environments, so the plan would hang forever.
+    if [[ $AIR_GAPPED_MODE -eq 1 && "$UPGRADE_VERSION" == "stable" ]]; then
+        echo "Error: air-gapped upgrades cannot use the 'stable' channel (it requires internet access"
+        echo "  to update.rke2.io). Specify an explicit version instead, e.g.:"
+        echo "  sudo ./$SCRIPT_NAME upgrade $UPGRADE_TYPE v1.34.5+rke2r1"
+        exit 1
+    fi
     export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
     export PATH=$PATH:/var/lib/rancher/rke2/bin
 
