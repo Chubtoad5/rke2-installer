@@ -86,6 +86,7 @@ UPGRADE_VERSION=""
 SKIP_CORE_INSTALL=0
 SERVICE_ACTION="start"
 SELINUX_ENFORCING="false"
+STATE_FILE="/etc/rke2-installer/install-state.env"
 fqdn_pattern='^([a-z0-9]+(-[a-z0-9]+)*\.)+[a-z]{2,}$'
 ipv4_pattern='^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$'
 TMP_DIR=$(mktemp -d /tmp/rke2-installer.XXXXXX)
@@ -694,7 +695,54 @@ spec:
 EOF
 }
 
+state_set () {
+    # state_set KEY VALUE - idempotent key=value write to the install-state file (RK-13)
+    local key="$1" val="$2"
+    mkdir -p "$(dirname "$STATE_FILE")"
+    if [[ -f "$STATE_FILE" ]]; then
+        sed -i "/^${key}=/d" "$STATE_FILE"
+    fi
+    echo "${key}=\"${val}\"" >> "$STATE_FILE"
+    chmod 600 "$STATE_FILE"
+}
+
+record_install_state () {
+    # RK-13: capture pre-install host state (first run only) so uninstall can restore
+    # exactly what THIS tool changed - and nothing else.
+    if [[ -f "$STATE_FILE" ]]; then
+        return 0
+    fi
+    echo "  Recording pre-install host state to $STATE_FILE"
+    state_set RKE2I_STATE_VERSION "1"
+    local swap_was_on="false"
+    if [[ -n "$(swapon --noheadings 2>/dev/null || true)" ]]; then
+        swap_was_on="true"
+    fi
+    state_set RKE2I_SWAP_WAS_ON "$swap_was_on"
+    local mp_svc_enabled mp_sock_enabled fw_enabled fw_active
+    mp_svc_enabled=$(systemctl is-enabled multipathd.service 2>/dev/null) || true
+    state_set RKE2I_MULTIPATHD_SERVICE_ENABLED "${mp_svc_enabled:-not-found}"
+    mp_sock_enabled=$(systemctl is-enabled multipathd.socket 2>/dev/null) || true
+    state_set RKE2I_MULTIPATHD_SOCKET_ENABLED "${mp_sock_enabled:-not-found}"
+    local ufw_was_active="false"
+    if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
+        ufw_was_active="true"
+    fi
+    state_set RKE2I_UFW_WAS_ACTIVE "$ufw_was_active"
+    fw_enabled=$(systemctl is-enabled firewalld.service 2>/dev/null) || true
+    state_set RKE2I_FIREWALLD_ENABLED "${fw_enabled:-not-found}"
+    fw_active=$(systemctl is-active firewalld.service 2>/dev/null) || true
+    state_set RKE2I_FIREWALLD_WAS_ACTIVE "${fw_active:-inactive}"
+    local nm_conf_preexisted="false"
+    if [[ -f /etc/NetworkManager/conf.d/rke2-canal.conf ]]; then
+        nm_conf_preexisted="true"
+    fi
+    state_set RKE2I_NM_CONF_PREEXISTED "$nm_conf_preexisted"
+    state_set RKE2I_NTP_CONFIGURED "none"
+}
+
 config_host_settings () {
+    record_install_state
     # Common kubernetes requirments
     # RK-7: probe per module. overlay and br_netfilter are hard requirements; dm_crypt and
     # nfs are only needed for encrypted/NFS-backed storage and are absent from minimal
@@ -728,7 +776,10 @@ config_host_settings () {
     printf '%s\n' $loaded_mods > /etc/modules-load.d/40-k8s.conf
     echo "  Disabling swap space"
     swapoff -a
-    sed -i -e '/swap/d' /etc/fstab
+    # Comment out (not delete) swap entries, tagged so uninstall can restore them (RK-13).
+    if grep -qE '^[^#].*swap' /etc/fstab; then
+        sed -i -E 's|^([^#].*swap.*)$|#\1 # rke2-installer-swap|' /etc/fstab
+    fi
     echo "  Enabling k8s sysctl parameters"
     cat > /etc/sysctl.d/40-k8s.conf <<EOF
 net.bridge.bridge-nf-call-ip6tables = 1
@@ -737,8 +788,27 @@ net.ipv4.ip_forward = 1
 EOF
     if [[ ${ENABLE_CIS,,} == true ]]; then
         echo "  Enabling CIS host parameters"
-        cp -f /usr/local/share/rke2/rke2-cis-sysctl.conf /etc/sysctl.d/60-rke2-cis.conf
-        useradd -r -c "etcd user" -s /sbin/nologin -M etcd -U
+        # tar-method installs ship the CIS sysctl profile under /usr/local/share,
+        # rpm-method installs (Rocky/RHEL online) under /usr/share.
+        local cis_sysctl_src="" cis_path
+        for cis_path in /usr/local/share/rke2/rke2-cis-sysctl.conf /usr/share/rke2/rke2-cis-sysctl.conf; do
+            if [[ -f "$cis_path" ]]; then
+                cis_sysctl_src="$cis_path"
+                break
+            fi
+        done
+        if [[ -n "$cis_sysctl_src" ]]; then
+            cp -f "$cis_sysctl_src" /etc/sysctl.d/60-rke2-cis.conf
+        else
+            echo "  WARNING: rke2-cis-sysctl.conf not found (checked tar and rpm locations); skipping CIS sysctl profile."
+        fi
+        # Re-run safe: only create the etcd user if missing; record it for uninstall (RK-13).
+        if id etcd &>/dev/null; then
+            echo "  etcd user already exists."
+        else
+            useradd -r -c "etcd user" -s /sbin/nologin -M etcd -U
+            state_set RKE2I_ETCD_USER_CREATED "true"
+        fi
     fi
     if ! systemctl restart systemd-sysctl; then
         echo "Error: systemd-sysctl.service failed to restart."
@@ -1516,10 +1586,71 @@ FBEOF
 
 uninstall_rke2() {
     echo "--- Uninstalling RKE2"
-    [ ! -f "/usr/local/bin/rke2-uninstall.sh" ] || /usr/local/bin/rke2-uninstall.sh
-    # rm -rf $base_dir/rke2-install-files
-    [ ! -d "/home/$user_name/.kube" ] || rm -rf /home/$user_name/.kube
-    [  ! -d "/root/.kube" ] || rm -rf /root/.kube
+    # Load recorded install state (written at install time; RK-13).
+    local have_state=0
+    if [[ -f "$STATE_FILE" ]]; then
+        # shellcheck disable=SC1090
+        source "$STATE_FILE"
+        have_state=1
+    else
+        echo "  NOTE: no install-state file at $STATE_FILE (host installed by an older version)."
+        echo "  Host-setting restoration (swap/firewall/multipathd) will be skipped; only files"
+        echo "  created by this installer are removed."
+    fi
+    # RK-1: stop RKE2 services BEFORE any file removal - never delete live etcd/kubelet dirs.
+    echo "  Stopping RKE2 services..."
+    systemctl stop rke2-server.service 2>/dev/null || true
+    systemctl stop rke2-agent.service 2>/dev/null || true
+    # RK-1: the upstream uninstaller lands in /usr/local/bin for tar-method installs and
+    # in /usr/bin for rpm-method installs (the Rocky/RHEL online default).
+    local uninstaller="" uninstaller_path
+    for uninstaller_path in /usr/local/bin/rke2-uninstall.sh /usr/bin/rke2-uninstall.sh; do
+        if [[ -x "$uninstaller_path" ]]; then
+            uninstaller="$uninstaller_path"
+            break
+        fi
+    done
+    if [[ -n "$uninstaller" ]]; then
+        echo "  Running upstream uninstaller $uninstaller..."
+        "$uninstaller" || echo "  WARNING: $uninstaller exited non-zero; continuing local cleanup."
+    else
+        echo "  WARNING: rke2-uninstall.sh not found in /usr/local/bin or /usr/bin; performing local cleanup only."
+    fi
+    # rpm-method installs: remove the RKE2 packages so a later install starts clean (RK-1).
+    if command -v rpm &>/dev/null; then
+        local rpm_pkgs="" rpm_pkg
+        for rpm_pkg in rke2-server rke2-agent rke2-common rke2-selinux; do
+            if rpm -q "$rpm_pkg" &>/dev/null; then
+                rpm_pkgs="$rpm_pkgs $rpm_pkg"
+            fi
+        done
+        if [[ -n "$rpm_pkgs" ]]; then
+            echo "  Removing RKE2 rpm packages:$rpm_pkgs"
+            if command -v dnf &>/dev/null; then
+                dnf remove -y $rpm_pkgs || true
+            elif command -v yum &>/dev/null; then
+                yum remove -y $rpm_pkgs || true
+            elif command -v zypper &>/dev/null; then
+                zypper --non-interactive remove $rpm_pkgs || true
+            fi
+        fi
+    fi
+    # Safety gate: refuse to delete data directories while a service is somehow still running.
+    if systemctl is-active --quiet rke2-server.service || systemctl is-active --quiet rke2-agent.service; then
+        echo "Error: an RKE2 service is still active; refusing to delete data directories."
+        echo "  Stop it manually ('systemctl stop rke2-server rke2-agent') and re-run uninstall."
+        exit 1
+    fi
+    # Remove rke2 config incl. registries.yaml (contains registry credentials) in case the
+    # upstream uninstaller did not run or left it behind.
+    rm -rf /etc/rancher/rke2
+    # Remove only the kubeconfig files this installer wrote - never the user's whole ~/.kube (RK-13).
+    rm -f /root/.kube/config
+    rmdir /root/.kube 2>/dev/null || true
+    if [[ -n "$user_name" && "$user_name" != "root" ]]; then
+        rm -f "/home/$user_name/.kube/config"
+        rmdir "/home/$user_name/.kube" 2>/dev/null || true
+    fi
     # Clean up the KUBECONFIG and command symlinks
     unset KUBECONFIG
     for link in /usr/bin/kubectl /usr/bin/ctr /usr/bin/crictl; do
@@ -1527,6 +1658,49 @@ uninstall_rke2() {
             rm -f "$link"
         fi
     done
+    # Remove host-settings files created by this installer (RK-13).
+    rm -f /etc/modules-load.d/40-k8s.conf /etc/sysctl.d/40-k8s.conf /etc/sysctl.d/60-rke2-cis.conf
+    if [[ "${RKE2I_NM_CONF_PREEXISTED:-false}" != "true" ]]; then
+        rm -f /etc/NetworkManager/conf.d/rke2-canal.conf
+    fi
+    # Restore host settings to their recorded pre-install state (RK-13).
+    if [[ $have_state -eq 1 ]]; then
+        # Swap: uncomment the fstab lines this installer commented out; re-enable swap
+        # only if it was on before install.
+        sed -i -E 's|^#(.*) # rke2-installer-swap$|\1|' /etc/fstab
+        if [[ "${RKE2I_SWAP_WAS_ON:-false}" == "true" ]]; then
+            echo "  Re-enabling swap (was enabled before install)..."
+            swapon -a 2>/dev/null || true
+        fi
+        # multipathd: unmask and restore recorded enablement.
+        if [[ "${RKE2I_MULTIPATHD_SERVICE_ENABLED:-not-found}" == "enabled" ]]; then
+            echo "  Restoring multipathd.service (was enabled before install)..."
+            systemctl unmask multipathd.service 2>/dev/null || true
+            systemctl enable --now multipathd.service 2>/dev/null || true
+        fi
+        if [[ "${RKE2I_MULTIPATHD_SOCKET_ENABLED:-not-found}" == "enabled" ]]; then
+            systemctl unmask multipathd.socket 2>/dev/null || true
+            systemctl enable --now multipathd.socket 2>/dev/null || true
+        fi
+        # Firewalls: re-enable only what was active/enabled before install.
+        if [[ "${RKE2I_UFW_WAS_ACTIVE:-false}" == "true" ]] && command -v ufw &>/dev/null; then
+            echo "  Re-enabling UFW (was active before install)..."
+            ufw --force enable || true
+        fi
+        if [[ "${RKE2I_FIREWALLD_ENABLED:-not-found}" == "enabled" ]]; then
+            echo "  Re-enabling firewalld (was enabled before install)..."
+            systemctl enable firewalld.service 2>/dev/null || true
+        fi
+        if [[ "${RKE2I_FIREWALLD_WAS_ACTIVE:-inactive}" == "active" ]]; then
+            systemctl start firewalld.service 2>/dev/null || true
+        fi
+        # etcd user (CIS): remove only if this installer created it.
+        if [[ "${RKE2I_ETCD_USER_CREATED:-false}" == "true" ]] && id etcd &>/dev/null; then
+            echo "  Removing etcd user (created by this installer)..."
+            userdel etcd 2>/dev/null || true
+        fi
+    fi
+    systemctl daemon-reload 2>/dev/null || true
     # cleanup non-default paths
     if [[ -n "$RKE2_DATA" && "$RKE2_DATA" != "default" ]]; then
         if [[ "$RKE2_DATA" != /* || "$RKE2_DATA" == "/" ]]; then
@@ -1554,6 +1728,8 @@ uninstall_rke2() {
         fi
     fi
     [ ! -d "$WORKING_DIR" ] || rm -rf "$WORKING_DIR"
+    rm -f "$STATE_FILE"
+    rmdir "$(dirname "$STATE_FILE")" 2>/dev/null || true
     echo "  Completed"
     echo "### RKE2 Installer Ended at $(date) ###"
     exit 0
