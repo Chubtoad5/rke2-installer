@@ -1274,14 +1274,20 @@ CREDEOF
       exit 1
   fi
 
-  # Create scheduled backup
-  echo "  Creating scheduled backup '${VELERO_BACKUP_SCHEDULE}'..."
-  velero schedule create daily-full-backup \
-    --schedule="${VELERO_BACKUP_SCHEDULE}" \
-    --ttl ${VELERO_BACKUP_TTL} \
-    --snapshot-move-data \
-    --include-cluster-resources=true \
-    --include-namespaces ${VELERO_BACKUP_NAMESPACES}
+  # Create scheduled backup (RK-4: guarded so 'install velero' is re-runnable -
+  # 'velero schedule create' hard-fails when the schedule already exists)
+  if velero schedule get daily-full-backup &>/dev/null; then
+      echo "  Schedule 'daily-full-backup' already exists; leaving it in place."
+      echo "  (To apply changed schedule settings: 'velero schedule delete daily-full-backup --confirm' and re-run.)"
+  else
+      echo "  Creating scheduled backup '${VELERO_BACKUP_SCHEDULE}'..."
+      velero schedule create daily-full-backup \
+        --schedule="${VELERO_BACKUP_SCHEDULE}" \
+        --ttl ${VELERO_BACKUP_TTL} \
+        --snapshot-move-data \
+        --include-cluster-resources=true \
+        --include-namespaces ${VELERO_BACKUP_NAMESPACES}
+  fi
 
   cd $base_dir
 }
