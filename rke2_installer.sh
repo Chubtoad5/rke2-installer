@@ -637,7 +637,10 @@ etcd-extra-env:
   - "ETCD_AUTO_COMPACTION_RETENTION=72h"
   - "ETCD_AUTO_COMPACTION_MODE=periodic"
 kube-apiserver-arg:
-  - "audit-log-path=/var/log/rke2-apiserver-audit.log"
+  # Audit log lives under the RKE2 data dir, NOT /var/log: on SELinux-enforcing
+  # hosts the containerized apiserver may only write paths labeled by the
+  # rke2-selinux policy - /var/log/... gets EACCES and the apiserver crashloops
+  - "audit-log-path=$RKE2_DATA/server/logs/rke2-apiserver-audit.log"
   - "audit-log-maxage=30"
   - "audit-log-maxbackup=10"
   - "audit-log-maxsize=200"
