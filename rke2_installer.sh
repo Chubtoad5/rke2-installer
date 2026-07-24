@@ -577,6 +577,13 @@ render_rke2_config () {
         else
             resolv_conf_file="$resolv_link"
         fi
+    elif grep -qE '^\s*nameserver\s+127\.' /etc/resolv.conf 2>/dev/null \
+         && [[ -f /run/systemd/resolve/resolv.conf ]]; then
+        # A PLAIN-FILE resolv.conf pointing at a loopback resolver (seen in the
+        # wild after resolver-restore tools rewrite the systemd-resolved stub as
+        # a regular file): handing it to kubelet makes CoreDNS detect a forward
+        # loop and CrashLoop. Use the real systemd-resolved upstream list instead.
+        resolv_conf_file="/run/systemd/resolve/resolv.conf"
     else
         resolv_conf_file="/etc/resolv.conf"
     fi
