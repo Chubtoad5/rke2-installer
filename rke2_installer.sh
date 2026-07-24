@@ -1890,6 +1890,10 @@ uninstall_rke2() {
         else
             # unmount projected/secret tmpfs mounts (best effort)
             find "$KUBELET_DATA" -type d -path '*kubernetes.io~*' -exec umount -lf {} \; 2>/dev/null || true
+            # dead CSI FUSE globalmounts (Longhorn after the engine is gone) EIO on
+            # traversal and can be absent from findmnt - unmount them explicitly
+            # WITHOUT descending into them, or the rm below fails with I/O errors
+            find "$KUBELET_DATA/plugins" -type d -name globalmount -prune -exec umount -lf {} \; 2>/dev/null || true
             # unmount anything else still mounted under the tree (best effort)
             findmnt -R -n -o TARGET "$KUBELET_DATA" 2>/dev/null | sort -r | xargs -r umount -l 2>/dev/null || true
             rm -rf -- "$KUBELET_DATA"
