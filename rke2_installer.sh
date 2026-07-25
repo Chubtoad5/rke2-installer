@@ -405,6 +405,22 @@ ensure_selinux_policy () {
         echo "  rke2-selinux policy present ($(rpm -q rke2-selinux))."
         return 0
     fi
+    # P4-04: save bundles built on rpm-based hosts carry the policy RPMs - install
+    # from the bundle first (works air-gapped; also fastest online)
+    local bundled_rpm_dir="$WORKING_DIR/rke2-selinux-rpms"
+    if [[ -d "$bundled_rpm_dir" ]] && compgen -G "$bundled_rpm_dir/*.rpm" >/dev/null; then
+        echo "  Installing the SELinux policy RPMs bundled in the save archive..."
+        if command -v dnf &>/dev/null; then
+            dnf install -y --disablerepo='*' "$bundled_rpm_dir"/*.rpm || true
+        else
+            rpm -Uvh --replacepkgs "$bundled_rpm_dir"/*.rpm || true
+        fi
+        if rpm -q rke2-selinux &>/dev/null; then
+            echo "  rke2-selinux policy installed from the bundled RPMs."
+            return 0
+        fi
+        echo "  Bundled policy RPM install did not succeed; falling through..."
+    fi
     if [[ $AIR_GAPPED_MODE -eq 0 ]]; then
         echo "  rke2-selinux not installed (tar-method install); attempting install from configured repos..."
         if command -v dnf &>/dev/null; then
@@ -1930,9 +1946,45 @@ run_save () {
     fi
     download_upgrade_artifacts
     download_rke2_utilities
+    download_selinux_policy_rpms
     create_save_archive
     echo "--- Finished save workflow"
     echo "  Copy the archive to an air-gapped host runing the same version of $OS_ID"
+}
+
+download_selinux_policy_rpms () {
+    # P4-04: air-gapped installs are tar-method and cannot fetch the SELinux
+    # policies, and uninstall removes both the policy RPMs and the Rancher repo
+    # file - so an Enforcing host could never reinstall from its own bundle
+    # without a manual RPM transfer. Bundle the policy RPMs on rpm-based hosts.
+    if ! command -v dnf &>/dev/null; then
+        echo "  Skipping SELinux policy RPM download (no dnf; no upstream rke2-selinux for this distro)."
+        return 0
+    fi
+    local maj destdir
+    maj=$(. /etc/os-release && echo "${VERSION_ID%%.*}")
+    destdir="$WORKING_DIR/rke2-selinux-rpms"
+    mkdir -p "$destdir"
+    echo "  Downloading rke2-selinux + container-selinux RPMs (el$maj) into the bundle..."
+    if ! dnf download --help &>/dev/null; then
+        dnf install -y dnf-plugins-core >/dev/null || true
+    fi
+    if dnf download --resolve --alldeps --destdir "$destdir" \
+        --repofrompath "rancher-rke2-common-save,https://rpm.rancher.io/rke2/stable/common/centos/${maj}/noarch" \
+        --setopt=rancher-rke2-common-save.gpgcheck=0 \
+        rke2-selinux container-selinux >/dev/null; then
+        echo "  SELinux policy RPMs bundled: $(find "$destdir" -name '*.rpm' | wc -l) package(s)."
+        return 0
+    fi
+    rm -rf "$destdir"
+    if command -v getenforce &>/dev/null && [[ "$(getenforce 2>/dev/null)" == "Enforcing" ]]; then
+        echo "Error: failed to download the rke2-selinux/container-selinux RPMs and this host is"
+        echo "  SELinux-enforcing - the save bundle could not reinstall RKE2 on this host while"
+        echo "  air-gapped. Fix repo access (rpm.rancher.io) and re-run save."
+        exit 1
+    fi
+    echo "Warning: could not download the SELinux policy RPMs; the bundle will not self-serve"
+    echo "  SELinux-enforcing air-gapped installs (manual RPM transfer would be required)."
 }
 
 download_rke2_binaries () {
