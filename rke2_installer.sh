@@ -2004,7 +2004,11 @@ download_selinux_policy_rpms () {
     if ! dnf download --help &>/dev/null; then
         dnf install -y dnf-plugins-core >/dev/null || true
     fi
-    if dnf download --resolve --alldeps --destdir "$destdir" \
+    # --resolve WITHOUT --alldeps: the offline install applies every RPM in this
+    # dir, so it must hold only the policy packages + deps genuinely missing on
+    # this host (same-OS save contract) - --alldeps pulled the full 126-package
+    # transitive closure and would bulk-upgrade system libs on the target
+    if dnf download --resolve --destdir "$destdir" \
         --repofrompath "rancher-rke2-common-save,https://rpm.rancher.io/rke2/stable/common/centos/${maj}/noarch" \
         --setopt=rancher-rke2-common-save.gpgcheck=0 \
         rke2-selinux container-selinux >/dev/null; then
