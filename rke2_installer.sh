@@ -24,6 +24,7 @@ PVC_DATA=${PVC_DATA:-"default"}                                               # 
 CONTROL_PLANE_TAINT=${CONTROL_PLANE_TAINT:-"false"}                           # Set to true to taint the control-plane node for multi-node clusters and workload separation
 RKE2_RECONFIGURE=${RKE2_RECONFIGURE:-"false"}                                 # Set to true to allow 'install'/'join' on a RUNNING node to apply a changed config.yaml and restart the rke2 service
 NTP_SERVERS=${NTP_SERVERS:-}                                                  # Optional space/comma-separated NTP server list applied during 'install'/'join'; empty = leave the OS default time source unchanged
+RKE2_SELINUX_FALLBACK=${RKE2_SELINUX_FALLBACK:-}                              # 'permissive': on SUSE hosts (no upstream rke2-selinux policy exists) switch SELinux to permissive instead of failing pre-cluster; recorded in install state, restored to enforcing on uninstall (P4-08b)
 DEBUG=${DEBUG:-"1"}
 
 # Velero Backup Configuration
@@ -435,6 +436,31 @@ ensure_selinux_policy () {
         echo "  rke2-selinux policy installed."
         return 0
     fi
+    # P4-08b: explicit opt-in fallback for distros with no upstream rke2-selinux
+    # (SUSE): switch the host to permissive instead of failing pre-cluster.
+    # Recorded in the install state and restored to enforcing on uninstall.
+    # Never applied on RHEL-family, where the policy is installable (repo/bundle).
+    if [[ "${RKE2_SELINUX_FALLBACK,,}" == "permissive" ]]; then
+        if [[ "$OS_ID" =~ ^(sles|opensuse-leap)$ ]]; then
+            echo "  RKE2_SELINUX_FALLBACK=permissive: no rke2-selinux policy is available for $OS_ID."
+            echo "  WARNING: switching SELinux to PERMISSIVE (runtime + /etc/selinux/config)."
+            echo "  This is recorded in the install state and restored to enforcing on uninstall."
+            state_set RKE2I_SELINUX_WAS_ENFORCING "true"
+            setenforce 0 2>/dev/null || true
+            if [[ -f /etc/selinux/config ]]; then
+                sed -i 's/^SELINUX=enforcing/SELINUX=permissive/' /etc/selinux/config
+            fi
+            SELINUX_ENFORCING="false"
+            # config.yaml was generated while the host was still enforcing - drop the
+            # selinux flag so rke2 does not expect the (absent) policy
+            if [[ -f /etc/rancher/rke2/config.yaml ]]; then
+                sed -i '/^selinux: true$/d' /etc/rancher/rke2/config.yaml
+            fi
+            return 0
+        fi
+        echo "  NOTE: RKE2_SELINUX_FALLBACK=permissive is only honored on SUSE hosts (no upstream"
+        echo "  policy exists there). On $OS_ID install the policy instead (repos or bundled RPMs)."
+    fi
     echo "Error: SELinux is enforcing but the 'rke2-selinux' policy is not installed, and it could not be"
     echo "  installed automatically (air-gapped/tar-method installs cannot fetch it). Starting RKE2 now"
     echo "  would produce AVC-denied (broken) workloads. Remediation - choose ONE, then re-run:"
@@ -443,6 +469,7 @@ ensure_selinux_policy () {
     echo "      (offline: download from https://github.com/rancher/rke2-selinux/releases and 'rpm -ivh' them)"
     echo "   2) Or set SELinux to permissive mode:"
     echo "        setenforce 0    (and set SELINUX=permissive in /etc/selinux/config to persist)"
+    echo "   3) SUSE only: re-run with RKE2_SELINUX_FALLBACK=permissive (recorded + restored on uninstall)"
     exit 1
 }
 
@@ -1840,6 +1867,14 @@ uninstall_rke2() {
     fi
     # Restore host settings to their recorded pre-install state (RK-13).
     if [[ $have_state -eq 1 ]]; then
+        # P4-08b: restore SELinux enforcing if the install fallback switched it
+        if [[ "${RKE2I_SELINUX_WAS_ENFORCING:-false}" == "true" ]]; then
+            echo "  Restoring SELinux to enforcing (RKE2_SELINUX_FALLBACK switched it to permissive)..."
+            if [[ -f /etc/selinux/config ]]; then
+                sed -i 's/^SELINUX=permissive/SELINUX=enforcing/' /etc/selinux/config
+            fi
+            setenforce 1 2>/dev/null || true
+        fi
         # Swap: uncomment the fstab lines this installer commented out; re-enable swap
         # only if it was on before install.
         sed -i -E 's|^#(.*) # rke2-installer-swap$|\1|' /etc/fstab
