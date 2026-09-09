@@ -22,6 +22,9 @@ RKE2_DATA=${RKE2_DATA:-"default"}                                             # 
 KUBELET_DATA=${KUBELET_DATA:-"default"}                                       # Path where kubelet data is stored, update with valid local path
 PVC_DATA=${PVC_DATA:-"default"}                                               # Path where storage class PVCs are stored, update with valid local path
 CONTROL_PLANE_TAINT=${CONTROL_PLANE_TAINT:-"false"}                           # Set to true to taint the control-plane node for multi-node clusters and workload separation
+RKE2_RECONFIGURE=${RKE2_RECONFIGURE:-"false"}                                 # Set to true to allow 'install'/'join' on a RUNNING node to apply a changed config.yaml and restart the rke2 service
+NTP_SERVERS=${NTP_SERVERS:-}                                                  # Optional space/comma-separated NTP server list applied during 'install'/'join'; empty = leave the OS default time source unchanged
+RKE2_SELINUX_FALLBACK=${RKE2_SELINUX_FALLBACK:-}                              # 'permissive': on SUSE hosts (no upstream rke2-selinux policy exists) switch SELinux to permissive instead of failing pre-cluster; recorded in install state, restored to enforcing on uninstall (P4-08b)
 DEBUG=${DEBUG:-"1"}
 
 # Velero Backup Configuration
@@ -43,7 +46,7 @@ MONITORING_HOST=${MONITORING_HOST:-""}                               # IP/FQDN o
 MONITORING_LOKI_PORT=${MONITORING_LOKI_PORT:-"3100"}                 # Loki HTTP port on the monitoring host
 MONITORING_PROMETHEUS_PORT=${MONITORING_PROMETHEUS_PORT:-"9090"}     # Prometheus remote-write receiver port on the monitoring host
 CLUSTER_NAME=${CLUSTER_NAME:-"edge-lab"}                             # Cluster label applied to all metrics and logs
-HELM_VERSION=${HELM_VERSION:-"3.12.0"}                               # Helm version to download if not already installed
+HELM_VERSION=${HELM_VERSION:-"4.0.1"}                                # Helm version to download if not already installed
 KUBE_PROMETHEUS_STACK_VERSION=${KUBE_PROMETHEUS_STACK_VERSION:-"69.8.0"}  # kube-prometheus-stack Helm chart version
 FLUENT_BIT_CHART_VERSION=${FLUENT_BIT_CHART_VERSION:-"0.55.0"}       # Fluent Bit Helm chart version (fluent/fluent-bit, uses 0.x.x versioning)
 FLUENT_BIT_VERSION=${FLUENT_BIT_VERSION:-"4.2.2"}                    # Fluent Bit application/image version (appVersion in the chart above)
@@ -82,8 +85,34 @@ REG_PASS=""
 UPGRADE_MODE=0
 UPGRADE_TYPE=""
 UPGRADE_VERSION=""
+SKIP_CORE_INSTALL=0
+SERVICE_ACTION="start"
+SELINUX_ENFORCING="false"
+STATE_FILE="/etc/rke2-installer/install-state.env"
 fqdn_pattern='^([a-z0-9]+(-[a-z0-9]+)*\.)+[a-z]{2,}$'
 ipv4_pattern='^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$'
+TMP_DIR=$(mktemp -d /tmp/rke2-installer.XXXXXX)
+RUN_DEBUG_STEP=""
+RUN_DEBUG_LOG="$TMP_DIR/run-debug.log"
+
+# EXIT trap: report the failing step (replaying captured output when DEBUG=0) and
+# clean up temp files. Captures the exit code FIRST and re-exits with it so failures
+# are never masked by the trap's own commands.
+on_exit () {
+    local rc=$?
+    if [[ $rc -ne 0 && -n "$RUN_DEBUG_STEP" ]]; then
+        echo "Error: step '$RUN_DEBUG_STEP' failed with exit code $rc." >&2
+        if [[ "$DEBUG" != "1" && -s "$RUN_DEBUG_LOG" ]]; then
+            echo "--- Last output from '$RUN_DEBUG_STEP' ---" >&2
+            tail -n 40 "$RUN_DEBUG_LOG" >&2
+            echo "--- (re-run with DEBUG=1 for full output) ---" >&2
+        fi
+    fi
+    rm -rf "$TMP_DIR"
+    rm -f "$base_dir/.rke2-save.tar.gz.partial"
+    exit "$rc"
+}
+trap on_exit EXIT
 
 # --- USAGE FUNCTION --- #
 # Usage: $SCRIPT_NAME [install] [unintall] [save] [push] [join [server|agent] server-fqdn join-token-string] [upgrade [server|agent|both] [stable|version]] [-tls-san [server-fqdn-ip]] [-registry [registry:port username password]]
@@ -176,15 +205,16 @@ display_args() {
     echo "  JOIN_MODE: $JOIN_MODE"
     echo "  JOIN_TYPE: $JOIN_TYPE"
     echo "  JOIN_SERVER_FQDN: $JOIN_SERVER_FQDN"
-    echo "  JOIN_TOKEN: $JOIN_TOKEN"
+    echo "  JOIN_TOKEN: ${JOIN_TOKEN:+<hidden>}"
     echo "  PUSH_MODE: $PUSH_MODE"
     echo "  REGISTRY_MODE: $REGISTRY_MODE"
     echo "  REGISTRY_INFO: $REGISTRY_INFO"
     echo "  REG_FQDN: $REG_FQDN"
     echo "  REG_PORT: $REG_PORT"
     echo "  REG_USER: $REG_USER"
-    echo "  REG_PASS: $REG_PASS"
+    echo "  REG_PASS: ${REG_PASS:+<hidden>}"
     echo "  OS: $OS_ID"
+    echo "  SELINUX_ENFORCING: $SELINUX_ENFORCING"
     if [[ $INSTALL_TYPE == "monitoring" ]]; then
         echo "  MONITORING_HOST: $MONITORING_HOST"
         echo "  CLUSTER_NAME: $CLUSTER_NAME"
@@ -208,67 +238,294 @@ run_install () {
     if [[ $RKE2_DATA == "default" ]]; then RKE2_DATA="/var/lib/rancher/rke2"; else mkdir -p "$RKE2_DATA"; fi
     if [[ $KUBELET_DATA == "default" ]]; then KUBELET_DATA="/var/lib/kubelet"; else mkdir -p "$KUBELET_DATA"; fi
     if [[ $PVC_DATA == "default" ]]; then PVC_DATA="/opt/local-path-provisioner"; else mkdir -p "$PVC_DATA"; fi
+    reconcile_existing_install
     run_debug create_registry_config
+    reconcile_registry_config_change
     if [[ $INSTALL_MODE -eq 1 ]]; then
         echo "--- Installing RKE2 ---"
         run_debug create_config_files
-        run_debug install_rke2_binaries
+        if [[ $SKIP_CORE_INSTALL -eq 0 ]]; then
+            run_debug install_rke2_binaries
+        fi
+        run_debug ensure_selinux_policy
         run_debug config_host_settings
-        run_debug start_rke2_service
+        run_debug start_rke2_service "$SERVICE_ACTION"
         run_debug apply_utilities
     fi
     if [[ $JOIN_MODE -eq 1 && $JOIN_TYPE == "agent" ]]; then
         echo "--- Joining RKE2 agent ---"
         run_debug create_agent_join_config
-        run_debug install_rke2_binaries
+        if [[ $SKIP_CORE_INSTALL -eq 0 ]]; then
+            run_debug install_rke2_binaries
+        fi
+        run_debug ensure_selinux_policy
         run_debug config_host_settings
-        run_debug start_rke2_service
+        run_debug start_rke2_service "$SERVICE_ACTION"
     fi
     if [[ $JOIN_MODE -eq 1 && $JOIN_TYPE == "server" ]]; then
         echo "--- Joining RKE2 server ---"
         run_debug create_server_join_config
-        run_debug install_rke2_binaries
+        if [[ $SKIP_CORE_INSTALL -eq 0 ]]; then
+            run_debug install_rke2_binaries
+        fi
+        run_debug ensure_selinux_policy
         run_debug config_host_settings
-        run_debug start_rke2_service
+        run_debug start_rke2_service "$SERVICE_ACTION"
     fi
 }
 
+reconcile_existing_install () {
+    # RK-2: make 'install'/'join' resumable on a host where RKE2 is already running.
+    # Outcomes:
+    #   - fresh host                          -> normal install (no-op here)
+    #   - other role's service active         -> hard error (uninstall first)
+    #   - running version != RKE2_VERSION     -> hard error directing to 'upgrade'
+    #   - join to a different cluster server  -> hard error (uninstall first)
+    #   - rendered config == live config      -> skip core install, re-run idempotent post-steps
+    #   - rendered config != live config      -> apply + service restart, but ONLY when
+    #                                            RKE2_RECONFIGURE=true; otherwise a clear error
+    local requested_svc="rke2-server.service" other_svc="rke2-agent.service"
+    if [[ $JOIN_MODE -eq 1 && $JOIN_TYPE == "agent" ]]; then
+        requested_svc="rke2-agent.service"
+        other_svc="rke2-server.service"
+    fi
+    if systemctl is-active --quiet "$other_svc"; then
+        echo "Error: $other_svc is active on this host, but this invocation manages $requested_svc."
+        echo "  This host already runs a different RKE2 role. Run 'sudo ./$SCRIPT_NAME uninstall' first."
+        exit 1
+    fi
+    systemctl is-active --quiet "$requested_svc" || return 0
+    echo "--- $requested_svc is already active: entering reconcile mode ---"
+    # Snapshot the live registry config so a changed -registry on a running node is
+    # detected after create_registry_config rewrites it (see reconcile_registry_config_change).
+    RECONCILE_REGISTRIES_PRE=""
+    if [[ -f /etc/rancher/rke2/registries.yaml ]]; then
+        RECONCILE_REGISTRIES_PRE="$TMP_DIR/registries.yaml.pre"
+        cp /etc/rancher/rke2/registries.yaml "$RECONCILE_REGISTRIES_PRE"
+    fi
+    # Version check: 'install' never changes the version of a running node.
+    local rke2_bin running_version=""
+    for rke2_bin in "$RKE2_DATA/bin/rke2" /usr/local/bin/rke2 /usr/bin/rke2; do
+        if [[ -x "$rke2_bin" ]]; then
+            running_version=$("$rke2_bin" --version 2>/dev/null | awk '/^rke2 version/ {print $3}') || true
+            break
+        fi
+    done
+    if [[ -n "$running_version" && "$running_version" != "$RKE2_VERSION" ]]; then
+        echo "Error: RKE2 $running_version is already running, but RKE2_VERSION=$RKE2_VERSION was requested."
+        echo "  'install' does not change the version of a running node."
+        echo "  Use: sudo ./$SCRIPT_NAME upgrade [server|agent|both] $RKE2_VERSION"
+        exit 1
+    fi
+    # Foreign-cluster guard: joining a different cluster requires uninstall, always.
+    if [[ $JOIN_MODE -eq 1 && -f /etc/rancher/rke2/config.yaml ]]; then
+        local existing_server
+        existing_server=$(awk -F'https://' '/^server:/ {print $2}' /etc/rancher/rke2/config.yaml | cut -d: -f1)
+        if [[ -n "$existing_server" && "$existing_server" != "$JOIN_SERVER_FQDN" ]]; then
+            echo "Error: this node is already joined to cluster server '$existing_server', but a join to"
+            echo "  '$JOIN_SERVER_FQDN' was requested. Joining a different cluster requires 'sudo ./$SCRIPT_NAME uninstall' first."
+            exit 1
+        fi
+    fi
+    # Config diff: render the requested config and compare with the live one.
+    local rendered="$TMP_DIR/config.yaml.rendered"
+    render_rke2_config "$rendered"
+    if cmp -s "$rendered" /etc/rancher/rke2/config.yaml; then
+        echo "  Existing /etc/rancher/rke2/config.yaml matches the requested configuration."
+        echo "  Skipping core RKE2 install; re-running idempotent post-install steps."
+        SKIP_CORE_INSTALL=1
+        SERVICE_ACTION="start"
+    elif [[ "${RKE2_RECONFIGURE,,}" == "true" ]]; then
+        echo "  Requested configuration differs from the running node and RKE2_RECONFIGURE=true:"
+        echo "  applying the new configuration and restarting $requested_svc."
+        SKIP_CORE_INSTALL=1
+        SERVICE_ACTION="restart"
+    else
+        echo "Error: RKE2 is running but the requested configuration differs from /etc/rancher/rke2/config.yaml."
+        if [[ $INSTALL_MODE -eq 1 ]] && command -v diff &>/dev/null; then
+            echo "--- diff (running vs requested) ---"
+            diff /etc/rancher/rke2/config.yaml "$rendered" || true
+            echo "-----------------------------------"
+        fi
+        echo "  Re-run with RKE2_RECONFIGURE=true to apply the new configuration and restart the service,"
+        echo "  or align the environment variables with the running configuration."
+        exit 1
+    fi
+}
+
+reconcile_registry_config_change () {
+    # Companion to reconcile_existing_install: on the reconcile path,
+    # create_registry_config may have just rewritten /etc/rancher/rke2/registries.yaml,
+    # but the running containerd only picks it up on a service restart. Apply the same
+    # RKE2_RECONFIGURE contract as config.yaml changes; without the opt-in, revert the
+    # file so disk and the running service stay consistent.
+    [[ "${SKIP_CORE_INSTALL:-0}" -eq 1 ]] || return 0
+    local live="/etc/rancher/rke2/registries.yaml"
+    local pre="${RECONCILE_REGISTRIES_PRE:-}"
+    [[ -f "$live" || -n "$pre" ]] || return 0
+    if [[ -n "$pre" && -f "$live" ]] && cmp -s "$pre" "$live"; then
+        return 0
+    fi
+    if [[ -z "$pre" && ! -s "$live" ]]; then
+        return 0
+    fi
+    if [[ "${RKE2_RECONFIGURE,,}" == "true" ]]; then
+        echo "  registries.yaml changed on a running node and RKE2_RECONFIGURE=true: the service will be restarted to apply it."
+        SERVICE_ACTION="restart"
+    else
+        if [[ -n "$pre" ]]; then
+            cp "$pre" "$live"
+        else
+            rm -f "$live"
+        fi
+        echo "Error: the requested registry configuration differs from the running node's registries.yaml."
+        echo "  The on-disk change was reverted to keep disk and the running service consistent."
+        echo "  Re-run with RKE2_RECONFIGURE=true to apply the registry change and restart the service."
+        exit 1
+    fi
+}
+
+ensure_selinux_policy () {
+    # RK-3: RKE2 needs the rke2-selinux/container-selinux policies when SELinux is
+    # enforcing. The upstream rpm install method (Rocky/RHEL online default) pulls
+    # rke2-selinux in via its own repos automatically. The tar method - forced in
+    # air-gap mode by INSTALL_RKE2_ARTIFACT_PATH, and used on SUSE hosts even online -
+    # installs NO policy: bringing the cluster up like that yields AVC-broken
+    # workloads. Verify/repair BEFORE the service is started.
+    if [[ "$SELINUX_ENFORCING" != "true" ]]; then
+        echo "  SELinux is not enforcing; no SELinux policy required."
+        return 0
+    fi
+    echo "  SELinux is enforcing; verifying RKE2 SELinux policies..."
+    if ! command -v rpm &>/dev/null; then
+        echo "  WARNING: SELinux is enforcing but this is not an rpm-based host; cannot verify the"
+        echo "  rke2-selinux policy. RKE2 workloads may hit AVC denials - verify SELinux policy manually."
+        return 0
+    fi
+    if rpm -q rke2-selinux &>/dev/null; then
+        echo "  rke2-selinux policy present ($(rpm -q rke2-selinux))."
+        return 0
+    fi
+    # P4-04: save bundles built on rpm-based hosts carry the policy RPMs - install
+    # from the bundle first (works air-gapped; also fastest online)
+    local bundled_rpm_dir="$WORKING_DIR/rke2-selinux-rpms"
+    if [[ -d "$bundled_rpm_dir" ]] && compgen -G "$bundled_rpm_dir/*.rpm" >/dev/null; then
+        echo "  Installing the SELinux policy RPMs bundled in the save archive..."
+        if command -v dnf &>/dev/null; then
+            dnf install -y --disablerepo='*' "$bundled_rpm_dir"/*.rpm || true
+        else
+            rpm -Uvh --replacepkgs "$bundled_rpm_dir"/*.rpm || true
+        fi
+        if rpm -q rke2-selinux &>/dev/null; then
+            echo "  rke2-selinux policy installed from the bundled RPMs."
+            return 0
+        fi
+        echo "  Bundled policy RPM install did not succeed; falling through..."
+    fi
+    if [[ $AIR_GAPPED_MODE -eq 0 ]]; then
+        echo "  rke2-selinux not installed (tar-method install); attempting install from configured repos..."
+        if command -v dnf &>/dev/null; then
+            dnf install -y container-selinux rke2-selinux || true
+        elif command -v yum &>/dev/null; then
+            yum install -y container-selinux rke2-selinux || true
+        elif command -v zypper &>/dev/null; then
+            zypper --non-interactive install container-selinux rke2-selinux || true
+        fi
+    fi
+    if rpm -q rke2-selinux &>/dev/null; then
+        echo "  rke2-selinux policy installed."
+        return 0
+    fi
+    # P4-08b: explicit opt-in fallback for distros with no upstream rke2-selinux
+    # (SUSE): switch the host to permissive instead of failing pre-cluster.
+    # Recorded in the install state and restored to enforcing on uninstall.
+    # Never applied on RHEL-family, where the policy is installable (repo/bundle).
+    if [[ "${RKE2_SELINUX_FALLBACK,,}" == "permissive" ]]; then
+        if [[ "$OS_ID" =~ ^(sles|opensuse-leap)$ ]]; then
+            echo "  RKE2_SELINUX_FALLBACK=permissive: no rke2-selinux policy is available for $OS_ID."
+            echo "  WARNING: switching SELinux to PERMISSIVE (runtime + /etc/selinux/config)."
+            echo "  This is recorded in the install state and restored to enforcing on uninstall."
+            state_set RKE2I_SELINUX_WAS_ENFORCING "true"
+            setenforce 0 2>/dev/null || true
+            if [[ -f /etc/selinux/config ]]; then
+                sed -i 's/^SELINUX=enforcing/SELINUX=permissive/' /etc/selinux/config
+            fi
+            SELINUX_ENFORCING="false"
+            # config.yaml was generated while the host was still enforcing - drop the
+            # selinux flag so rke2 does not expect the (absent) policy
+            if [[ -f /etc/rancher/rke2/config.yaml ]]; then
+                sed -i '/^selinux: true$/d' /etc/rancher/rke2/config.yaml
+            fi
+            return 0
+        fi
+        echo "  NOTE: RKE2_SELINUX_FALLBACK=permissive is only honored on SUSE hosts (no upstream"
+        echo "  policy exists there). On $OS_ID install the policy instead (repos or bundled RPMs)."
+    fi
+    echo "Error: SELinux is enforcing but the 'rke2-selinux' policy is not installed, and it could not be"
+    echo "  installed automatically (air-gapped/tar-method installs cannot fetch it). Starting RKE2 now"
+    echo "  would produce AVC-denied (broken) workloads. Remediation - choose ONE, then re-run:"
+    echo "   1) Install the policies from local media/repos:"
+    echo "        dnf|yum|zypper install -y container-selinux rke2-selinux"
+    echo "      (offline: download from https://github.com/rancher/rke2-selinux/releases and 'rpm -ivh' them)"
+    echo "   2) Or set SELinux to permissive mode:"
+    echo "        setenforce 0    (and set SELINUX=permissive in /etc/selinux/config to persist)"
+    echo "   3) SUSE only: re-run with RKE2_SELINUX_FALLBACK=permissive (recorded + restored on uninstall)"
+    exit 1
+}
+
+install_kubeconfigs_and_links () {
+    mkdir -p /root/.kube
+    cp /etc/rancher/rke2/rke2.yaml /root/.kube/config
+    chmod 600 /root/.kube/config
+    if [[ -n "$user_name" && "$user_name" != "root" && -d "/home/$user_name" ]]; then
+        mkdir -p /home/$user_name/.kube
+        cp /etc/rancher/rke2/rke2.yaml /home/$user_name/.kube/config
+        chown $user_name:$user_name /home/$user_name/.kube/config
+        chmod 600 /home/$user_name/.kube/config
+    fi
+    export KUBECONFIG=/root/.kube/config
+    export PATH=$PATH:$RKE2_DATA/bin
+    # RK-17: -sfn repairs dangling/wrong symlinks on re-runs, but never clobber a
+    # real binary the user installed at these paths.
+    local tool
+    for tool in kubectl ctr crictl; do
+        if [[ ! -e "/usr/bin/$tool" || -L "/usr/bin/$tool" ]]; then
+            ln -sfn "$RKE2_DATA/bin/$tool" "/usr/bin/$tool"
+        fi
+    done
+}
+
 start_rke2_service () {
+    # $1 = systemctl action: 'start' (default; a no-op on an already-running service,
+    # used by the reconcile skip path) or 'restart' (RKE2_RECONFIGURE apply path).
+    local action="${1:-start}"
+    local svc="rke2-server.service"
     if [[ $JOIN_TYPE == "agent" ]]; then
-        systemctl enable rke2-agent.service
-        echo "  Starting rke2 service, this may take several minutes..."
-        systemctl start rke2-agent.service
-    else
-        systemctl enable rke2-server.service
-        echo "  Starting rke2 service, this may take several minutes..."
-        systemctl start rke2-server.service
+        svc="rke2-agent.service"
     fi
-    if [ $? -ne 0 ]; then
-        echo "Error: rke2 service failed to start. Exiting script."
-        exit 1 
+    systemctl enable "$svc"
+    if [[ "$action" == "restart" ]]; then
+        echo "  Restarting rke2 service to apply the updated configuration..."
     else
-        echo "  rke2 service started successfully."
+        echo "  Starting rke2 service, this may take several minutes..."
     fi
+    if ! systemctl "$action" "$svc"; then
+        echo "Error: rke2 service failed to $action. Exiting script."
+        exit 1
+    fi
+    echo "  rke2 service ${action}ed successfully."
     if [[ $JOIN_TYPE == "agent" ]]; then
         echo "  Agent install completed, check the status with 'kubectl get nodes' and 'kubectl get pods -A' on the server for details."
     else
         echo "  Waiting for pods to start..."
         sleep 15
-        mkdir -p /root/.kube
-        cp /etc/rancher/rke2/rke2.yaml /root/.kube/config
-        chmod 600 /root/.kube/config
-        if [[ -n "$user_name" ]]; then
-            mkdir -p /home/$user_name/.kube
-            cp /etc/rancher/rke2/rke2.yaml /home/$user_name/.kube/config
-            chown $user_name:$user_name /home/$user_name/.kube/config
-            chmod 600 /home/$user_name/.kube/config
+        install_kubeconfigs_and_links
+        # Hard-fail: the rest of the install (utilities, add-ons) depends on a ready control plane.
+        if ! check_namespace_pods_ready; then
+            echo "Error: kube-system pods did not become ready within the timeout. The cluster may still be"
+            echo "  converging - inspect with 'kubectl get pods -A' and re-run '$SCRIPT_NAME install' once it settles."
+            exit 1
         fi
-        export KUBECONFIG=/root/.kube/config
-        export PATH=$PATH:$RKE2_DATA/bin
-        ln -s $RKE2_DATA/bin/kubectl /usr/bin/kubectl || true
-        ln -s $RKE2_DATA/bin/ctr /usr/bin/ctr || true
-        ln -s $RKE2_DATA/bin/crictl /usr/bin/crictl || true
-        check_namespace_pods_ready
     fi
 }
 
@@ -287,7 +544,13 @@ install_rke2_binaries () {
         rm -rf $WORKING_DIR/rke2-cni-images/images
         if [[ $REGISTRY_MODE -eq 0 ]]; then
             echo "  extracting rke2-utilities archive..."
-            tar -xzf $WORKING_DIR/rke2-utilities/container_images_*.tar.gz -C $WORKING_DIR/rke2-utilities
+            local utilities_tar
+            if ! utilities_tar=$(select_newest "$WORKING_DIR"/rke2-utilities/container_images_*.tar.gz); then
+                echo "Error: no container_images_*.tar.gz archive found in $WORKING_DIR/rke2-utilities."
+                echo "  Re-run 'save' on a connected host to build a complete archive."
+                exit 1
+            fi
+            tar -xzf "$utilities_tar" -C $WORKING_DIR/rke2-utilities
             cp $WORKING_DIR/rke2-utilities/images/images.tar.gz $RKE2_DATA/agent/images
             rm -rf $WORKING_DIR/rke2-utilities/images
         fi
@@ -308,7 +571,8 @@ create_registry_config () {
             echo "Error: Failed to retrieve certificate from '$REG_FQDN'. Please ensure the registry is accessible and the port is correct."
             exit 1
         fi
-        cat > /etc/rancher/rke2/registries.yaml <<EOF
+        # registries.yaml carries the registry credentials - write it 0600 (RK-8).
+        ( umask 077; cat > /etc/rancher/rke2/registries.yaml <<EOF
 configs:
   ${REG_FQDN}:${REG_PORT}:
     auth:
@@ -333,184 +597,161 @@ mirrors:
     endpoint:
       - "https://${REG_FQDN}:${REG_PORT}"
 EOF
+        )
+        chmod 600 /etc/rancher/rke2/registries.yaml
         echo "  Private registry configuration written to /etc/rancher/rke2/registries.yaml"
     else
         echo "  Private registry not enabled. Skipping registry configuration."
     fi
 }
 
-create_agent_join_config () {
+render_rke2_config () {
+    # Single source of truth for /etc/rancher/rke2/config.yaml generation (install server,
+    # join server, and join agent were ~90% duplicated and had drifted - the agent copy was
+    # missing data-dir/root-dir). Renders the config for the current invocation into the
+    # file given as \$1; also used to diff against a running cluster in reconcile mode.
+    local dest="$1"
+    local resolv_conf_file
     if [[ -L /etc/resolv.conf ]]; then
+        local resolv_link
         resolv_link=$(readlink -f /etc/resolv.conf)
         if [[ "$resolv_link" == "/run/systemd/resolve/stub-resolv.conf" ]]; then
             resolv_conf_file="/run/systemd/resolve/resolv.conf"
         else
             resolv_conf_file="$resolv_link"
         fi
+    elif grep -qE '^\s*nameserver\s+127\.' /etc/resolv.conf 2>/dev/null \
+         && [[ -f /run/systemd/resolve/resolv.conf ]]; then
+        # A PLAIN-FILE resolv.conf pointing at a loopback resolver (seen in the
+        # wild after resolver-restore tools rewrite the systemd-resolved stub as
+        # a regular file): handing it to kubelet makes CoreDNS detect a forward
+        # loop and CrashLoop. Use the real systemd-resolved upstream list instead.
+        resolv_conf_file="/run/systemd/resolve/resolv.conf"
     else
         resolv_conf_file="/etc/resolv.conf"
     fi
-    echo "  Generating /etc/rancher/rke2/config.yaml for agent"
-    cat > /etc/rancher/rke2/config.yaml <<EOF
+    : > "$dest"
+    if [[ $JOIN_MODE -eq 1 ]]; then
+        cat >> "$dest" <<EOF
 server: https://${JOIN_SERVER_FQDN}:9345
 token: "$JOIN_TOKEN"
+EOF
+    fi
+    if [[ $JOIN_MODE -eq 1 && $JOIN_TYPE == "agent" ]]; then
+        # Agent node config
+        cat >> "$dest" <<EOF
 node-ip: "$MGMT_IP"
 kubelet-arg:
   - "max-pods=$MAX_PODS"
   - "resolv-conf=$resolv_conf_file"
 EOF
+        if [[ $KUBELET_DATA != "/var/lib/kubelet" ]]; then
+            cat >> "$dest" <<EOF
+  - root-dir=$KUBELET_DATA
+EOF
+        fi
+        if [[ $RKE2_DATA != "/var/lib/rancher/rke2" ]]; then
+            cat >> "$dest" <<EOF
+data-dir: "$RKE2_DATA"
+EOF
+        fi
+        if [[ "$SELINUX_ENFORCING" == "true" ]]; then
+            cat >> "$dest" <<EOF
+selinux: true
+EOF
+        fi
+        if [[ ${ENABLE_CIS,,} == "true" ]]; then
+            cat >> "$dest" <<EOF
+profile: "cis"
+EOF
+        fi
+        return 0
+    fi
+    # Server config (initial install and join server)
+    cat >> "$dest" <<EOF
+cni: "$CNI_TYPE"
+write-kubeconfig-mode: "0600"
+service-node-port-range: "443-40000"
+cluster-cidr: "$CLUSTER_CIDR"
+service-cidr: "$SERVICE_CIDR"
+advertise-address: "$MGMT_IP"
+node-ip: "$MGMT_IP"
+etcd-extra-env:
+  - "ETCD_AUTO_COMPACTION_RETENTION=72h"
+  - "ETCD_AUTO_COMPACTION_MODE=periodic"
+kube-apiserver-arg:
+  # Audit log lives under the RKE2 data dir, NOT /var/log: on SELinux-enforcing
+  # hosts the containerized apiserver may only write paths labeled by the
+  # rke2-selinux policy - /var/log/... gets EACCES and the apiserver crashloops
+  - "audit-log-path=$RKE2_DATA/server/logs/rke2-apiserver-audit.log"
+  - "audit-log-maxage=30"
+  - "audit-log-maxbackup=10"
+  - "audit-log-maxsize=200"
+kubelet-arg:
+  - "max-pods=$MAX_PODS"
+  - "resolv-conf=$resolv_conf_file"
+EOF
+    if [[ $KUBELET_DATA != "/var/lib/kubelet" ]]; then
+        cat >> "$dest" <<EOF
+  - root-dir=$KUBELET_DATA
+EOF
+    fi
+    if [[ $RKE2_DATA != "/var/lib/rancher/rke2" ]]; then
+        cat >> "$dest" <<EOF
+data-dir: "$RKE2_DATA"
+EOF
+    fi
+    if [[ "$SELINUX_ENFORCING" == "true" ]]; then
+        cat >> "$dest" <<EOF
+selinux: true
+EOF
+    fi
+    if [[ ${CONTROL_PLANE_TAINT,,} == "true" ]]; then
+        cat >> "$dest" <<EOF
+node-taint:
+  - "node-role.kubernetes.io/control-plane:NoSchedule"
+EOF
+    fi
+    if [[ ${INSTALL_INGRESS,,} == "false" ]]; then
+        cat >> "$dest" <<EOF
+disable:
+  - rke2-ingress-nginx
+EOF
+    fi
+    if [[ ${INSTALL_SERVICELB,,} == "true" ]]; then
+        cat >> "$dest" <<EOF
+enable-servicelb: $INSTALL_SERVICELB
+EOF
+    fi
+    if [[ $TLS_SAN_MODE -eq 1 ]]; then
+        cat >> "$dest" <<EOF
+tls-san:
+  - "$TLS_SAN"
+EOF
+    fi
     if [[ ${ENABLE_CIS,,} == "true" ]]; then
-        cat >> /etc/rancher/rke2/config.yaml <<EOF
+        cat >> "$dest" <<EOF
 profile: "cis"
 EOF
     fi
+}
+
+create_agent_join_config () {
+    echo "  Generating /etc/rancher/rke2/config.yaml for agent"
+    render_rke2_config /etc/rancher/rke2/config.yaml
 }
 
 create_server_join_config () {
-    if [[ -L /etc/resolv.conf ]]; then
-        resolv_link=$(readlink -f /etc/resolv.conf)
-        if [[ "$resolv_link" == "/run/systemd/resolve/stub-resolv.conf" ]]; then
-            resolv_conf_file="/run/systemd/resolve/resolv.conf"
-        else
-            resolv_conf_file="$resolv_link"
-        fi
-    else
-        resolv_conf_file="/etc/resolv.conf"
-    fi
     echo "  Generating /etc/rancher/rke2/config.yaml for server join"
-    cat > /etc/rancher/rke2/config.yaml <<EOF
-server: https://${JOIN_SERVER_FQDN}:9345
-token: "$JOIN_TOKEN"
-cni: "$CNI_TYPE"
-write-kubeconfig-mode: "0600"
-service-node-port-range: "443-40000"
-cluster-cidr: "$CLUSTER_CIDR"
-service-cidr: "$SERVICE_CIDR"
-advertise-address: "$MGMT_IP"
-node-ip: "$MGMT_IP"
-etcd-extra-env:
-  - "ETCD_AUTO_COMPACTION_RETENTION=72h"
-  - "ETCD_AUTO_COMPACTION_MODE=periodic"
-kube-apiserver-arg:
-  - "audit-log-path=/var/log/rke2-apiserver-audit.log"
-  - "audit-log-maxage=30"
-  - "audit-log-maxbackup=10"
-  - "audit-log-maxsize=200"
-kubelet-arg:
-  - "max-pods=$MAX_PODS"
-  - "resolv-conf=$resolv_conf_file"
-EOF
-    if [[ $KUBELET_DATA != "/var/lib/kubelet" ]]; then
-        cat >> /etc/rancher/rke2/config.yaml <<EOF
-  - root-dir=$KUBELET_DATA
-EOF
-    fi
-    if [[ $RKE2_DATA != "/var/lib/rancher/rke2" ]]; then
-        cat >> /etc/rancher/rke2/config.yaml <<EOF
-data-dir: "$RKE2_DATA"
-EOF
-    fi
-    if [[ ${CONTROL_PLANE_TAINT,,} == "true" ]]; then
-        cat >> /etc/rancher/rke2/config.yaml <<EOF
-node-taint:
-  - "node-role.kubernetes.io/control-plane:NoSchedule"
-EOF
-    fi
-    if [[ ${INSTALL_INGRESS,,} == "false" ]]; then
-        cat >> /etc/rancher/rke2/config.yaml <<EOF
-disable:
-  - rke2-ingress-nginx
-EOF
-    fi
-    if [[ ${INSTALL_SERVICELB,,} == "true" ]]; then
-        cat >> /etc/rancher/rke2/config.yaml <<EOF
-enable-servicelb: $INSTALL_SERVICELB
-EOF
-    fi
-    if [[ ${ENABLE_CIS,,} == "true" ]]; then
-        cat >> /etc/rancher/rke2/config.yaml <<EOF
-profile: "cis"
-EOF
-    fi
-    if [[ $TLS_SAN_MODE -eq 1 ]]; then
-        cat >> /etc/rancher/rke2/config.yaml <<EOF
-tls-san:
-  - "$TLS_SAN"
-EOF
-    fi
+    render_rke2_config /etc/rancher/rke2/config.yaml
 }
 
 create_config_files () {
-    if [[ -L /etc/resolv.conf ]]; then
-        resolv_link=$(readlink -f /etc/resolv.conf)
-        if [[ "$resolv_link" == "/run/systemd/resolve/stub-resolv.conf" ]]; then
-            resolv_conf_file="/run/systemd/resolve/resolv.conf"
-        else
-            resolv_conf_file="$resolv_link"
-        fi
-    else
-        resolv_conf_file="/etc/resolv.conf"
-    fi
     echo "  Generating /etc/rancher/rke2/config.yaml"
-    cat > /etc/rancher/rke2/config.yaml <<EOF
-cni: "$CNI_TYPE"
-write-kubeconfig-mode: "0600"
-service-node-port-range: "443-40000"
-cluster-cidr: "$CLUSTER_CIDR"
-service-cidr: "$SERVICE_CIDR"
-advertise-address: "$MGMT_IP"
-node-ip: "$MGMT_IP"
-etcd-extra-env:
-  - "ETCD_AUTO_COMPACTION_RETENTION=72h"
-  - "ETCD_AUTO_COMPACTION_MODE=periodic"
-kube-apiserver-arg:
-  - "audit-log-path=/var/log/rke2-apiserver-audit.log"
-  - "audit-log-maxage=30"
-  - "audit-log-maxbackup=10"
-  - "audit-log-maxsize=200"
-kubelet-arg:
-  - "max-pods=$MAX_PODS"
-  - "resolv-conf=$resolv_conf_file"
-EOF
-    if [[ $KUBELET_DATA != "/var/lib/kubelet" ]]; then
-        cat >> /etc/rancher/rke2/config.yaml <<EOF
-  - root-dir=$KUBELET_DATA
-EOF
-    fi
-    if [[ $RKE2_DATA != "/var/lib/rancher/rke2" ]]; then
-        cat >> /etc/rancher/rke2/config.yaml <<EOF
-data-dir: "$RKE2_DATA"
-EOF
-    fi
-    if [[ ${CONTROL_PLANE_TAINT,,} == "true" ]]; then
-        cat >> /etc/rancher/rke2/config.yaml <<EOF
-node-taint:
-  - "node-role.kubernetes.io/control-plane:NoSchedule"
-EOF
-    fi
-    if [[ ${INSTALL_INGRESS,,} == "false" ]]; then
-        cat >> /etc/rancher/rke2/config.yaml <<EOF
-disable:
-  - rke2-ingress-nginx
-EOF
-    fi
-    if [[ ${INSTALL_SERVICELB,,} == "true" ]]; then
-        cat >> /etc/rancher/rke2/config.yaml <<EOF
-enable-servicelb: $INSTALL_SERVICELB
-EOF
-    fi
-    if [[ $TLS_SAN_MODE -eq 1 ]]; then
-        cat >> /etc/rancher/rke2/config.yaml <<EOF
-tls-san:
-  - "$TLS_SAN"
-EOF
-    fi
+    render_rke2_config /etc/rancher/rke2/config.yaml
     if [[ ${ENABLE_CIS,,} == "true" ]]; then
-        cat >> /etc/rancher/rke2/config.yaml <<EOF
-profile: "cis"
-EOF
-        echo "  Generating $WORKING_DIR/rke-utilities/account_update.yaml"
-        cat > $WORKING_DIR/rke-utilities/account_update.yaml <<EOF
+        echo "  Generating $WORKING_DIR/rke2-utilities/account_update.yaml"
+        cat > $WORKING_DIR/rke2-utilities/account_update.yaml <<EOF
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -557,19 +798,142 @@ spec:
 EOF
 }
 
+# Configure a user-defined NTP source on every node (install + join agent + join server).
+# Clock skew across nodes breaks etcd and TLS. Only acts when NTP_SERVERS is set; otherwise
+# the OS default time source is left untouched. Auto-detects the time daemon: chrony if
+# present (Rocky/RHEL/SLES default; /etc/chrony.conf on Rocky, /etc/chrony/chrony.conf on
+# Ubuntu), else systemd-timesyncd (the Ubuntu/Debian default incl. minimal images).
+# Idempotent: marker-tagged lines are removed before re-appending. Ported from ap-tools'
+# configure_node_ntp(); the '# ap-tools NTP' marker and the 10-ap-tools.conf drop-in name
+# are kept INTENTIONALLY identical so hosts previously configured by ap-tools reconcile
+# here instead of accumulating duplicate entries.
+configure_node_ntp () {
+  if [[ -z "${NTP_SERVERS// /}" ]]; then
+    echo "  NTP_SERVERS not set; leaving the OS default time source unchanged."
+    return 0
+  fi
+  # Normalise comma or space separated input to a clean space-separated list
+  local ntp_list
+  ntp_list=$(echo "$NTP_SERVERS" | tr ',' ' ' | xargs)
+  echo "  Configuring user-defined NTP servers: $ntp_list"
+  timedatectl set-ntp true 2>/dev/null || true
+  if command -v chronyd >/dev/null 2>&1 || systemctl list-unit-files --no-legend 2>/dev/null | grep -q '^chronyd\.service'; then
+    # chrony path (RHEL/Rocky/SLES default; Ubuntu when chrony is installed)
+    local chrony_conf="/etc/chrony/chrony.conf"
+    [[ -f /etc/chrony.conf ]] && chrony_conf="/etc/chrony.conf"
+    sed -i '/# ap-tools NTP$/d' "$chrony_conf" 2>/dev/null || true
+    local s
+    for s in $ntp_list; do
+      echo "server $s iburst # ap-tools NTP" >> "$chrony_conf"
+    done
+    systemctl enable chronyd 2>/dev/null || true
+    systemctl restart chronyd 2>/dev/null || systemctl restart chrony 2>/dev/null || true
+    chronyc makestep >/dev/null 2>&1 || true
+    state_set RKE2I_NTP_CONFIGURED "chrony"
+  elif systemctl list-unit-files --no-legend 2>/dev/null | grep -q '^systemd-timesyncd\.service'; then
+    # systemd-timesyncd path (Ubuntu/Debian default)
+    mkdir -p /etc/systemd/timesyncd.conf.d
+    printf '[Time]\nNTP=%s\n' "$ntp_list" > /etc/systemd/timesyncd.conf.d/10-ap-tools.conf
+    systemctl enable systemd-timesyncd 2>/dev/null || true
+    systemctl restart systemd-timesyncd 2>/dev/null || true
+    state_set RKE2I_NTP_CONFIGURED "timesyncd"
+  else
+    # Neither daemon present: warn loudly instead of silently succeeding.
+    echo "  WARNING: NTP_SERVERS is set but neither chrony nor systemd-timesyncd is present on this host."
+    echo "  Time synchronization was NOT configured. Install chrony (apt/dnf/zypper install chrony) and"
+    echo "  re-run, or configure NTP manually - clock skew across nodes breaks etcd and TLS."
+    return 0
+  fi
+  # Give the daemon a moment, then report
+  sleep 2
+  echo "  NTP configured. Current status: $(timedatectl show -p NTP -p NTPSynchronized 2>/dev/null | tr '\n' ' ')"
+}
+
+state_set () {
+    # state_set KEY VALUE - idempotent key=value write to the install-state file (RK-13)
+    local key="$1" val="$2"
+    mkdir -p "$(dirname "$STATE_FILE")"
+    if [[ -f "$STATE_FILE" ]]; then
+        sed -i "/^${key}=/d" "$STATE_FILE"
+    fi
+    echo "${key}=\"${val}\"" >> "$STATE_FILE"
+    chmod 600 "$STATE_FILE"
+}
+
+record_install_state () {
+    # RK-13: capture pre-install host state (first run only) so uninstall can restore
+    # exactly what THIS tool changed - and nothing else.
+    if [[ -f "$STATE_FILE" ]]; then
+        return 0
+    fi
+    echo "  Recording pre-install host state to $STATE_FILE"
+    state_set RKE2I_STATE_VERSION "1"
+    local swap_was_on="false"
+    if [[ -n "$(swapon --noheadings 2>/dev/null || true)" ]]; then
+        swap_was_on="true"
+    fi
+    state_set RKE2I_SWAP_WAS_ON "$swap_was_on"
+    local mp_svc_enabled mp_sock_enabled fw_enabled fw_active
+    mp_svc_enabled=$(systemctl is-enabled multipathd.service 2>/dev/null) || true
+    state_set RKE2I_MULTIPATHD_SERVICE_ENABLED "${mp_svc_enabled:-not-found}"
+    mp_sock_enabled=$(systemctl is-enabled multipathd.socket 2>/dev/null) || true
+    state_set RKE2I_MULTIPATHD_SOCKET_ENABLED "${mp_sock_enabled:-not-found}"
+    local ufw_was_active="false"
+    if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
+        ufw_was_active="true"
+    fi
+    state_set RKE2I_UFW_WAS_ACTIVE "$ufw_was_active"
+    fw_enabled=$(systemctl is-enabled firewalld.service 2>/dev/null) || true
+    state_set RKE2I_FIREWALLD_ENABLED "${fw_enabled:-not-found}"
+    fw_active=$(systemctl is-active firewalld.service 2>/dev/null) || true
+    state_set RKE2I_FIREWALLD_WAS_ACTIVE "${fw_active:-inactive}"
+    local nm_conf_preexisted="false"
+    if [[ -f /etc/NetworkManager/conf.d/rke2-canal.conf ]]; then
+        nm_conf_preexisted="true"
+    fi
+    state_set RKE2I_NM_CONF_PREEXISTED "$nm_conf_preexisted"
+    state_set RKE2I_NTP_CONFIGURED "none"
+}
+
 config_host_settings () {
+    record_install_state
     # Common kubernetes requirments
+    # RK-7: probe per module. overlay and br_netfilter are hard requirements; dm_crypt and
+    # nfs are only needed for encrypted/NFS-backed storage and are absent from minimal
+    # kernels - warn with the exact kernel package to install instead of aborting.
     echo "  Enabling overlay, br_netfilter, dm_crypt, and nfs modules"
-    cat > /etc/modules-load.d/40-k8s.conf <<EOF
-overlay
-br_netfilter
-dm_crypt
-nfs
-EOF
-    modprobe -a overlay br_netfilter dm_crypt nfs
+    local loaded_mods="" missing_optional="" mod
+    for mod in overlay br_netfilter dm_crypt nfs; do
+        if modprobe "$mod" 2>/dev/null; then
+            loaded_mods="$loaded_mods $mod"
+        else
+            case "$mod" in
+                overlay|br_netfilter)
+                    echo "Error: required kernel module '$mod' could not be loaded. RKE2 cannot run without it."
+                    exit 1
+                    ;;
+                *)
+                    missing_optional="$missing_optional $mod"
+                    ;;
+            esac
+        fi
+    done
+    if [[ -n "$missing_optional" ]]; then
+        echo "  WARNING: optional kernel module(s) not available:$missing_optional"
+        echo "  They are only needed for NFS-backed or encrypted (dm-crypt) storage. To add them,"
+        echo "  install the extra kernel-modules package for your running kernel and re-run:"
+        echo "    Ubuntu/Debian:  apt-get install -y linux-modules-extra-\$(uname -r)"
+        echo "    RHEL/Rocky:     dnf install -y kernel-modules-extra"
+        echo "    SUSE/Leap:      zypper install -y kernel-default   (minimal images ship kernel-default-base)"
+    fi
+    # Persist only the modules that actually loaded so systemd-modules-load stays clean at boot.
+    printf '%s\n' $loaded_mods > /etc/modules-load.d/40-k8s.conf
     echo "  Disabling swap space"
     swapoff -a
-    sed -i -e '/swap/d' /etc/fstab
+    # Comment out (not delete) swap entries, tagged so uninstall can restore them (RK-13).
+    if grep -qE '^[^#].*swap' /etc/fstab; then
+        sed -i -E 's|^([^#].*swap.*)$|#\1 # rke2-installer-swap|' /etc/fstab
+    fi
     echo "  Enabling k8s sysctl parameters"
     cat > /etc/sysctl.d/40-k8s.conf <<EOF
 net.bridge.bridge-nf-call-ip6tables = 1
@@ -578,16 +942,33 @@ net.ipv4.ip_forward = 1
 EOF
     if [[ ${ENABLE_CIS,,} == true ]]; then
         echo "  Enabling CIS host parameters"
-        cp -f /usr/local/share/rke2/rke2-cis-sysctl.conf /etc/sysctl.d/60-rke2-cis.conf
-        useradd -r -c "etcd user" -s /sbin/nologin -M etcd -U
+        # tar-method installs ship the CIS sysctl profile under /usr/local/share,
+        # rpm-method installs (Rocky/RHEL online) under /usr/share.
+        local cis_sysctl_src="" cis_path
+        for cis_path in /usr/local/share/rke2/rke2-cis-sysctl.conf /usr/share/rke2/rke2-cis-sysctl.conf; do
+            if [[ -f "$cis_path" ]]; then
+                cis_sysctl_src="$cis_path"
+                break
+            fi
+        done
+        if [[ -n "$cis_sysctl_src" ]]; then
+            cp -f "$cis_sysctl_src" /etc/sysctl.d/60-rke2-cis.conf
+        else
+            echo "  WARNING: rke2-cis-sysctl.conf not found (checked tar and rpm locations); skipping CIS sysctl profile."
+        fi
+        # Re-run safe: only create the etcd user if missing; record it for uninstall (RK-13).
+        if id etcd &>/dev/null; then
+            echo "  etcd user already exists."
+        else
+            useradd -r -c "etcd user" -s /sbin/nologin -M etcd -U
+            state_set RKE2I_ETCD_USER_CREATED "true"
+        fi
     fi
-    systemctl restart systemd-sysctl
-    if [ $? -ne 0 ]; then
+    if ! systemctl restart systemd-sysctl; then
         echo "Error: systemd-sysctl.service failed to restart."
-        exit 1 
-    else
-        echo "  systemd-sysctl.service restarted successfully"
+        exit 1
     fi
+    echo "  systemd-sysctl.service restarted successfully"
 # Configure NetworkManager to ignore CNI interfaces if it is in use
     if systemctl is-active --quiet NetworkManager; then
         echo "  NetworkManager is active. Creating rke2-canal.conf..."
@@ -596,13 +977,11 @@ EOF
 unmanaged-devices=interface-name:flannel*;interface-name:cali*;interface-name:tunl*;interface-name:vxlan.calico;interface-name:vxlan-v6.calico;interface-name:wireguard.cali;interface-name:wg-v6.cali
 EOF
         echo "  Restarting NetworkManager to apply changes..."
-        systemctl restart NetworkManager
-        if [ $? -ne 0 ]; then
+        if ! systemctl restart NetworkManager; then
             echo "Error: NetworkManager failed to restart."
-            exit 1 
-        else
-            echo "  NetworkManager restarted successfully"
+            exit 1
         fi
+        echo "  NetworkManager restarted successfully"
     fi
 # Disable multipath services
     if systemctl list-unit-files --no-legend --no-pager | grep -q "multipathd.service"; then
@@ -670,6 +1049,8 @@ EOF
         echo "  - WARNING: OS not explicitly handled for firewall configuration."
         echo "    Please manually verify the firewall service is stopped and disabled."
     fi
+# Configure user-defined NTP servers (no-op when NTP_SERVERS is empty/unset)
+    configure_node_ntp
 }
 
 apply_utilities () {
@@ -689,7 +1070,12 @@ apply_utilities () {
            sed -i "s|\"paths\":\[\s*\"[^\"]*\"\s*\]|\"paths\":[\"${PVC_DATA}/local-path-provisioner\"]|g" $WORKING_DIR/rke2-utilities/local-path-storage.yaml
         fi    
         kubectl apply -f $WORKING_DIR/rke2-utilities/local-path-storage.yaml
-        check_namespace_pods_ready local-path-storage
+        # Hard-fail: the storageclass patch below and dependent PVCs need a live provisioner.
+        if ! check_namespace_pods_ready local-path-storage; then
+            echo "Error: local-path-provisioner pods did not become ready within the timeout."
+            echo "  Inspect with 'kubectl get pods -n local-path-storage'."
+            exit 1
+        fi
         kubectl patch storageclass local-path -p '{"metadata": {"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
     fi
     if [[ ${INSTALL_DNS_UTILITY,,} == "true" ]]; then
@@ -700,7 +1086,11 @@ apply_utilities () {
         else
             kubectl apply -f https://raw.githubusercontent.com/kubernetes/website/main/content/en/examples/admin/dns/dnsutils.yaml
         fi
-        check_namespace_pods_ready default
+        # Warn-and-continue: 'default' may contain unrelated user workloads and dnsutils is a
+        # non-critical troubleshooting pod - do not fail the install over it.
+        if ! check_namespace_pods_ready default; then
+            echo "  WARNING: pods in the 'default' namespace are not all ready; continuing (dnsutils is non-critical)."
+        fi
     fi
 }
 
@@ -708,6 +1098,14 @@ apply_utilities () {
 
 run_upgrade () {
     echo "--- Running upgrade workflow"
+    # RK-18: the 'stable' channel is resolved by the cluster from update.rke2.io -
+    # unreachable in air-gapped environments, so the plan would hang forever.
+    if [[ $AIR_GAPPED_MODE -eq 1 && "$UPGRADE_VERSION" == "stable" ]]; then
+        echo "Error: air-gapped upgrades cannot use the 'stable' channel (it requires internet access"
+        echo "  to update.rke2.io). Specify an explicit version instead, e.g.:"
+        echo "  sudo ./$SCRIPT_NAME upgrade $UPGRADE_TYPE v1.34.5+rke2r1"
+        exit 1
+    fi
     export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
     export PATH=$PATH:/var/lib/rancher/rke2/bin
 
@@ -760,7 +1158,12 @@ install_system_upgrade_controller () {
         kubectl apply -f $WORKING_DIR/rke2-utilities/crd.yaml -f $WORKING_DIR/rke2-utilities/system-upgrade-controller.yaml
     fi
 
-    check_namespace_pods_ready "system-upgrade"
+    # Hard-fail: upgrade plans are useless without a running controller.
+    if ! check_namespace_pods_ready "system-upgrade"; then
+        echo "Error: system-upgrade-controller did not become ready within the timeout."
+        echo "  Inspect with 'kubectl get pods -n system-upgrade'."
+        exit 1
+    fi
     echo "  system-upgrade-controller installed successfully."
 }
 
@@ -909,7 +1312,7 @@ run_install_velero () {
   echo "  Installing Velero CLI ${VELERO_VERSION}..."
   cd $WORKING_DIR/velero
   if [[ $AIR_GAPPED_MODE == "0" ]]; then
-    curl -L https://github.com/vmware-tanzu/velero/releases/download/${VELERO_VERSION}/velero-${VELERO_VERSION}-linux-amd64.tar.gz \
+    curl -fL https://github.com/vmware-tanzu/velero/releases/download/${VELERO_VERSION}/velero-${VELERO_VERSION}-linux-amd64.tar.gz \
       -o velero-${VELERO_VERSION}-linux-amd64.tar.gz
   fi
   tar -xzf velero-${VELERO_VERSION}-linux-amd64.tar.gz
@@ -926,6 +1329,14 @@ run_install_velero () {
   fi
   echo "  Snapshot controller is running."
 
+  # RK-11: the default VSC_DRIVER (driver.longhorn.io) assumes the ap-tools stack.
+  # Velero still installs and does object backups without it, so warn loudly rather than fail.
+  if ! kubectl get csidriver "$VSC_DRIVER" &>/dev/null; then
+      echo "  WARNING: CSI driver '$VSC_DRIVER' is not registered in this cluster (default assumes Longhorn"
+      echo "  installed by ap-tools). CSI volume snapshots WILL FAIL until VSC_DRIVER/VSC_NAME are set to an"
+      echo "  installed CSI driver ('kubectl get csidrivers'). Object/resource backups are unaffected."
+  fi
+
   # Create VolumeSnapshotClass for Longhorn
   echo "  Creating VolumeSnapshotClass '${VSC_NAME}'..."
   cat <<SNAPEOF | kubectl apply -f -
@@ -941,13 +1352,16 @@ parameters:
   type: snap
 SNAPEOF
 
-  # Create S3 credentials file
+  # Create S3 credentials file in the script's private temp dir (0700), mode 0600,
+  # instead of a fixed world-guessable /tmp path (RK-8). Removed on any exit via the trap.
   echo "  Creating Velero S3 credentials..."
-  cat > /tmp/credentials-velero <<CREDEOF
+  local velero_creds="$TMP_DIR/credentials-velero"
+  ( umask 077; cat > "$velero_creds" <<CREDEOF
 [default]
 aws_access_key_id=${VELERO_S3_ACCESS_KEY}
 aws_secret_access_key=${VELERO_S3_SECRET_KEY}
 CREDEOF
+  )
 
   # Install Velero into the cluster
   echo "  Installing Velero server into the cluster..."
@@ -957,27 +1371,38 @@ CREDEOF
     --bucket ${VELERO_BUCKET} \
     --backup-location-config \
       region=us-east-1,s3ForcePathStyle=true,s3Url=${VELERO_S3_URL},checksumAlgorithm="",insecureSkipTLSVerify=true \
-    --secret-file /tmp/credentials-velero \
+    --secret-file "$velero_creds" \
     --features=EnableCSI \
     --use-node-agent \
     --use-volume-snapshots=true \
     --wait
 
   # Clean up credentials file
-  rm -f /tmp/credentials-velero
+  rm -f "$velero_creds"
 
   # Verify installation
   echo "  Verifying Velero installation..."
-  check_namespace_pods_ready "velero"
+  # Hard-fail: a scheduled backup against a broken Velero deployment is worse than no install.
+  if ! check_namespace_pods_ready "velero"; then
+      echo "Error: Velero pods did not become ready within the timeout."
+      echo "  Inspect with 'kubectl get pods -n velero' and re-run '$SCRIPT_NAME install velero'."
+      exit 1
+  fi
 
-  # Create scheduled backup
-  echo "  Creating scheduled backup '${VELERO_BACKUP_SCHEDULE}'..."
-  velero schedule create daily-full-backup \
-    --schedule="${VELERO_BACKUP_SCHEDULE}" \
-    --ttl ${VELERO_BACKUP_TTL} \
-    --snapshot-move-data \
-    --include-cluster-resources=true \
-    --include-namespaces ${VELERO_BACKUP_NAMESPACES}
+  # Create scheduled backup (RK-4: guarded so 'install velero' is re-runnable -
+  # 'velero schedule create' hard-fails when the schedule already exists)
+  if velero schedule get daily-full-backup &>/dev/null; then
+      echo "  Schedule 'daily-full-backup' already exists; leaving it in place."
+      echo "  (To apply changed schedule settings: 'velero schedule delete daily-full-backup --confirm' and re-run.)"
+  else
+      echo "  Creating scheduled backup '${VELERO_BACKUP_SCHEDULE}'..."
+      velero schedule create daily-full-backup \
+        --schedule="${VELERO_BACKUP_SCHEDULE}" \
+        --ttl ${VELERO_BACKUP_TTL} \
+        --snapshot-move-data \
+        --include-cluster-resources=true \
+        --include-namespaces ${VELERO_BACKUP_NAMESPACES}
+  fi
 
   cd $base_dir
 }
@@ -1128,6 +1553,27 @@ run_install_monitoring () {
 
   echo "  Creating monitoring namespace..."
   kubectl create namespace monitoring --dry-run=client -o yaml | kubectl apply -f -
+
+  # RK-11: the default PROMETHEUS_STORAGE_CLASS ('longhorn') assumes the ap-tools stack.
+  # Standalone clusters fail 10 minutes into the helm --wait on a Pending PVC instead.
+  # Verify the StorageClass up front: fall back to the cluster default if the requested
+  # one is missing, and fail fast when there is no default either.
+  if ! kubectl get storageclass "$PROMETHEUS_STORAGE_CLASS" &>/dev/null; then
+      local default_sc
+      default_sc=$(kubectl get storageclass \
+        -o jsonpath='{.items[?(@.metadata.annotations.storageclass\.kubernetes\.io/is-default-class=="true")].metadata.name}' \
+        2>/dev/null | awk '{print $1}')
+      if [[ -n "$default_sc" ]]; then
+          echo "  WARNING: StorageClass '$PROMETHEUS_STORAGE_CLASS' not found; using the cluster default '$default_sc' instead."
+          PROMETHEUS_STORAGE_CLASS="$default_sc"
+      else
+          echo "Error: StorageClass '$PROMETHEUS_STORAGE_CLASS' not found and the cluster has no default StorageClass."
+          echo "  Prometheus PVCs would stay Pending until the helm install times out (10m)."
+          echo "  Set PROMETHEUS_STORAGE_CLASS to an existing StorageClass ('kubectl get storageclass')"
+          echo "  or install a storage provisioner (e.g. INSTALL_LOCAL_PATH_PROVISIONER=true) first."
+          exit 1
+      fi
+  fi
 
   # Install kube-prometheus-stack
   echo "  Installing kube-prometheus-stack v${KUBE_PROMETHEUS_STACK_VERSION}..."
@@ -1329,17 +1775,84 @@ FBEOF
   # Auto-discover and apply ServiceMonitors for metrics-exposing services
   generate_service_monitors
 
-  check_namespace_pods_ready "monitoring"
+  # Hard-fail: both charts were installed with --wait, so a timeout here means the
+  # monitoring stack regressed after install - surface it instead of blessing it.
+  if ! check_namespace_pods_ready "monitoring"; then
+      echo "Error: monitoring pods did not become ready within the timeout."
+      echo "  Inspect with 'kubectl get pods -n monitoring'."
+      exit 1
+  fi
 }
 
 # -- Uninstall Definitions -- #
 
 uninstall_rke2() {
     echo "--- Uninstalling RKE2"
-    [ ! -f "/usr/local/bin/rke2-uninstall.sh" ] || /usr/local/bin/rke2-uninstall.sh
-    # rm -rf $base_dir/rke2-install-files
-    [ ! -d "/home/$user_name/.kube" ] || rm -rf /home/$user_name/.kube
-    [  ! -d "/root/.kube" ] || rm -rf /root/.kube
+    # Load recorded install state (written at install time; RK-13).
+    local have_state=0
+    if [[ -f "$STATE_FILE" ]]; then
+        # shellcheck disable=SC1090
+        source "$STATE_FILE"
+        have_state=1
+    else
+        echo "  NOTE: no install-state file at $STATE_FILE (host installed by an older version)."
+        echo "  Host-setting restoration (swap/firewall/multipathd) will be skipped; only files"
+        echo "  created by this installer are removed."
+    fi
+    # RK-1: stop RKE2 services BEFORE any file removal - never delete live etcd/kubelet dirs.
+    echo "  Stopping RKE2 services..."
+    systemctl stop rke2-server.service 2>/dev/null || true
+    systemctl stop rke2-agent.service 2>/dev/null || true
+    # RK-1: the upstream uninstaller lands in /usr/local/bin for tar-method installs and
+    # in /usr/bin for rpm-method installs (the Rocky/RHEL online default).
+    local uninstaller="" uninstaller_path
+    for uninstaller_path in /usr/local/bin/rke2-uninstall.sh /usr/bin/rke2-uninstall.sh; do
+        if [[ -x "$uninstaller_path" ]]; then
+            uninstaller="$uninstaller_path"
+            break
+        fi
+    done
+    if [[ -n "$uninstaller" ]]; then
+        echo "  Running upstream uninstaller $uninstaller..."
+        "$uninstaller" || echo "  WARNING: $uninstaller exited non-zero; continuing local cleanup."
+    else
+        echo "  WARNING: rke2-uninstall.sh not found in /usr/local/bin or /usr/bin; performing local cleanup only."
+    fi
+    # rpm-method installs: remove the RKE2 packages so a later install starts clean (RK-1).
+    if command -v rpm &>/dev/null; then
+        local rpm_pkgs="" rpm_pkg
+        for rpm_pkg in rke2-server rke2-agent rke2-common rke2-selinux; do
+            if rpm -q "$rpm_pkg" &>/dev/null; then
+                rpm_pkgs="$rpm_pkgs $rpm_pkg"
+            fi
+        done
+        if [[ -n "$rpm_pkgs" ]]; then
+            echo "  Removing RKE2 rpm packages:$rpm_pkgs"
+            if command -v dnf &>/dev/null; then
+                dnf remove -y $rpm_pkgs || true
+            elif command -v yum &>/dev/null; then
+                yum remove -y $rpm_pkgs || true
+            elif command -v zypper &>/dev/null; then
+                zypper --non-interactive remove $rpm_pkgs || true
+            fi
+        fi
+    fi
+    # Safety gate: refuse to delete data directories while a service is somehow still running.
+    if systemctl is-active --quiet rke2-server.service || systemctl is-active --quiet rke2-agent.service; then
+        echo "Error: an RKE2 service is still active; refusing to delete data directories."
+        echo "  Stop it manually ('systemctl stop rke2-server rke2-agent') and re-run uninstall."
+        exit 1
+    fi
+    # Remove rke2 config incl. registries.yaml (contains registry credentials) in case the
+    # upstream uninstaller did not run or left it behind.
+    rm -rf /etc/rancher/rke2
+    # Remove only the kubeconfig files this installer wrote - never the user's whole ~/.kube (RK-13).
+    rm -f /root/.kube/config
+    rmdir /root/.kube 2>/dev/null || true
+    if [[ -n "$user_name" && "$user_name" != "root" ]]; then
+        rm -f "/home/$user_name/.kube/config"
+        rmdir "/home/$user_name/.kube" 2>/dev/null || true
+    fi
     # Clean up the KUBECONFIG and command symlinks
     unset KUBECONFIG
     for link in /usr/bin/kubectl /usr/bin/ctr /usr/bin/crictl; do
@@ -1347,6 +1860,73 @@ uninstall_rke2() {
             rm -f "$link"
         fi
     done
+    # Remove host-settings files created by this installer (RK-13).
+    rm -f /etc/modules-load.d/40-k8s.conf /etc/sysctl.d/40-k8s.conf /etc/sysctl.d/60-rke2-cis.conf
+    if [[ "${RKE2I_NM_CONF_PREEXISTED:-false}" != "true" ]]; then
+        rm -f /etc/NetworkManager/conf.d/rke2-canal.conf
+    fi
+    # Restore host settings to their recorded pre-install state (RK-13).
+    if [[ $have_state -eq 1 ]]; then
+        # P4-08b: restore SELinux enforcing if the install fallback switched it
+        if [[ "${RKE2I_SELINUX_WAS_ENFORCING:-false}" == "true" ]]; then
+            echo "  Restoring SELinux to enforcing (RKE2_SELINUX_FALLBACK switched it to permissive)..."
+            if [[ -f /etc/selinux/config ]]; then
+                sed -i 's/^SELINUX=permissive/SELINUX=enforcing/' /etc/selinux/config
+            fi
+            setenforce 1 2>/dev/null || true
+        fi
+        # Swap: uncomment the fstab lines this installer commented out; re-enable swap
+        # only if it was on before install.
+        sed -i -E 's|^#(.*) # rke2-installer-swap$|\1|' /etc/fstab
+        if [[ "${RKE2I_SWAP_WAS_ON:-false}" == "true" ]]; then
+            echo "  Re-enabling swap (was enabled before install)..."
+            swapon -a 2>/dev/null || true
+        fi
+        # multipathd: unmask and restore recorded enablement.
+        if [[ "${RKE2I_MULTIPATHD_SERVICE_ENABLED:-not-found}" == "enabled" ]]; then
+            echo "  Restoring multipathd.service (was enabled before install)..."
+            systemctl unmask multipathd.service 2>/dev/null || true
+            systemctl enable --now multipathd.service 2>/dev/null || true
+        fi
+        if [[ "${RKE2I_MULTIPATHD_SOCKET_ENABLED:-not-found}" == "enabled" ]]; then
+            systemctl unmask multipathd.socket 2>/dev/null || true
+            systemctl enable --now multipathd.socket 2>/dev/null || true
+        fi
+        # Firewalls: re-enable only what was active/enabled before install.
+        if [[ "${RKE2I_UFW_WAS_ACTIVE:-false}" == "true" ]] && command -v ufw &>/dev/null; then
+            echo "  Re-enabling UFW (was active before install)..."
+            ufw --force enable || true
+        fi
+        if [[ "${RKE2I_FIREWALLD_ENABLED:-not-found}" == "enabled" ]]; then
+            echo "  Re-enabling firewalld (was enabled before install)..."
+            systemctl enable firewalld.service 2>/dev/null || true
+        fi
+        if [[ "${RKE2I_FIREWALLD_WAS_ACTIVE:-inactive}" == "active" ]]; then
+            systemctl start firewalld.service 2>/dev/null || true
+        fi
+        # etcd user (CIS): remove only if this installer created it.
+        if [[ "${RKE2I_ETCD_USER_CREATED:-false}" == "true" ]] && id etcd &>/dev/null; then
+            echo "  Removing etcd user (created by this installer)..."
+            userdel etcd 2>/dev/null || true
+        fi
+        # NTP (W11): remove the marker-tagged lines/drop-in added by configure_node_ntp.
+        if [[ "${RKE2I_NTP_CONFIGURED:-none}" != "none" ]]; then
+            echo "  Removing NTP configuration added by this installer..."
+            local ntp_conf
+            for ntp_conf in /etc/chrony/chrony.conf /etc/chrony.conf; do
+                if [[ -f "$ntp_conf" ]]; then
+                    sed -i '/# ap-tools NTP$/d' "$ntp_conf"
+                fi
+            done
+            rm -f /etc/systemd/timesyncd.conf.d/10-ap-tools.conf
+            if [[ "${RKE2I_NTP_CONFIGURED}" == "chrony" ]]; then
+                systemctl restart chronyd 2>/dev/null || systemctl restart chrony 2>/dev/null || true
+            else
+                systemctl restart systemd-timesyncd 2>/dev/null || true
+            fi
+        fi
+    fi
+    systemctl daemon-reload 2>/dev/null || true
     # cleanup non-default paths
     if [[ -n "$RKE2_DATA" && "$RKE2_DATA" != "default" ]]; then
         if [[ "$RKE2_DATA" != /* || "$RKE2_DATA" == "/" ]]; then
@@ -1361,6 +1941,10 @@ uninstall_rke2() {
         else
             # unmount projected/secret tmpfs mounts (best effort)
             find "$KUBELET_DATA" -type d -path '*kubernetes.io~*' -exec umount -lf {} \; 2>/dev/null || true
+            # dead CSI FUSE globalmounts (Longhorn after the engine is gone) EIO on
+            # traversal and can be absent from findmnt - unmount them explicitly
+            # WITHOUT descending into them, or the rm below fails with I/O errors
+            find "$KUBELET_DATA/plugins" -type d -name globalmount -prune -exec umount -lf {} \; 2>/dev/null || true
             # unmount anything else still mounted under the tree (best effort)
             findmnt -R -n -o TARGET "$KUBELET_DATA" 2>/dev/null | sort -r | xargs -r umount -l 2>/dev/null || true
             rm -rf -- "$KUBELET_DATA"
@@ -1374,6 +1958,8 @@ uninstall_rke2() {
         fi
     fi
     [ ! -d "$WORKING_DIR" ] || rm -rf "$WORKING_DIR"
+    rm -f "$STATE_FILE"
+    rmdir "$(dirname "$STATE_FILE")" 2>/dev/null || true
     echo "  Completed"
     echo "### RKE2 Installer Ended at $(date) ###"
     exit 0
@@ -1383,6 +1969,9 @@ uninstall_rke2() {
 
 run_save () {
     echo "--- Running save workflow"
+    # RK-14: regenerate the utility-images list from scratch each run instead of
+    # appending to a previous run's list ('>>' growth across re-runs).
+    : > $WORKING_DIR/rke2-utilities/images/utility-images.txt
     download_rke2_binaries
     if [[ ${PUSH_SAVE_VELERO,,} == "true" ]]; then
         download_velero
@@ -1392,9 +1981,49 @@ run_save () {
     fi
     download_upgrade_artifacts
     download_rke2_utilities
+    download_selinux_policy_rpms
     create_save_archive
     echo "--- Finished save workflow"
     echo "  Copy the archive to an air-gapped host runing the same version of $OS_ID"
+}
+
+download_selinux_policy_rpms () {
+    # P4-04: air-gapped installs are tar-method and cannot fetch the SELinux
+    # policies, and uninstall removes both the policy RPMs and the Rancher repo
+    # file - so an Enforcing host could never reinstall from its own bundle
+    # without a manual RPM transfer. Bundle the policy RPMs on rpm-based hosts.
+    if ! command -v dnf &>/dev/null; then
+        echo "  Skipping SELinux policy RPM download (no dnf; no upstream rke2-selinux for this distro)."
+        return 0
+    fi
+    local maj destdir
+    maj=$(. /etc/os-release && echo "${VERSION_ID%%.*}")
+    destdir="$WORKING_DIR/rke2-selinux-rpms"
+    mkdir -p "$destdir"
+    echo "  Downloading rke2-selinux + container-selinux RPMs (el$maj) into the bundle..."
+    if ! dnf download --help &>/dev/null; then
+        dnf install -y dnf-plugins-core >/dev/null || true
+    fi
+    # --resolve WITHOUT --alldeps: the offline install applies every RPM in this
+    # dir, so it must hold only the policy packages + deps genuinely missing on
+    # this host (same-OS save contract) - --alldeps pulled the full 126-package
+    # transitive closure and would bulk-upgrade system libs on the target
+    if dnf download --resolve --destdir "$destdir" \
+        --repofrompath "rancher-rke2-common-save,https://rpm.rancher.io/rke2/stable/common/centos/${maj}/noarch" \
+        --setopt=rancher-rke2-common-save.gpgcheck=0 \
+        rke2-selinux container-selinux >/dev/null; then
+        echo "  SELinux policy RPMs bundled: $(find "$destdir" -name '*.rpm' | wc -l) package(s)."
+        return 0
+    fi
+    rm -rf "$destdir"
+    if command -v getenforce &>/dev/null && [[ "$(getenforce 2>/dev/null)" == "Enforcing" ]]; then
+        echo "Error: failed to download the rke2-selinux/container-selinux RPMs and this host is"
+        echo "  SELinux-enforcing - the save bundle could not reinstall RKE2 on this host while"
+        echo "  air-gapped. Fix repo access (rpm.rancher.io) and re-run save."
+        exit 1
+    fi
+    echo "Warning: could not download the SELinux policy RPMs; the bundle will not self-serve"
+    echo "  SELinux-enforcing air-gapped installs (manual RPM transfer would be required)."
 }
 
 download_rke2_binaries () {
@@ -1433,6 +2062,7 @@ download_rke2_utilities () {
     # Add Helm utility images (Longhorn, MetalLB, HAProxy) before saving the archive
     if [[ -f $WORKING_DIR/rke2-utilities/images/utility-images.txt ]]; then
         image_pull_push_check
+        sort -u -o $WORKING_DIR/rke2-utilities/images/utility-images.txt $WORKING_DIR/rke2-utilities/images/utility-images.txt
         cd $WORKING_DIR/rke2-utilities
         ./image_pull_push.sh -f images/utility-images.txt save
         cd $base_dir
@@ -1441,7 +2071,7 @@ download_rke2_utilities () {
 
 download_velero () {
     echo "  Downloading Velero CLI ${VELERO_VERSION}..."
-    curl -L https://github.com/vmware-tanzu/velero/releases/download/${VELERO_VERSION}/velero-${VELERO_VERSION}-linux-amd64.tar.gz \
+    curl -fL https://github.com/vmware-tanzu/velero/releases/download/${VELERO_VERSION}/velero-${VELERO_VERSION}-linux-amd64.tar.gz \
         -o $WORKING_DIR/velero/velero-${VELERO_VERSION}-linux-amd64.tar.gz
     echo "  Adding Velero images to utility-images list..."
     echo "velero/velero:${VELERO_VERSION}" >> $WORKING_DIR/rke2-utilities/images/utility-images.txt
@@ -1577,8 +2207,10 @@ EOF
 
 create_save_archive () {
     # saves downloaded files into rke2-save.tar.gz
+    # NOTE: rke2-save-version.txt doubles as the air-gap sentinel - its presence in the
+    # invocation directory is what flips later runs into AIR_GAPPED_MODE (not the tar.gz).
     cat > $base_dir/rke2-save-version.txt <<EOF
-# SeaweedFS Installer Save Archive
+# RKE2 Installer Save Archive
 # Created: $(date)
 #
 # RKE2 Version: $RKE2_VERSION
@@ -1592,7 +2224,14 @@ create_save_archive () {
 EOF
     generate_bundle_licenses
     echo "  Creating rke2 archive..."
-    tar -czf rke2-save.tar.gz rke2-install rke2_installer.sh rke2-save-version.txt LICENSES
+    # RK-12: tar with explicit -C dirs so invocation by absolute path from another cwd
+    # works (the script itself may live outside $base_dir). RK-14: write to a temp file
+    # and mv into place so an interrupted save never leaves a truncated archive behind.
+    local script_dir tmp_archive
+    script_dir=$(cd "$(dirname "$0")" && pwd)
+    tmp_archive="$base_dir/.rke2-save.tar.gz.partial"
+    tar -czf "$tmp_archive" -C "$base_dir" rke2-install rke2-save-version.txt LICENSES -C "$script_dir" "$SCRIPT_NAME"
+    mv -f "$tmp_archive" "$base_dir/rke2-save.tar.gz"
     echo "  Air-gapped archive 'rke2-save.tar.gz' created."
 }
 
@@ -1611,9 +2250,17 @@ run_push () {
 push_utility_images () {
     echo "  Checking for utility images to push..."
     if [[ $AIR_GAPPED_MODE -eq 1 ]]; then
-        local container_images_tar=$(basename $WORKING_DIR/rke2-utilities/container_images*.tar.gz)
-        $WORKING_DIR/rke2-utilities/image_pull_push.sh -f $WORKING_DIR/rke2-utilities/$container_images_tar push $REGISTRY_INFO $REG_USER $REG_PASS
+        local container_images_tar
+        if ! container_images_tar=$(select_newest "$WORKING_DIR"/rke2-utilities/container_images_*.tar.gz); then
+            echo "Error: no container_images_*.tar.gz archive found in $WORKING_DIR/rke2-utilities."
+            echo "  Re-run 'save' on a connected host to build a complete archive."
+            exit 1
+        fi
+        $WORKING_DIR/rke2-utilities/image_pull_push.sh -f "$container_images_tar" push $REGISTRY_INFO $REG_USER $REG_PASS
     elif [[ $AIR_GAPPED_MODE -eq 0 ]]; then
+        # RK-14: regenerate the image list from scratch each run instead of appending
+        # to whatever a previous run left behind ('>>' growth).
+        : > $WORKING_DIR/rke2-utilities/images/utility-images.txt
         if [[ ${INSTALL_LOCAL_PATH_PROVISIONER,,} == "true" ]]; then
             curl -sfL https://raw.githubusercontent.com/rancher/local-path-provisioner/$LOCAL_PATH_PROVISIONER_VERSION/deploy/local-path-storage.yaml -o $WORKING_DIR/rke2-utilities/local-path-storage.yaml
             cat $WORKING_DIR/rke2-utilities/local-path-storage.yaml |grep image: |cut -d: -f2-3 | awk '{sub(/^ /, ""); print}' >> $WORKING_DIR/rke2-utilities/images/utility-images.txt
@@ -1638,6 +2285,7 @@ push_utility_images () {
         local stable_tag=$(curl -sfL -o /dev/null -w '%{url_effective}' https://update.rke2.io/v1-release/channels/stable | awk -F/ '{gsub(/\+/,"-",$NF); print $NF}')
         echo "rancher/rke2-upgrade:$stable_tag" >> $WORKING_DIR/rke2-utilities/images/utility-images.txt
         image_pull_push_check
+        sort -u -o $WORKING_DIR/rke2-utilities/images/utility-images.txt $WORKING_DIR/rke2-utilities/images/utility-images.txt
         echo "--- Printing utility-images.txt"
         cat $WORKING_DIR/rke2-utilities/images/utility-images.txt
         echo "---"
@@ -1649,20 +2297,34 @@ push_utility_images () {
 
 push_rke2_images () {
     if [[ $AIR_GAPPED_MODE -eq 1 ]]; then
+        # RK-14: these archives have fixed names - address them directly instead of
+        # globbing, so stale/duplicate archives can never be picked nondeterministically.
         echo "  Pushing rke2 core images"
-        local container_images_tar=$(basename $WORKING_DIR/rke2-core-images/*.tar.gz)
-        $WORKING_DIR/rke2-utilities/image_pull_push.sh -f $WORKING_DIR/rke2-core-images/$container_images_tar push $REGISTRY_INFO $REG_USER $REG_PASS
-        echo "  Pushing rke2 cni images"
-        local container_images_tar=$(basename $WORKING_DIR/rke2-cni-images/*.tar.gz)
-        $WORKING_DIR/rke2-utilities/image_pull_push.sh -f $WORKING_DIR/rke2-cni-images/$container_images_tar push $REGISTRY_INFO $REG_USER $REG_PASS
+        local core_images_tar="$WORKING_DIR/rke2-core-images/rke2-core-images.tar.gz"
+        if [[ ! -f "$core_images_tar" ]]; then
+            echo "Error: $core_images_tar not found. Re-run 'save' to build a complete archive."
+            exit 1
+        fi
+        $WORKING_DIR/rke2-utilities/image_pull_push.sh -f "$core_images_tar" push $REGISTRY_INFO $REG_USER $REG_PASS
+        if [[ $CNI_NONE == "false" ]]; then
+            echo "  Pushing rke2 cni images"
+            local cni_images_tar="$WORKING_DIR/rke2-cni-images/rke2-$CNI_TYPE-images.tar.gz"
+            if [[ ! -f "$cni_images_tar" ]]; then
+                echo "Error: $cni_images_tar not found (CNI_TYPE=$CNI_TYPE). Re-run 'save' with the same CNI_TYPE."
+                exit 1
+            fi
+            $WORKING_DIR/rke2-utilities/image_pull_push.sh -f "$cni_images_tar" push $REGISTRY_INFO $REG_USER $REG_PASS
+        fi
     else
         echo "  Downloading and pushing rke2 core images"
         curl -sfL https://github.com/rancher/rke2/releases/download/$TRANSLATED_VERSION/rke2-images-core.linux-amd64.txt -o $WORKING_DIR/rke2-core-images/rke2-images-core.linux-amd64.txt
         image_pull_push_check
         $WORKING_DIR/rke2-utilities/image_pull_push.sh -f $WORKING_DIR/rke2-core-images/rke2-images-core.linux-amd64.txt push $REGISTRY_INFO $REG_USER $REG_PASS
-        echo "  Downloading and pushing rke2 cni images"
-        curl -sfL https://github.com/rancher/rke2/releases/download/$TRANSLATED_VERSION/rke2-images-$CNI_TYPE.linux-amd64.txt -o $WORKING_DIR/rke2-cni-images/rke2-images-$CNI_TYPE.linux-amd64.txt
-        $WORKING_DIR/rke2-utilities/image_pull_push.sh -f $WORKING_DIR/rke2-cni-images/rke2-images-$CNI_TYPE.linux-amd64.txt push $REGISTRY_INFO $REG_USER $REG_PASS
+        if [[ $CNI_NONE == "false" ]]; then
+            echo "  Downloading and pushing rke2 cni images"
+            curl -sfL https://github.com/rancher/rke2/releases/download/$TRANSLATED_VERSION/rke2-images-$CNI_TYPE.linux-amd64.txt -o $WORKING_DIR/rke2-cni-images/rke2-images-$CNI_TYPE.linux-amd64.txt
+            $WORKING_DIR/rke2-utilities/image_pull_push.sh -f $WORKING_DIR/rke2-cni-images/rke2-images-$CNI_TYPE.linux-amd64.txt push $REGISTRY_INFO $REG_USER $REG_PASS
+        fi
     fi
 }
 
@@ -1677,7 +2339,8 @@ runtime_outputs () {
         echo "  Copy the archive to an air-gapped host runing the same version of $OS_ID and extract it with 'tar -xzf rke2-save.tar.gz'."
     fi
     if [[ $INSTALL_MODE -eq 1 && $INSTALL_TYPE == "rke2" ]]; then
-        local join_token=$(cat $RKE2_DATA/server/node-token)
+        # RK-8: never print the join token itself - point at the token file instead
+        # (install logs are routinely captured by callers like ap-tools).
         local host_ip=$(hostname -I |awk '{print $1}')
         echo "  RKE2 Server installed successfully."
         echo "  Verify API is reachable at:"
@@ -1690,20 +2353,20 @@ runtime_outputs () {
             echo "  To join more nodes to this cluster use the following config:"
             echo "----"
             echo "server: https://$TLS_SAN:9345"
-            echo "token: $join_token"
+            echo "token: <contents of $RKE2_DATA/server/node-token>"
             echo "----"
-            echo "  For joing another server: './rke2_installer.sh join server -tls-san $TLS_SAN $TLS_SAN $join_token'."
-            echo "  For joining an agent node: './rke2_installer.sh join agent $TLS_SAN $join_token'."
+            echo "  For joining another server: './rke2_installer.sh join server -tls-san $TLS_SAN $TLS_SAN \$(sudo cat $RKE2_DATA/server/node-token)'."
+            echo "  For joining an agent node: './rke2_installer.sh join agent $TLS_SAN \$(sudo cat $RKE2_DATA/server/node-token)'."
             echo "  Note: if using private registry, include -registry in the join command."
             echo "  After joining an agent, apply the worker role with 'kubectl label node <node name> node-role.kubernetes.io/worker=true'."
         else
             echo "  To join more nodes to this cluster use the following config:"
             echo "----"
             echo "server: https://$host_ip:9345"
-            echo "token: $join_token"
+            echo "token: <contents of $RKE2_DATA/server/node-token>"
             echo "----"
-            echo "  For joining another server: './rke2_installer.sh join server $host_ip $join_token'." 
-            echo "  For joining an agent node: './rke2_installer.sh join agent $host_ip $join_token'."
+            echo "  For joining another server: './rke2_installer.sh join server $host_ip \$(sudo cat $RKE2_DATA/server/node-token)'."
+            echo "  For joining an agent node: './rke2_installer.sh join agent $host_ip \$(sudo cat $RKE2_DATA/server/node-token)'."
             echo "  Note: if using private registry, include -registry in the join command."
             echo "  After joining an agent, apply the worker role with 'kubectl label node <node name> node-role.kubernetes.io/worker=true'."
         fi
@@ -1818,6 +2481,68 @@ os_check () {
         echo "Unknown or unsupported OS $OS_ID."
         exit 1
     fi
+    # RK-3: detect SELinux enforcement once (Rocky 9/10 default; Leap 16 defaults to SELinux too)
+    SELINUX_ENFORCING="false"
+    if command -v getenforce &>/dev/null && [[ "$(getenforce 2>/dev/null || true)" == "Enforcing" ]]; then
+        SELINUX_ENFORCING="true"
+    fi
+}
+
+select_newest () {
+    # RK-14: deterministic archive selection. Prints the newest existing file among the
+    # expanded glob args (by mtime); returns 1 if none exist; warns when several match
+    # (previously an unquoted glob fed multiple paths into basename/tar and misparsed).
+    local newest="" count=0 f
+    for f in "$@"; do
+        if [[ -f "$f" ]]; then
+            count=$((count+1))
+            if [[ -z "$newest" || "$f" -nt "$newest" ]]; then
+                newest="$f"
+            fi
+        fi
+    done
+    if [[ $count -eq 0 ]]; then
+        return 1
+    fi
+    if [[ $count -gt 1 ]]; then
+        echo "  WARNING: $count archives match; using newest: $(basename "$newest")" >&2
+    fi
+    echo "$newest"
+}
+
+require_cmds () {
+    # RK-9: verify required commands up front (minimal cloud images lack several of
+    # these) instead of failing obscurely mid-install. Prints a per-distro install hint.
+    local missing="" c
+    for c in "$@"; do
+        if ! command -v "$c" &>/dev/null; then
+            missing="$missing $c"
+        fi
+    done
+    if [[ -n "$missing" ]]; then
+        echo "Error: required command(s) not found:$missing"
+        case "$OS_ID" in
+            ubuntu|debian)
+                echo "  Install with: sudo apt-get update && sudo apt-get install -y$missing" ;;
+            rhel|centos|rocky|almalinux|fedora)
+                echo "  Install with: sudo dnf install -y$missing" ;;
+            sles|opensuse-leap)
+                echo "  Install with: sudo zypper install -y$missing" ;;
+        esac
+        exit 1
+    fi
+}
+
+preflight_checks () {
+    local cmds="tar gzip awk sed grep"
+    if [[ $AIR_GAPPED_MODE -eq 0 ]]; then
+        cmds="$cmds curl"
+    fi
+    if [[ $REGISTRY_MODE -eq 1 ]]; then
+        cmds="$cmds openssl"
+    fi
+    # shellcheck disable=SC2086
+    require_cmds $cmds
 }
 
 image_pull_push_check () {
@@ -1831,6 +2556,7 @@ image_pull_push_check () {
 check_namespace_pods_ready() {
   # Run this function as 'check_namespace_pods_ready $namespace', no argument will default to kube-system
   # checks status of pods, deletes any completed pods, and loops until all pods are ready or 120s has elapsed
+  # Returns 1 on timeout (matches the ap-tools copy); callers decide fail-hard vs warn-and-continue.
   local timeout_seconds=120
   local start_time=$(date +%s)
   local ns=${1:-"kube-system"}
@@ -1845,7 +2571,7 @@ check_namespace_pods_ready() {
     if [ "$elapsed_time" -ge "$timeout_seconds" ]; then
       echo "Error: Timeout reached after $timeout_seconds seconds. Not all pods are ready." >&2
       kubectl get pods -A
-      return 0
+      return 1
     fi
     if [ "$current_pods_not_ready" -eq 0 ]; then
       break
@@ -1859,29 +2585,28 @@ check_namespace_pods_ready() {
 }
 
 run_debug() {
-  # Use this to hide the output of functions or helper scripts when they are not needed.
+  # Runs a step while preserving 'set -e' semantics INSIDE the called function
+  # (wrapping "$@" in an if/&&/|| condition would suppress errexit for the whole
+  # call tree and let mid-function failures continue silently \u2014 the old failure
+  # branch here was dead code for the same reason). On failure, errexit aborts the
+  # script and the on_exit trap reports the failing step; with DEBUG=0 the step's
+  # captured output is replayed by the trap so failures are never silent.
+  RUN_DEBUG_STEP="$*"
   if [ "$DEBUG" = "1" ]; then
-    local GREEN=$(tput setaf 2)
-    local RED=$(tput setaf 1)
-    local NC=$(tput sgr0)
+    local GREEN RED NC
+    GREEN=$(tput setaf 2 2>/dev/null || true)
+    NC=$(tput sgr0 2>/dev/null || true)
     local CHECKMARK='\u2714'
-    local CROSSMARK='\u2717'
-    local SUCCESS_MSG=${2:-"Success"}
-    local ERROR_MSG=${3:-"Error"}
+    local SUCCESS_MSG="Success"
     echo "--- Running '$*' with DEBUG enabled ---"
     "$@"
-    local status=$?
-    if [ "$status" -eq 0 ]; then
-        echo -e "--- DEBUG: Finished '$*' ${GREEN}${CHECKMARK} ${SUCCESS_MSG}${NC} ---"
-    else
-        echo -e "--- DEBUG: Finished '$*' ${RED}${CROSSMARK} ${ERROR_MSG}${NC} ---" >&2
-    fi
-    return $status
+    echo -e "--- DEBUG: Finished '$*' ${GREEN}${CHECKMARK} ${SUCCESS_MSG}${NC} ---"
   else
-    # If DEBUG is false, execute the command/function and redirect all
-    "$@" > /dev/null 2>&1
-    return $?
+    # DEBUG=0: capture output so the on_exit trap can replay it if the step fails.
+    : > "$RUN_DEBUG_LOG"
+    "$@" > "$RUN_DEBUG_LOG" 2>&1
   fi
+  RUN_DEBUG_STEP=""
 }
 
 cleanup () {
@@ -1901,8 +2626,19 @@ if [[ $EUID -ne 0 ]]; then
    echo "Type './$SCRIPT_NAME -h' for help."
    exit 1
 fi
+# Resolve the invoking user without dying on non-tty invocations (cloud-init, ansible,
+# systemd units): SUDO_USER -> logname -> owner of the working directory -> root.
 if [[ -z "$user_name" ]]; then
-    user_name=$(logname)
+    user_name=$(logname 2>/dev/null || true)
+fi
+if [[ -z "$user_name" ]]; then
+    user_name=$(stat -c '%U' "$PWD" 2>/dev/null || true)
+    if [[ "$user_name" == "UNKNOWN" ]]; then
+        user_name=""
+    fi
+fi
+if [[ -z "$user_name" ]]; then
+    user_name="root"
 fi
 
 # Update non-default install paths
@@ -2114,13 +2850,13 @@ fi
 # Verify REGISTRY_MODE is an FQDN/IP and port
 if [[ "$REGISTRY_MODE" == "1" ]]; then
     if [[ "$REGISTRY_INFO" =~ ^https?:// ]]; then
-        echo "Error: registry info must be a valid FQDN or IPv4 format. i.e. 'my.regsitry.com:443'."
+        echo "Error: registry info must be a valid FQDN or IPv4 format. i.e. 'my.registry.com:443'."
         exit 1
     fi
     REG_FQDN=$(echo "$REGISTRY_INFO" | cut -d':' -f1)
     REG_PORT=$(echo "$REGISTRY_INFO" | cut -d':' -f2)
     if [[ ! ( "$REG_FQDN" =~ $fqdn_pattern || "$REG_FQDN" =~ $ipv4_pattern ) ]]; then
-        echo "Error: Registry url must be a valid FQDN or IPv4 format. i.e. 'my.regsitry.com' or '192.168.1.50'."
+        echo "Error: Registry url must be a valid FQDN or IPv4 format. i.e. 'my.registry.com' or '192.168.1.50'."
         exit 1
     fi
     if [[ "$REG_PORT" =~ ^[0-9]+$ ]]; then
@@ -2169,6 +2905,7 @@ fi
 [[ ! -f $base_dir/rke2-save-version.txt ]] || AIR_GAPPED_MODE=1
 
 os_check
+preflight_checks
 display_args
 if [[ $UNINSTALL_MODE -eq 1 ]]; then
   run_debug uninstall_rke2
