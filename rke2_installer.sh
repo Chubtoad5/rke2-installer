@@ -1234,14 +1234,38 @@ PLANEOF
     echo "  Upgrade plan(s) applied successfully."
 }
 
+# Resolve the RKE2 'stable' channel to a version (e.g. v1.34.5+rke2r1) via update.rke2.io.
+# Bounded so an unresponsive channel server cannot hang the run; prints nothing on failure.
+resolve_rke2_stable_version () {
+    curl -sfL --connect-timeout 10 --max-time 30 -o /dev/null -w '%{url_effective}' https://update.rke2.io/v1-release/channels/stable 2>/dev/null \
+        | awk -F/ '{print $NF}' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+\+rke2r[0-9]+$' || true
+}
+
+# The rke2-upgrade image tag for the utility-images list: the current stable release, or the
+# pinned RKE2_VERSION when the channel server is unreachable (the image is optional).
+rke2_upgrade_image_tag () {
+    local version
+    version=$(resolve_rke2_stable_version)
+    if [[ -z "$version" ]]; then
+        echo "  Warning: could not resolve the RKE2 stable channel from update.rke2.io; using RKE2_VERSION $RKE2_VERSION for the rke2-upgrade image" >&2
+        version=$RKE2_VERSION
+    fi
+    echo "${version//+/-}"
+}
+
 push_upgrade_images () {
     echo "  Pushing upgrade images to registry..."
     image_pull_push_check
 
     # Resolve the upgrade version tag for the rke2-upgrade image
-    local upgrade_tag
+    local upgrade_tag stable_version=""
     if [[ "$UPGRADE_VERSION" == "stable" ]]; then
-        upgrade_tag=$(curl -sfL -o /dev/null -w '%{url_effective}' https://update.rke2.io/v1-release/channels/stable | awk -F/ '{gsub(/\+/,"-",$NF); print $NF}')
+        stable_version=$(resolve_rke2_stable_version)
+        if [[ -z "$stable_version" ]]; then
+            echo "Error: could not resolve the RKE2 stable channel from update.rke2.io. Set UPGRADE_VERSION to an explicit version (e.g. v1.34.5+rke2r1) and re-run."
+            exit 1
+        fi
+        upgrade_tag=${stable_version//+/-}
         echo "  Resolved stable version tag: $upgrade_tag"
     else
         upgrade_tag=$(echo "$UPGRADE_VERSION" | sed 's/+/-/')
@@ -1268,8 +1292,7 @@ push_upgrade_images () {
     # Push RKE2 core+CNI images for the target version (same method as push_rke2_images online path)
     local upgrade_translated_version
     if [[ "$UPGRADE_VERSION" == "stable" ]]; then
-        # Convert the resolved stable tag back to URL-encoded format
-        local stable_version=$(curl -sfL -o /dev/null -w '%{url_effective}' https://update.rke2.io/v1-release/channels/stable | awk -F/ '{print $NF}')
+        # Convert the resolved stable version to URL-encoded format
         upgrade_translated_version=$(echo "$stable_version" | sed 's/+/%2B/')
     else
         upgrade_translated_version=$(echo "$UPGRADE_VERSION" | sed 's/+/%2B/')
@@ -1297,7 +1320,8 @@ download_upgrade_artifacts () {
     echo "$suc_image" >> $WORKING_DIR/rke2-utilities/images/utility-images.txt
 
     # Resolve stable version for rke2-upgrade image tag
-    local stable_tag=$(curl -sfL -o /dev/null -w '%{url_effective}' https://update.rke2.io/v1-release/channels/stable | awk -F/ '{gsub(/\+/,"-",$NF); print $NF}')
+    local stable_tag
+    stable_tag=$(rke2_upgrade_image_tag)
     echo "  Adding rke2-upgrade image to utility-images list: rancher/rke2-upgrade:$stable_tag"
     echo "rancher/rke2-upgrade:$stable_tag" >> $WORKING_DIR/rke2-utilities/images/utility-images.txt
 }
@@ -2282,7 +2306,8 @@ push_utility_images () {
         fi
         local suc_image=$(grep 'rancher/system-upgrade-controller' $WORKING_DIR/rke2-utilities/system-upgrade-controller.yaml | awk '{print $2}')
         echo "$suc_image" >> $WORKING_DIR/rke2-utilities/images/utility-images.txt
-        local stable_tag=$(curl -sfL -o /dev/null -w '%{url_effective}' https://update.rke2.io/v1-release/channels/stable | awk -F/ '{gsub(/\+/,"-",$NF); print $NF}')
+        local stable_tag
+        stable_tag=$(rke2_upgrade_image_tag)
         echo "rancher/rke2-upgrade:$stable_tag" >> $WORKING_DIR/rke2-utilities/images/utility-images.txt
         image_pull_push_check
         sort -u -o $WORKING_DIR/rke2-utilities/images/utility-images.txt $WORKING_DIR/rke2-utilities/images/utility-images.txt

@@ -1,5 +1,21 @@
 # Changelog — rke2-installer
 
+## 2026-10-10 — Bounded `update.rke2.io` stable-channel lookup
+
+**Fix:** a pinned-version `install … push` / `save` hung indefinitely when `update.rke2.io` stopped
+answering HTTPS (observed 2026-10-10: plain HTTP still returned its 308 redirect, every HTTPS address
+timed out). The lookup only names the optional `rancher/rke2-upgrade:<stable>` image for the
+utility-images list, but the `curl` had no timeout, so the whole install blocked on it.
+
+- New `resolve_rke2_stable_version` (`--connect-timeout 10 --max-time 30`, validates the result looks
+  like `vX.Y.Z+rke2rN`) replaces the four unbounded lookups.
+- `install … push` and `save`: if the channel can't be resolved, the rke2-upgrade image falls back to
+  the pinned `RKE2_VERSION` with a warning (worst case adds ~30 s instead of hanging).
+- `upgrade` with `UPGRADE_VERSION=stable`: now fails fast with a clear error asking for an explicit
+  `UPGRADE_VERSION`, instead of hanging (or continuing with an empty tag).
+- The installed RKE2 version was never affected — Rancher's `install.sh` only consults the channel
+  when `INSTALL_RKE2_VERSION` is empty, and this script always pins it.
+
 ## 2026-09-09 — Idempotence release (feature/idempotence-phase2)
 
 The largest change in the suite. `install`/`join` are now **re-runnable on a running node**
