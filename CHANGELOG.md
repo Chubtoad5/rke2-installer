@@ -1,5 +1,30 @@
 # Changelog — rke2-installer
 
+## 2026-10-23 — Minimal CoreDNS override + optional `COREDNS_HOSTS` pins
+
+**Fix:** the generated `rke2-coredns-helmchartconfig.yaml` re-declared the chart's whole `servers:` list. Because Helm
+replaces lists instead of merging them, that silently dropped chart defaults — the `kube-dns` Service served **UDP only**
+(no DNS-over-TCP) and the lameduck delay was 5s instead of 10s — and froze the Corefile against future chart updates.
+The only override that is actually needed is `service.name: kube-dns`: the chart names the Service
+`rke2-coredns-rke2-coredns`, while Dell Automation Platform's nginx gateways (`dell-orchestrator`, `dell-portal`)
+hard-code `resolver kube-dns.kube-system.svc.cluster.local`. The file now contains only that.
+
+**New:** `COREDNS_HOSTS="<fqdn>=<ipv4>[,...]"` (optional, empty by default) renders an extra CoreDNS server block that
+pins those names in-cluster, via the chart's `zoneFiles` + `extraConfig: import` (the default server block is left
+untouched). Use it for split-horizon: LAN DNS sends browsers to a TLS-terminating reverse proxy while pods keep reaching
+the cluster ingress — DAP's `fusion-mgmtworker` fetches its estate token from its own portal FQDN and trusts only DAP's
+CA, so routing it through a proxy with a public cert breaks every plugin call (403). Rendered by `install`, so re-runs
+keep the pins instead of wiping a hand edit. Invalid entries fail fast.
+
+### Existing clusters
+- Re-running `install` applies the new file; CoreDNS rolls with no downtime (validated on a live 3-node DAP cluster).
+- **TCP 53 is not added to an existing `kube-dns` Service** by the Helm upgrade (Service ports merge on `port` alone, so
+  the new `tcp-53` collapses into `udp-53`). Fresh installs get both. To add it on an upgraded cluster:
+  ```bash
+  kubectl -n kube-system patch svc kube-dns --type=json \
+    -p '[{"op":"add","path":"/spec/ports/-","value":{"name":"tcp-53","port":53,"protocol":"TCP","targetPort":53}}]'
+  ```
+
 ## 2026-10-10 — Bounded `update.rke2.io` stable-channel lookup
 
 **Fix:** a pinned-version `install … push` / `save` hung indefinitely when `update.rke2.io` stopped

@@ -24,6 +24,7 @@ PVC_DATA=${PVC_DATA:-"default"}                                               # 
 CONTROL_PLANE_TAINT=${CONTROL_PLANE_TAINT:-"false"}                           # Set to true to taint the control-plane node for multi-node clusters and workload separation
 RKE2_RECONFIGURE=${RKE2_RECONFIGURE:-"false"}                                 # Set to true to allow 'install'/'join' on a RUNNING node to apply a changed config.yaml and restart the rke2 service
 NTP_SERVERS=${NTP_SERVERS:-}                                                  # Optional space/comma-separated NTP server list applied during 'install'/'join'; empty = leave the OS default time source unchanged
+COREDNS_HOSTS=${COREDNS_HOSTS:-}                                              # Optional in-cluster DNS pins '<fqdn>=<ipv4>[,...]' (split-horizon: pods resolve these names to the given IP regardless of the host's DNS); empty = chart defaults
 RKE2_SELINUX_FALLBACK=${RKE2_SELINUX_FALLBACK:-}                              # 'permissive': on SUSE hosts (no upstream rke2-selinux policy exists) switch SELinux to permissive instead of failing pre-cluster; recorded in install state, restored to enforcing on uninstall (P4-08b)
 DEBUG=${DEBUG:-"1"}
 
@@ -759,8 +760,33 @@ metadata:
 automountServiceAccountToken: false
 EOF
     fi
-    echo "  Generating $RKE2_DATA/server/manifests/rke2-coredns-helmchartconfig.yaml"
-    cat > $RKE2_DATA/server/manifests/rke2-coredns-helmchartconfig.yaml <<EOF
+    render_coredns_helmchartconfig "$RKE2_DATA/server/manifests/rke2-coredns-helmchartconfig.yaml"
+}
+
+# CoreDNS overrides, layered on the rke2-coredns chart defaults (never replace the chart's
+# 'servers' list - it is a YAML list, so overriding it drops every default, e.g. use_tcp).
+# - service.name kube-dns: the chart names the Service 'rke2-coredns-rke2-coredns', but DAP's
+#   nginx gateways (dell-orchestrator / dell-portal) hard-code
+#   'resolver kube-dns.kube-system.svc.cluster.local' and cannot resolve anything without it.
+# - COREDNS_HOSTS (optional): in-cluster pins as an extra server block per name, e.g. when LAN
+#   DNS sends browsers to a TLS-terminating proxy but pods must still reach the cluster's own
+#   ingress (split-horizon). Rendered here so 'install' re-runs keep the pins.
+render_coredns_helmchartconfig () {
+    local dest="$1"
+    local entries=() names=() entry name ip
+    for entry in $(echo "$COREDNS_HOSTS" | tr ',' ' '); do
+        name="${entry%%=*}"
+        ip="${entry#*=}"
+        if [[ "$entry" != *=* || ! "$name" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ \
+              || ! "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+            echo "Error: invalid COREDNS_HOSTS entry '$entry' (expected <fqdn>=<ipv4>, comma or space separated)."
+            exit 1
+        fi
+        entries+=("$ip $name")
+        names+=("$name:53")
+    done
+    echo "  Generating $dest"
+    cat > "$dest" <<EOF
 apiVersion: helm.cattle.io/v1
 kind: HelmChartConfig
 metadata:
@@ -770,32 +796,32 @@ spec:
   valuesContent: |-
     service:
       name: kube-dns
-    servers:
-    - zones:
-      - zone: .
-      port: 53
-      plugins:
-      - name: errors
-      - name: health
-        configBlock: |-
-          lameduck 5s
-      - name: ready
-      - name: kubernetes
-        parameters: cluster.local in-addr.arpa ip6.arpa
-        configBlock: |-
-          pods insecure
-          fallthrough in-addr.arpa ip6.arpa
-          ttl 30
-      - name: prometheus
-        parameters: 0.0.0.0:9153
-      - name: forward
-        parameters: . /etc/resolv.conf
-      - name: cache
-        parameters: 30
-      - name: loop
-      - name: reload
-      - name: loadbalance
 EOF
+    if [[ ${#entries[@]} -gt 0 ]]; then
+        echo "  Pinning in-cluster DNS (COREDNS_HOSTS): ${entries[*]}"
+        cat >> "$dest" <<EOF
+    extraConfig:
+      import:
+        parameters: /etc/coredns/coredns-hosts.server
+    zoneFiles:
+    - filename: coredns-hosts.server
+      domain: coredns-hosts
+      contents: |
+        ${names[*]} {
+          errors
+          hosts {
+EOF
+        for entry in "${entries[@]}"; do
+            echo "            $entry" >> "$dest"
+        done
+        cat >> "$dest" <<EOF
+            fallthrough
+          }
+          forward . /etc/resolv.conf
+          cache 30
+        }
+EOF
+    fi
 }
 
 # Configure a user-defined NTP source on every node (install + join agent + join server).

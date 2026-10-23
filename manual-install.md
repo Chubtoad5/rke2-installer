@@ -184,7 +184,10 @@ EOF
 
 #### Configure CoreDNS
 
-Create a CoreDNS HelmChartConfig to customize DNS behavior:
+RKE2's CoreDNS chart names its Service `rke2-coredns-rke2-coredns`. Rename it to the conventional `kube-dns`; some
+workloads hard-code `kube-dns.kube-system.svc.cluster.local` as their resolver (Dell Automation Platform's nginx
+gateways do). Everything else stays at the chart defaults — do **not** re-declare the `servers:` list, it replaces the
+defaults wholesale (e.g. DNS-over-TCP is lost):
 
 ```bash
 cat > /var/lib/rancher/rke2/server/manifests/rke2-coredns-helmchartconfig.yaml <<EOF
@@ -197,32 +200,29 @@ spec:
   valuesContent: |-
     service:
       name: kube-dns
-    servers:
-    - zones:
-      - zone: .
-      port: 53
-      plugins:
-      - name: errors
-      - name: health
-        configBlock: |-
-          lameduck 5s
-      - name: ready
-      - name: kubernetes
-        parameters: cluster.local in-addr.arpa ip6.arpa
-        configBlock: |-
-          pods insecure
-          fallthrough in-addr.arpa ip6.arpa
-          ttl 30
-      - name: prometheus
-        parameters: 0.0.0.0:9153
-      - name: forward
-        parameters: . /etc/resolv.conf
-      - name: cache
-        parameters: 30
-      - name: loop
-      - name: reload
-      - name: loadbalance
 EOF
+```
+
+**Optional — in-cluster DNS pins (split-horizon).** If LAN DNS points a name at a reverse proxy but pods must reach the
+cluster's own ingress for it, add an extra server block (this is what `COREDNS_HOSTS` renders):
+
+```yaml
+    extraConfig:
+      import:
+        parameters: /etc/coredns/coredns-hosts.server
+    zoneFiles:
+    - filename: coredns-hosts.server
+      domain: coredns-hosts
+      contents: |
+        portal.example.com:53 {
+          errors
+          hosts {
+            10.0.0.50 portal.example.com
+            fallthrough
+          }
+          forward . /etc/resolv.conf
+          cache 30
+        }
 ```
 
 ### Step 3 — Install and Start RKE2
