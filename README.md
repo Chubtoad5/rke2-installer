@@ -116,6 +116,7 @@ All configuration is done by editing the `USER DEFINED VARIABLES` section at the
 | `ENABLE_CIS` | `false` | Enable CIS Kubernetes hardening profile |
 | `RKE2_RECONFIGURE` | `false` | Set `true` to allow `install`/`join` on a **running** node to apply a changed `config.yaml` and restart the rke2 service. With the default `false`, a config change on a running node fails with a diff instead (see [Re-Runs, Reconcile and Uninstall Behavior](#re-runs-reconcile-and-uninstall-behavior)) |
 | `NTP_SERVERS` | *(empty)* | Optional space/comma-separated NTP server list applied during `install`/`join` (chrony or systemd-timesyncd auto-detected). Empty = the host's time source is left completely untouched. Same semantics as the `ap-tools` variable of the same name |
+| `COREDNS_HOSTS` | *(empty)* | Optional in-cluster DNS pins, `<fqdn>=<ipv4>` (comma or space separated), applied on `install` (and kept on re-runs). Pods resolve these names to the given IP regardless of what the host's DNS says. Use it for split-horizon setups where LAN DNS sends browsers to a TLS-terminating reverse proxy, but workloads must keep reaching the cluster's own ingress — e.g. Dell Automation Platform, whose services call their own portal FQDN and trust only DAP's CA. Empty = no pins |
 | `DEBUG` | `1` | Set to `1` for verbose output, `0` to suppress (failures still print the failed step's captured output) |
 
 ### Optional Component Settings (on by default)
