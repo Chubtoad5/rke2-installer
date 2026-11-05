@@ -1301,7 +1301,8 @@ push_upgrade_images () {
     if [[ ! -f $WORKING_DIR/rke2-utilities/system-upgrade-controller.yaml ]]; then
         curl -sfL https://github.com/rancher/system-upgrade-controller/releases/latest/download/system-upgrade-controller.yaml -o $WORKING_DIR/rke2-utilities/system-upgrade-controller.yaml
     fi
-    local suc_image=$(grep 'rancher/system-upgrade-controller' $WORKING_DIR/rke2-utilities/system-upgrade-controller.yaml | awk '{print $2}')
+    local suc_image
+    suc_image=$(grep 'rancher/system-upgrade-controller' $WORKING_DIR/rke2-utilities/system-upgrade-controller.yaml | awk '{print $2}') || true
 
     # Build upgrade-images.txt
     local upgrade_images_file="$WORKING_DIR/rke2-utilities/images/upgrade-images.txt"
@@ -1341,7 +1342,8 @@ download_upgrade_artifacts () {
     curl -sfL https://github.com/rancher/system-upgrade-controller/releases/latest/download/system-upgrade-controller.yaml -o $WORKING_DIR/rke2-utilities/system-upgrade-controller.yaml
 
     # Extract SUC controller image from manifest and add to utility-images list
-    local suc_image=$(grep 'rancher/system-upgrade-controller' $WORKING_DIR/rke2-utilities/system-upgrade-controller.yaml | awk '{print $2}')
+    local suc_image
+    suc_image=$(grep 'rancher/system-upgrade-controller' $WORKING_DIR/rke2-utilities/system-upgrade-controller.yaml | awk '{print $2}') || true
     echo "  Adding SUC controller image to utility-images list: $suc_image"
     echo "$suc_image" >> $WORKING_DIR/rke2-utilities/images/utility-images.txt
 
@@ -2330,7 +2332,8 @@ push_utility_images () {
         if [[ ! -f $WORKING_DIR/rke2-utilities/system-upgrade-controller.yaml ]]; then
             curl -sfL https://github.com/rancher/system-upgrade-controller/releases/latest/download/system-upgrade-controller.yaml -o $WORKING_DIR/rke2-utilities/system-upgrade-controller.yaml
         fi
-        local suc_image=$(grep 'rancher/system-upgrade-controller' $WORKING_DIR/rke2-utilities/system-upgrade-controller.yaml | awk '{print $2}')
+        local suc_image
+        suc_image=$(grep 'rancher/system-upgrade-controller' $WORKING_DIR/rke2-utilities/system-upgrade-controller.yaml | awk '{print $2}') || true
         echo "$suc_image" >> $WORKING_DIR/rke2-utilities/images/utility-images.txt
         local stable_tag
         stable_tag=$(rke2_upgrade_image_tag)
@@ -2392,7 +2395,8 @@ runtime_outputs () {
     if [[ $INSTALL_MODE -eq 1 && $INSTALL_TYPE == "rke2" ]]; then
         # RK-8: never print the join token itself - point at the token file instead
         # (install logs are routinely captured by callers like ap-tools).
-        local host_ip=$(hostname -I |awk '{print $1}')
+        local host_ip
+        host_ip=$(hostname -I |awk '{print $1}') || true
         echo "  RKE2 Server installed successfully."
         echo "  Verify API is reachable at:"
         echo "    https://$host_ip:6443"
@@ -2609,15 +2613,18 @@ check_namespace_pods_ready() {
   # checks status of pods, deletes any completed pods, and loops until all pods are ready or 120s has elapsed
   # Returns 1 on timeout (matches the ap-tools copy); callers decide fail-hard vs warn-and-continue.
   local timeout_seconds=120
-  local start_time=$(date +%s)
+  local start_time
+  start_time=$(date +%s) || true
   local ns=${1:-"kube-system"}
   while true; do
-    local completed_pods=$(kubectl get pods -n $ns --field-selector status.phase=Succeeded -o name)
+    local completed_pods
+    completed_pods=$(kubectl get pods -n $ns --field-selector status.phase=Succeeded -o name) || true
     echo "  Checking pod status in $ns namespace..."
     for pod_name in $completed_pods; do
       kubectl delete -n $ns "$pod_name" --ignore-not-found
     done
-    local current_pods_not_ready=$(kubectl get pods -n $ns --no-headers | awk '{print $2}' | awk -F'/' '{if ($1 != $2) print $0}' | wc -l)
+    local current_pods_not_ready
+    current_pods_not_ready=$(kubectl get pods -n $ns --no-headers | awk '{print $2}' | awk -F'/' '{if ($1 != $2) print $0}' | wc -l) || true
     local elapsed_time=$(($(date +%s) - start_time))
     if [ "$elapsed_time" -ge "$timeout_seconds" ]; then
       echo "Error: Timeout reached after $timeout_seconds seconds. Not all pods are ready." >&2
@@ -2644,7 +2651,7 @@ run_debug() {
   # captured output is replayed by the trap so failures are never silent.
   RUN_DEBUG_STEP="$*"
   if [ "$DEBUG" = "1" ]; then
-    local GREEN RED NC
+    local GREEN NC
     GREEN=$(tput setaf 2 2>/dev/null || true)
     NC=$(tput sgr0 2>/dev/null || true)
     local CHECKMARK='\u2714'
@@ -2670,6 +2677,11 @@ cleanup () {
 }
 
 # --- Main Script Execution --- #
+
+# When sourced by a test harness, stop here: only the functions above are wanted.
+if [[ "${BASH_SOURCE[0]:-$0}" != "$0" ]]; then
+  return 0
+fi
 
 # Check for root privileges
 if [[ $EUID -ne 0 ]]; then
