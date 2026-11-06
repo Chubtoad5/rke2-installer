@@ -1,5 +1,52 @@
 # Changelog — rke2-installer
 
+## v1.1.0 — 2026-11-06 — Day-2 fixes
+
+The first release with `SCRIPT_VERSION`. Every defect was reproduced on Ubuntu 24.04 clones first (R11 in CI on Leap 16
+and Ubuntu minimal), and each fix has a test that failed before it. Commands, settings and exit codes that callers use
+are unchanged, apart from the additions below and two new refusals that replace failures which used to come later.
+
+### Fixed
+- **A failed re-run emptied the registry CA.** `ca.crt` was truncated before the certificate fetch, so one re-run
+  during a registry outage left a running node with an empty CA, which broke it at its next restart. The fetch now
+  goes to a temporary file, is checked as a certificate, and only then replaces `ca.crt`. A connection that returns
+  no certificate is an error too, where it used to print "Certificate saved".
+- **With `DEBUG=0`, a failed step exited 1 with no reason.** The failure message went into the step's own log, which
+  was then deleted. The console now gets it.
+- **`save` left its marker behind.** `rke2-save-version.txt` stayed in the folder after the working directory was
+  removed, so a later `install` there went air-gapped with no files and failed. `save` now removes it once the
+  archive holds it. An `install`, `join` or `push` that finds the marker with no extracted bundle stops with an
+  error naming the ways out, and the new `RKE2_FORCE_ONLINE=true` ignores a stale marker.
+- **`CNI_TYPE=none` failed, air-gapped and online.** The air-gapped install looked for CNI images `save` never
+  bundled. Online, the install waited 120 s for pods that can't start without a CNI, then exited 1. It now waits for
+  the API server only, and says the node stays `NotReady` until you install a CNI. A bundle saved for another
+  `CNI_TYPE` gives a clear error naming it.
+- **Air-gapped upgrades only worked when the target was that day's stable release.** The bundle held
+  `rke2-upgrade` for stable only, while an air-gapped upgrade has to name a version, so the job sat in
+  `ImagePullBackOff` after `upgrade` exited 0. The bundle now holds the image for its own `RKE2_VERSION` as well.
+  An air-gapped upgrade refuses when the node has no `registries.yaml`, or when the registry's tag list lacks the
+  target, and warns if it can't ask. The README example used `stable`, which the script refuses. It now shows the rule:
+  build the bundle for the target, then upgrade to that version.
+- **Upgrade plans didn't tolerate the control-plane taint,** so with `CONTROL_PLANE_TAINT=true` a server upgrade job
+  stayed `Pending`. The server plan now tolerates it.
+- **The "can't resolve stable" error named a setting that does nothing** (`UPGRADE_VERSION`). It now says to pass a
+  version on the command line.
+- **Floating downloads:** the system-upgrade-controller came from `releases/latest`, and `dnsutils.yaml` from the
+  Kubernetes website's `main` branch. Both are pinned now: `SUC_VERSION` (default `v0.21.0`) and a fixed commit.
+- **`install` didn't check for `iptables`,** so on Leap 16 or Ubuntu minimal the built-in ingress controller stayed in
+  `ContainerCreating` and the install timed out. A server with the ingress on now refuses without it, naming the
+  package. An agent warns.
+
+### Added
+- `join` to a new address for the **same** cluster, with `RKE2_RECONFIGURE=true`. It's allowed only when the new
+  address serves the CA whose hash is in the secure join token (`K10<hash>::…`). Any other server change is refused,
+  as before.
+- `UPGRADE_WAIT=true` (and `UPGRADE_WAIT_TIMEOUT`, default 1800 s): `upgrade` waits until every targeted node runs
+  the new version and is schedulable again, and exits 1 if it doesn't in time. By default, `upgrade` still returns once
+  the plans are applied.
+- Warnings when a re-run leaves out `-registry` on a node that has one configured, and when an agent is given
+  settings only servers read.
+
 ## 2026-10-23 — Minimal CoreDNS override + optional `COREDNS_HOSTS` pins
 
 **Fix:** the generated `rke2-coredns-helmchartconfig.yaml` re-declared the chart's whole `servers:` list. Because Helm

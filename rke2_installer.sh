@@ -5,6 +5,8 @@ set -o errexit
 set -o nounset
 set -o pipefail
 
+SCRIPT_VERSION="1.1.0"
+
 # --- USER DEFINED VARIABLES ---#
 RKE2_VERSION=${RKE2_VERSION:-"v1.34.5+rke2r1"}
 CNI_TYPE=${CNI_TYPE:-"canal"}                                                 # Valid values: calico, canal, cilium, none
@@ -25,6 +27,10 @@ CONTROL_PLANE_TAINT=${CONTROL_PLANE_TAINT:-"false"}                           # 
 RKE2_RECONFIGURE=${RKE2_RECONFIGURE:-"false"}                                 # Set to true to allow 'install'/'join' on a RUNNING node to apply a changed config.yaml and restart the rke2 service
 NTP_SERVERS=${NTP_SERVERS:-}                                                  # Optional space/comma-separated NTP server list applied during 'install'/'join'; empty = leave the OS default time source unchanged
 COREDNS_HOSTS=${COREDNS_HOSTS:-}                                              # Optional in-cluster DNS pins '<fqdn>=<ipv4>[,...]' (split-horizon: pods resolve these names to the given IP regardless of the host's DNS); empty = chart defaults
+RKE2_FORCE_ONLINE=${RKE2_FORCE_ONLINE:-"false"}                               # true = ignore an rke2-save-version.txt in the working directory and stay online
+UPGRADE_WAIT=${UPGRADE_WAIT:-"false"}                                         # upgrade: true = wait until every targeted node runs the new version, and exit 1 if it doesn't in time
+UPGRADE_WAIT_TIMEOUT=${UPGRADE_WAIT_TIMEOUT:-"1800"}                          # upgrade: seconds UPGRADE_WAIT waits
+SUC_VERSION=${SUC_VERSION:-"v0.21.0"}                                         # system-upgrade-controller release, for upgrades and for the bundle (was whatever was latest)
 RKE2_SELINUX_FALLBACK=${RKE2_SELINUX_FALLBACK:-}                              # 'permissive': on SUSE hosts (no upstream rke2-selinux policy exists) switch SELinux to permissive instead of failing pre-cluster; recorded in install state, restored to enforcing on uninstall (P4-08b)
 DEBUG=${DEBUG:-"1"}
 
@@ -95,12 +101,19 @@ ipv4_pattern='^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]
 TMP_DIR=$(mktemp -d /tmp/rke2-installer.XXXXXX)
 RUN_DEBUG_STEP=""
 RUN_DEBUG_LOG="$TMP_DIR/run-debug.log"
+# dnsutils.yaml pinned to a commit, so a bundle has no floating downloads (it came from the website's main branch).
+DNSUTILS_URL="https://raw.githubusercontent.com/kubernetes/website/c299e2887729c844ff2d35cfb7fe1746f25732c8/content/en/examples/admin/dns/dnsutils.yaml"
 
 # EXIT trap: report the failing step (replaying captured output when DEBUG=0) and
 # clean up temp files. Captures the exit code FIRST and re-exits with it so failures
 # are never masked by the trap's own commands.
 on_exit () {
     local rc=$?
+    # With DEBUG=0, run_debug sends a step's output to its log, and a step that exits leaves that redirect in place.
+    # Put the console back first, or the messages below go into the log this trap is about to delete.
+    if [[ -e /dev/fd/7 && -e /dev/fd/8 ]]; then
+        exec 1>&7 2>&8
+    fi
     if [[ $rc -ne 0 && -n "$RUN_DEBUG_STEP" ]]; then
         echo "Error: step '$RUN_DEBUG_STEP' failed with exit code $rc." >&2
         if [[ "$DEBUG" != "1" && -s "$RUN_DEBUG_LOG" ]]; then
@@ -113,6 +126,10 @@ on_exit () {
     rm -f "$base_dir/.rke2-save.tar.gz.partial"
     exit "$rc"
 }
+# The console, kept on spare descriptors for on_exit. Not when a test harness sources this file.
+if [[ "${BASH_SOURCE[0]:-$0}" == "$0" ]]; then
+    exec 7>&1 8>&2
+fi
 trap on_exit EXIT
 
 # --- USAGE FUNCTION --- #
@@ -196,6 +213,7 @@ EOF
 # Displays the parsed and validated arguments
 display_args() {
     echo "### RKE2 Installer Started at $(date) ###"
+    echo "  SCRIPT_VERSION: $SCRIPT_VERSION"
     echo "  AIR_GAPPED_MODE: $AIR_GAPPED_MODE"
     echo "  INSTALL_MODE: $INSTALL_MODE"
     echo "  INSTALL_TYPE: $INSTALL_TYPE"
@@ -235,11 +253,14 @@ run_install () {
       echo "It must match DNS-1123 subdomain format (i.e. lowercase alphanumeric characters, '-' or '.', and must start and end with an alphanumeric character)."
       exit 1
     fi
+    # Before the paths below are resolved, so it compares the values as given.
+    warn_agent_ignored_settings
     # Update non-default install paths
     if [[ $RKE2_DATA == "default" ]]; then RKE2_DATA="/var/lib/rancher/rke2"; else mkdir -p "$RKE2_DATA"; fi
     if [[ $KUBELET_DATA == "default" ]]; then KUBELET_DATA="/var/lib/kubelet"; else mkdir -p "$KUBELET_DATA"; fi
     if [[ $PVC_DATA == "default" ]]; then PVC_DATA="/opt/local-path-provisioner"; else mkdir -p "$PVC_DATA"; fi
     reconcile_existing_install
+    warn_registry_not_passed
     run_debug create_registry_config
     reconcile_registry_config_change
     if [[ $INSTALL_MODE -eq 1 ]]; then
@@ -252,6 +273,9 @@ run_install () {
         run_debug config_host_settings
         run_debug start_rke2_service "$SERVICE_ACTION"
         run_debug apply_utilities
+        if [[ $CNI_NONE == "true" ]]; then
+            echo "  NOTE: CNI_TYPE=none. The node stays NotReady, and its pods Pending, until you install a CNI."
+        fi
     fi
     if [[ $JOIN_MODE -eq 1 && $JOIN_TYPE == "agent" ]]; then
         echo "--- Joining RKE2 agent ---"
@@ -323,9 +347,19 @@ reconcile_existing_install () {
         local existing_server
         existing_server=$(awk -F'https://' '/^server:/ {print $2}' /etc/rancher/rke2/config.yaml | cut -d: -f1)
         if [[ -n "$existing_server" && "$existing_server" != "$JOIN_SERVER_FQDN" ]]; then
-            echo "Error: this node is already joined to cluster server '$existing_server', but a join to"
-            echo "  '$JOIN_SERVER_FQDN' was requested. Joining a different cluster requires 'sudo ./$SCRIPT_NAME uninstall' first."
-            exit 1
+            if [[ "${RKE2_RECONFIGURE,,}" == "true" ]] && same_cluster_server "$JOIN_SERVER_FQDN" "$JOIN_TOKEN"; then
+                echo "  The join server changes from '$existing_server' to '$JOIN_SERVER_FQDN'. Its CA matches the join token,"
+                echo "  so it is the same cluster, and RKE2_RECONFIGURE=true applies the change."
+            else
+                echo "Error: this node is already joined to cluster server '$existing_server', but a join to"
+                echo "  '$JOIN_SERVER_FQDN' was requested. Joining a different cluster requires 'sudo ./$SCRIPT_NAME uninstall' first."
+                if [[ "${RKE2_RECONFIGURE,,}" == "true" ]]; then
+                    echo "  RKE2_RECONFIGURE=true allows a new address for the same cluster only, and that wasn't shown: $SAME_CLUSTER_WHY."
+                else
+                    echo "  If '$JOIN_SERVER_FQDN' is a new address for the same cluster, re-run with RKE2_RECONFIGURE=true."
+                fi
+                exit 1
+            fi
         fi
     fi
     # Config diff: render the requested config and compare with the live one.
@@ -352,6 +386,53 @@ reconcile_existing_install () {
         echo "  or align the environment variables with the running configuration."
         exit 1
     fi
+}
+
+# same_cluster_server <server> <token>: true when the server's CA matches the hash in a secure join token
+# (K10<sha256 of the CA bundle>::...). The supervisor serves that bundle at https://<server>:9345/cacerts.
+SAME_CLUSTER_WHY=""
+same_cluster_server () {
+    local server="$1" token="$2" want got
+    if [[ ! "$token" =~ ^K10([0-9a-f]{64}):: ]]; then
+        SAME_CLUSTER_WHY="the join token has no CA hash (a secure token starts with K10<hash>::)"
+        return 1
+    fi
+    want=${BASH_REMATCH[1]}
+    if ! command -v curl >/dev/null 2>&1; then
+        SAME_CLUSTER_WHY="curl isn't installed, so the server's CA can't be read"
+        return 1
+    fi
+    got=$(curl -sk -m 15 "https://${server}:9345/cacerts" | sha256sum | cut -d' ' -f1) || got=""
+    if [[ "$got" != "$want" ]]; then
+        SAME_CLUSTER_WHY="the CA at https://${server}:9345/cacerts doesn't match the token's"
+        return 1
+    fi
+}
+
+# R8: a run without -registry leaves an existing registry config in place. Say so, naming the registry.
+warn_registry_not_passed () {
+    [[ "$REGISTRY_MODE" -eq 0 && -f /etc/rancher/rke2/registries.yaml ]] || return 0
+    local endpoints
+    endpoints=$(grep -oE 'https://[^"]+' /etc/rancher/rke2/registries.yaml | sort -u | tr '\n' ' ') || endpoints=""
+    echo "  WARNING: no -registry given, but this node pulls through the registry in /etc/rancher/rke2/registries.yaml"
+    echo "  (${endpoints% }). It is left as it is. To stop using it, remove that file and restart the rke2 service."
+}
+
+# R9: on an agent, settings that only servers read are ignored. Say so, rather than seem to apply them.
+warn_agent_ignored_settings () {
+    [[ $JOIN_MODE -eq 1 && $JOIN_TYPE == "agent" ]] || return 0
+    local ignored=() kv key default
+    for kv in CLUSTER_CIDR=10.42.0.0/16 SERVICE_CIDR=10.43.0.0/16 INSTALL_SERVICELB=true INSTALL_LOCAL_PATH_PROVISIONER=true \
+              INSTALL_DNS_UTILITY=true CONTROL_PLANE_TAINT=false COREDNS_HOSTS= PVC_DATA=default; do
+        key=${kv%%=*} default=${kv#*=}
+        # The main flow has already turned PVC_DATA's "default" into its path.
+        [[ $key == PVC_DATA && "${!key:-}" == "/opt/local-path-provisioner" ]] && continue
+        [[ "${!key:-}" == "$default" ]] || ignored+=("$key")
+    done
+    if [[ ${#ignored[@]} -gt 0 ]]; then
+        echo "  WARNING: this agent ignores ${ignored[*]}: only servers read these settings, so set them on the cluster's servers."
+    fi
+    return 0
 }
 
 reconcile_registry_config_change () {
@@ -521,6 +602,12 @@ start_rke2_service () {
         echo "  Waiting for pods to start..."
         sleep 15
         install_kubeconfigs_and_links
+        if [[ $CNI_NONE == "true" ]]; then
+            # No CNI: the node stays NotReady and pods stay Pending until one is installed, by design. Wait for the
+            # API server only.
+            wait_for_api_server
+            return 0
+        fi
         # Hard-fail: the rest of the install (utilities, add-ons) depends on a ready control plane.
         if ! check_namespace_pods_ready; then
             echo "Error: kube-system pods did not become ready within the timeout. The cluster may still be"
@@ -528,6 +615,20 @@ start_rke2_service () {
             exit 1
         fi
     fi
+}
+
+# wait_for_api_server: up to 120 s for the API server to answer, for CNI_TYPE=none, where pods can't be ready yet.
+wait_for_api_server () {
+    local _
+    for _ in $(seq 1 24); do
+        if /var/lib/rancher/rke2/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml get --raw /readyz >/dev/null 2>&1; then
+            echo "  The API server is up."
+            return 0
+        fi
+        sleep 5
+    done
+    echo "Error: the API server didn't answer within 120 seconds. Inspect with 'journalctl -u rke2-server'."
+    exit 1
 }
 
 install_rke2_binaries () {
@@ -538,11 +639,21 @@ install_rke2_binaries () {
         mv $WORKING_DIR/rke2-core-images/images/rke2-images-core.linux-amd64.tar.gz $WORKING_DIR/rke2-binaries
         cp $WORKING_DIR/rke2-binaries/rke2-images-core.linux-amd64.tar.gz $RKE2_DATA/agent/images
         rm -rf $WORKING_DIR/rke2-core-images/images
-        echo "  extracting rke2-cni-images archive..."
-        tar -xzf $WORKING_DIR/rke2-cni-images/rke2-$CNI_TYPE-images.tar.gz -C $WORKING_DIR/rke2-cni-images
-        mv $WORKING_DIR/rke2-cni-images/images/rke2-images-$CNI_TYPE.linux-amd64.tar.gz $WORKING_DIR/rke2-binaries
-        cp $WORKING_DIR/rke2-binaries/rke2-images-$CNI_TYPE.linux-amd64.tar.gz $RKE2_DATA/agent/images
-        rm -rf $WORKING_DIR/rke2-cni-images/images
+        # CNI_TYPE=none has no CNI images: save skips them, so there is nothing to extract.
+        if [[ $CNI_NONE == "false" ]]; then
+            if [[ ! -f $WORKING_DIR/rke2-cni-images/rke2-$CNI_TYPE-images.tar.gz ]]; then
+                local saved_cni
+                saved_cni=$(sed -n 's/^# CNI Type: //p' "$base_dir/rke2-save-version.txt" 2>/dev/null) || saved_cni=""
+                echo "Error: this bundle has no images for CNI_TYPE=$CNI_TYPE${saved_cni:+ (it was saved with CNI_TYPE=$saved_cni)}."
+                echo "  Install with the CNI_TYPE the bundle was saved with, or run 'save' again with CNI_TYPE=$CNI_TYPE."
+                exit 1
+            fi
+            echo "  extracting rke2-cni-images archive..."
+            tar -xzf $WORKING_DIR/rke2-cni-images/rke2-$CNI_TYPE-images.tar.gz -C $WORKING_DIR/rke2-cni-images
+            mv $WORKING_DIR/rke2-cni-images/images/rke2-images-$CNI_TYPE.linux-amd64.tar.gz $WORKING_DIR/rke2-binaries
+            cp $WORKING_DIR/rke2-binaries/rke2-images-$CNI_TYPE.linux-amd64.tar.gz $RKE2_DATA/agent/images
+            rm -rf $WORKING_DIR/rke2-cni-images/images
+        fi
         if [[ $REGISTRY_MODE -eq 0 ]]; then
             echo "  extracting rke2-utilities archive..."
             local utilities_tar
@@ -566,12 +677,18 @@ create_registry_config () {
         echo "  Configuring private registry for RKE2..."
         CERTS_DIR="/etc/rancher/rke2/certs.d/${REG_FQDN}:${REG_PORT}"
         mkdir -p "$CERTS_DIR"
-        if openssl s_client -showcerts -connect "$REGISTRY_INFO" < /dev/null 2>/dev/null | sed -n '/BEGIN CERTIFICATE/,/END CERTIFICATE/p' > "$CERTS_DIR/ca.crt"; then
-            echo "  Certificate saved to $CERTS_DIR."
-        else
-            echo "Error: Failed to retrieve certificate from '$REG_FQDN'. Please ensure the registry is accessible and the port is correct."
+        # Fetch to a temp file and check it: '> ca.crt' would empty a working CA before the fetch result is known,
+        # so one failed re-run during a registry outage broke the node's next restart.
+        local tmp_ca="$TMP_DIR/registry-ca.pem"
+        if ! openssl s_client -showcerts -connect "$REGISTRY_INFO" < /dev/null 2>/dev/null \
+             | sed -n '/BEGIN CERTIFICATE/,/END CERTIFICATE/p' > "$tmp_ca" \
+           || ! openssl x509 -in "$tmp_ca" -noout 2>/dev/null; then
+            echo "Error: Failed to retrieve a certificate from '$REGISTRY_INFO'. Please ensure the registry is accessible and the port is correct."
+            [[ -s "$CERTS_DIR/ca.crt" ]] && echo "  The existing $CERTS_DIR/ca.crt is left unchanged."
             exit 1
         fi
+        install -m 0644 "$tmp_ca" "$CERTS_DIR/ca.crt"
+        echo "  Certificate saved to $CERTS_DIR."
         # registries.yaml carries the registry credentials - write it 0600 (RK-8).
         ( umask 077; cat > /etc/rancher/rke2/registries.yaml <<EOF
 configs:
@@ -1096,8 +1213,9 @@ apply_utilities () {
            sed -i "s|\"paths\":\[\s*\"[^\"]*\"\s*\]|\"paths\":[\"${PVC_DATA}/local-path-provisioner\"]|g" $WORKING_DIR/rke2-utilities/local-path-storage.yaml
         fi    
         kubectl apply -f $WORKING_DIR/rke2-utilities/local-path-storage.yaml
-        # Hard-fail: the storageclass patch below and dependent PVCs need a live provisioner.
-        if ! check_namespace_pods_ready local-path-storage; then
+        # Hard-fail: the storageclass patch below and dependent PVCs need a live provisioner. With CNI_TYPE=none it
+        # can't start until a CNI is installed, so it isn't waited for.
+        if [[ $CNI_NONE == "false" ]] && ! check_namespace_pods_ready local-path-storage; then
             echo "Error: local-path-provisioner pods did not become ready within the timeout."
             echo "  Inspect with 'kubectl get pods -n local-path-storage'."
             exit 1
@@ -1110,11 +1228,11 @@ apply_utilities () {
         if [[ $AIR_GAPPED_MODE -eq 1 ]]; then
             kubectl apply -f $WORKING_DIR/rke2-utilities/dnsutils.yaml
         else
-            kubectl apply -f https://raw.githubusercontent.com/kubernetes/website/main/content/en/examples/admin/dns/dnsutils.yaml
+            kubectl apply -f $DNSUTILS_URL
         fi
         # Warn-and-continue: 'default' may contain unrelated user workloads and dnsutils is a
         # non-critical troubleshooting pod - do not fail the install over it.
-        if ! check_namespace_pods_ready default; then
+        if [[ $CNI_NONE == "false" ]] && ! check_namespace_pods_ready default; then
             echo "  WARNING: pods in the 'default' namespace are not all ready; continuing (dnsutils is non-critical)."
         fi
     fi
@@ -1141,6 +1259,20 @@ run_upgrade () {
         exit 1
     fi
 
+    if [[ $AIR_GAPPED_MODE -eq 1 ]]; then
+        # The upgrade job pulls rancher/rke2-upgrade through the node's registry mirror. With no mirror, or with the
+        # tag missing from the registry, the job would sit in ImagePullBackOff after this script exited 0.
+        if [[ ! -f /etc/rancher/rke2/registries.yaml ]]; then
+            echo "Error: an air-gapped upgrade pulls rancher/rke2-upgrade:${UPGRADE_VERSION//+/-} through the node's registry,"
+            echo "  but this node has no /etc/rancher/rke2/registries.yaml. Install or join it with -registry first."
+            exit 1
+        fi
+        if [[ $REGISTRY_MODE -eq 1 ]]; then
+            check_upgrade_image_in_registry
+        else
+            echo "  WARNING: no -registry given, so the registry can't be checked for rancher/rke2-upgrade:${UPGRADE_VERSION//+/-}."
+        fi
+    fi
     if [[ $REGISTRY_MODE -eq 1 ]]; then
         # Verify registries.yaml exists and contains the specified registry
         if [[ ! -f /etc/rancher/rke2/registries.yaml ]]; then
@@ -1159,8 +1291,73 @@ run_upgrade () {
 
     run_debug install_system_upgrade_controller
     run_debug create_upgrade_plan
+    if [[ ${UPGRADE_WAIT,,} == "true" ]]; then
+        wait_for_upgrade
+    else
+        echo "  The upgrade runs in the background. Follow it with 'kubectl get nodes', or set UPGRADE_WAIT=true to wait for it."
+    fi
 
     echo "--- Finished upgrade workflow"
+}
+
+# check_upgrade_image_in_registry: refuse an air-gapped upgrade whose rke2-upgrade tag isn't in the registry. Any
+# answer other than a tag list (no curl, an auth scheme curl can't use, a network error) is a warning, not a refusal.
+check_upgrade_image_in_registry () {
+    local tag="${UPGRADE_VERSION//+/-}" resp code body pass_esc
+    if ! command -v curl >/dev/null 2>&1; then
+        echo "  WARNING: curl isn't installed, so the registry can't be checked for rancher/rke2-upgrade:$tag."
+        return 0
+    fi
+    local ca="/etc/rancher/rke2/certs.d/${REG_FQDN}:${REG_PORT}/ca.crt" tls=(-k)
+    [[ -s "$ca" ]] && tls=(--cacert "$ca")
+    # The credentials go through curl's config on stdin, not its arguments.
+    pass_esc=${REG_PASS//\\/\\\\}; pass_esc=${pass_esc//\"/\\\"}
+    resp=$(printf 'user = "%s:%s"\n' "$REG_USER" "$pass_esc" \
+           | curl -s -m 20 "${tls[@]}" -K - -w '\n%{http_code}' "https://${REGISTRY_INFO}/v2/rancher/rke2-upgrade/tags/list") || resp=""
+    code=${resp##*$'\n'}; body=${resp%$'\n'*}
+    if [[ "$code" == "200" ]] && grep -q "\"$tag\"" <<< "$body"; then
+        echo "  The registry has rancher/rke2-upgrade:$tag."
+    elif [[ "$code" == "200" || "$code" == "404" ]]; then
+        echo "Error: the registry $REGISTRY_INFO has no rancher/rke2-upgrade:$tag, so the upgrade job couldn't pull it."
+        echo "  On a connected host, build and push a bundle for that version, then upgrade:"
+        echo "  sudo RKE2_VERSION=$UPGRADE_VERSION ./$SCRIPT_NAME save push -registry $REGISTRY_INFO <user> <password>"
+        exit 1
+    else
+        echo "  WARNING: couldn't check the registry for rancher/rke2-upgrade:$tag (HTTP ${code:-no answer}). Going on."
+    fi
+}
+
+# wait_for_upgrade: until every node the upgrade targets reports UPGRADE_VERSION and is schedulable again (the plans
+# cordon each node, and the controller uncordons it when its job is done), or UPGRADE_WAIT_TIMEOUT runs out.
+wait_for_upgrade () {
+    local target="$UPGRADE_VERSION" sel=() list behind deadline
+    if [[ "$target" == "stable" ]]; then
+        target=$(resolve_rke2_stable_version) || target=""
+        if [[ -z "$target" ]]; then
+            echo "  WARNING: UPGRADE_WAIT=true, but the stable channel couldn't be resolved here, so there is no version to wait for."
+            return 0
+        fi
+    fi
+    case "$UPGRADE_TYPE" in
+        server) sel=(-l "node-role.kubernetes.io/control-plane=true") ;;
+        agent)  sel=(-l "!node-role.kubernetes.io/control-plane") ;;
+    esac
+    echo "  Waiting up to ${UPGRADE_WAIT_TIMEOUT}s for the nodes to run $target..."
+    deadline=$((SECONDS + UPGRADE_WAIT_TIMEOUT))
+    while :; do
+        list=$(kubectl get nodes "${sel[@]}" -o jsonpath='{range .items[*]}{.metadata.name}={.status.nodeInfo.kubeletVersion}={.spec.unschedulable}{"\n"}{end}' 2>/dev/null) || list=""
+        behind=$(grep -v "=${target}=\$" <<< "$list" | grep -v '^$' | cut -d= -f1 | tr '\n' ' ') || behind=""
+        if [[ -n "$list" && -z "${behind// /}" ]]; then
+            echo "  Every node the upgrade targets runs $target, and is schedulable again."
+            return 0
+        fi
+        if [[ $SECONDS -ge $deadline ]]; then
+            echo "Error: after ${UPGRADE_WAIT_TIMEOUT}s, these nodes don't run $target yet, or are still cordoned: ${behind:-no nodes listed}."
+            echo "  Inspect with 'kubectl -n system-upgrade get plans,jobs,pods'."
+            exit 1
+        fi
+        sleep 15
+    done
 }
 
 install_system_upgrade_controller () {
@@ -1179,8 +1376,8 @@ install_system_upgrade_controller () {
         fi
         kubectl apply -f $WORKING_DIR/rke2-utilities/crd.yaml -f $WORKING_DIR/rke2-utilities/system-upgrade-controller.yaml
     else
-        curl -sfL https://github.com/rancher/system-upgrade-controller/releases/latest/download/crd.yaml -o $WORKING_DIR/rke2-utilities/crd.yaml
-        curl -sfL https://github.com/rancher/system-upgrade-controller/releases/latest/download/system-upgrade-controller.yaml -o $WORKING_DIR/rke2-utilities/system-upgrade-controller.yaml
+        curl -sfL https://github.com/rancher/system-upgrade-controller/releases/download/$SUC_VERSION/crd.yaml -o $WORKING_DIR/rke2-utilities/crd.yaml
+        curl -sfL https://github.com/rancher/system-upgrade-controller/releases/download/$SUC_VERSION/system-upgrade-controller.yaml -o $WORKING_DIR/rke2-utilities/system-upgrade-controller.yaml
         kubectl apply -f $WORKING_DIR/rke2-utilities/crd.yaml -f $WORKING_DIR/rke2-utilities/system-upgrade-controller.yaml
     fi
 
@@ -1223,6 +1420,10 @@ spec:
       values:
       - "true"
   serviceAccountName: system-upgrade
+  tolerations:
+  - key: node-role.kubernetes.io/control-plane
+    operator: Exists
+    effect: NoSchedule
   upgrade:
     image: rancher/rke2-upgrade
 $version_directive
@@ -1288,7 +1489,8 @@ push_upgrade_images () {
     if [[ "$UPGRADE_VERSION" == "stable" ]]; then
         stable_version=$(resolve_rke2_stable_version)
         if [[ -z "$stable_version" ]]; then
-            echo "Error: could not resolve the RKE2 stable channel from update.rke2.io. Set UPGRADE_VERSION to an explicit version (e.g. v1.34.5+rke2r1) and re-run."
+            echo "Error: could not resolve the RKE2 stable channel from update.rke2.io."
+            echo "  Pass an explicit version instead, e.g.: sudo ./$SCRIPT_NAME upgrade $UPGRADE_TYPE v1.34.5+rke2r1"
             exit 1
         fi
         upgrade_tag=${stable_version//+/-}
@@ -1299,7 +1501,7 @@ push_upgrade_images () {
 
     # Download SUC manifest to extract the controller image
     if [[ ! -f $WORKING_DIR/rke2-utilities/system-upgrade-controller.yaml ]]; then
-        curl -sfL https://github.com/rancher/system-upgrade-controller/releases/latest/download/system-upgrade-controller.yaml -o $WORKING_DIR/rke2-utilities/system-upgrade-controller.yaml
+        curl -sfL https://github.com/rancher/system-upgrade-controller/releases/download/$SUC_VERSION/system-upgrade-controller.yaml -o $WORKING_DIR/rke2-utilities/system-upgrade-controller.yaml
     fi
     local suc_image
     suc_image=$(grep 'rancher/system-upgrade-controller' $WORKING_DIR/rke2-utilities/system-upgrade-controller.yaml | awk '{print $2}') || true
@@ -1338,8 +1540,8 @@ push_upgrade_images () {
 
 download_upgrade_artifacts () {
     echo "  Downloading system-upgrade-controller manifests..."
-    curl -sfL https://github.com/rancher/system-upgrade-controller/releases/latest/download/crd.yaml -o $WORKING_DIR/rke2-utilities/crd.yaml
-    curl -sfL https://github.com/rancher/system-upgrade-controller/releases/latest/download/system-upgrade-controller.yaml -o $WORKING_DIR/rke2-utilities/system-upgrade-controller.yaml
+    curl -sfL https://github.com/rancher/system-upgrade-controller/releases/download/$SUC_VERSION/crd.yaml -o $WORKING_DIR/rke2-utilities/crd.yaml
+    curl -sfL https://github.com/rancher/system-upgrade-controller/releases/download/$SUC_VERSION/system-upgrade-controller.yaml -o $WORKING_DIR/rke2-utilities/system-upgrade-controller.yaml
 
     # Extract SUC controller image from manifest and add to utility-images list
     local suc_image
@@ -1347,7 +1549,10 @@ download_upgrade_artifacts () {
     echo "  Adding SUC controller image to utility-images list: $suc_image"
     echo "$suc_image" >> $WORKING_DIR/rke2-utilities/images/utility-images.txt
 
-    # Resolve stable version for rke2-upgrade image tag
+    # The upgrade image for the version this bundle is built for: an air-gapped upgrade needs an explicit version,
+    # and this is the natural one. The stable release is kept as well, when it can be resolved.
+    echo "  Adding rke2-upgrade image to utility-images list: rancher/rke2-upgrade:${RKE2_VERSION//+/-}"
+    echo "rancher/rke2-upgrade:${RKE2_VERSION//+/-}" >> $WORKING_DIR/rke2-utilities/images/utility-images.txt
     local stable_tag
     stable_tag=$(rke2_upgrade_image_tag)
     echo "  Adding rke2-upgrade image to utility-images list: rancher/rke2-upgrade:$stable_tag"
@@ -2109,7 +2314,7 @@ download_rke2_utilities () {
     fi
     # Download k8s dns utils regardless so docker binaries get saved by image_pull_push.sh
     echo "  Downloading k8s dns utils manifest..."
-    curl -sfL https://raw.githubusercontent.com/kubernetes/website/main/content/en/examples/admin/dns/dnsutils.yaml -o $WORKING_DIR/rke2-utilities/dnsutils.yaml
+    curl -sfL $DNSUTILS_URL -o $WORKING_DIR/rke2-utilities/dnsutils.yaml
     cat $WORKING_DIR/rke2-utilities/dnsutils.yaml |grep image: |cut -d: -f2-3 | awk '{sub(/^ /, ""); print}' >> $WORKING_DIR/rke2-utilities/images/utility-images.txt
     # Add Helm utility images (Longhorn, MetalLB, HAProxy) before saving the archive
     if [[ -f $WORKING_DIR/rke2-utilities/images/utility-images.txt ]]; then
@@ -2260,7 +2465,8 @@ EOF
 create_save_archive () {
     # saves downloaded files into rke2-save.tar.gz
     # NOTE: rke2-save-version.txt doubles as the air-gap sentinel - its presence in the
-    # invocation directory is what flips later runs into AIR_GAPPED_MODE (not the tar.gz).
+    # invocation directory is what flips later runs into AIR_GAPPED_MODE (not the tar.gz). It is written here for the
+    # archive, then removed from this folder.
     cat > $base_dir/rke2-save-version.txt <<EOF
 # RKE2 Installer Save Archive
 # Created: $(date)
@@ -2273,6 +2479,7 @@ create_save_archive () {
 # Fluent Bit Chart Version: $FLUENT_BIT_CHART_VERSION
 # Fluent Bit Version: $FLUENT_BIT_VERSION
 # Upgrade Artifacts: included
+# CNI Type: $CNI_TYPE
 EOF
     generate_bundle_licenses
     echo "  Creating rke2 archive..."
@@ -2284,6 +2491,9 @@ EOF
     tmp_archive="$base_dir/.rke2-save.tar.gz.partial"
     tar -czf "$tmp_archive" -C "$base_dir" rke2-install rke2-save-version.txt LICENSES -C "$script_dir" "$SCRIPT_NAME"
     mv -f "$tmp_archive" "$base_dir/rke2-save.tar.gz"
+    # The copy inside the archive is the sentinel that matters. Left here, it would flip later runs in this folder
+    # into air-gapped mode with no files to use, because cleanup removes the working directory.
+    rm -f "$base_dir/rke2-save-version.txt"
     echo "  Air-gapped archive 'rke2-save.tar.gz' created."
 }
 
@@ -2318,7 +2528,7 @@ push_utility_images () {
             cat $WORKING_DIR/rke2-utilities/local-path-storage.yaml |grep image: |cut -d: -f2-3 | awk '{sub(/^ /, ""); print}' >> $WORKING_DIR/rke2-utilities/images/utility-images.txt
         fi
         if [[ ${INSTALL_DNS_UTILITY,,} == "true" ]]; then
-            curl -sfL https://raw.githubusercontent.com/kubernetes/website/main/content/en/examples/admin/dns/dnsutils.yaml -o $WORKING_DIR/rke2-utilities/dnsutils.yaml
+            curl -sfL $DNSUTILS_URL -o $WORKING_DIR/rke2-utilities/dnsutils.yaml
             cat $WORKING_DIR/rke2-utilities/dnsutils.yaml |grep image: |cut -d: -f2-3 | awk '{sub(/^ /, ""); print}' >> $WORKING_DIR/rke2-utilities/images/utility-images.txt
         fi
         if [[ ${PUSH_SAVE_VELERO,,} == "true" ]]; then
@@ -2330,11 +2540,12 @@ push_utility_images () {
         fi
         # Add upgrade images (SUC controller + rke2-upgrade)
         if [[ ! -f $WORKING_DIR/rke2-utilities/system-upgrade-controller.yaml ]]; then
-            curl -sfL https://github.com/rancher/system-upgrade-controller/releases/latest/download/system-upgrade-controller.yaml -o $WORKING_DIR/rke2-utilities/system-upgrade-controller.yaml
+            curl -sfL https://github.com/rancher/system-upgrade-controller/releases/download/$SUC_VERSION/system-upgrade-controller.yaml -o $WORKING_DIR/rke2-utilities/system-upgrade-controller.yaml
         fi
         local suc_image
         suc_image=$(grep 'rancher/system-upgrade-controller' $WORKING_DIR/rke2-utilities/system-upgrade-controller.yaml | awk '{print $2}') || true
         echo "$suc_image" >> $WORKING_DIR/rke2-utilities/images/utility-images.txt
+        echo "rancher/rke2-upgrade:${RKE2_VERSION//+/-}" >> $WORKING_DIR/rke2-utilities/images/utility-images.txt
         local stable_tag
         stable_tag=$(rke2_upgrade_image_tag)
         echo "rancher/rke2-upgrade:$stable_tag" >> $WORKING_DIR/rke2-utilities/images/utility-images.txt
@@ -2595,6 +2806,16 @@ preflight_checks () {
     fi
     if [[ $REGISTRY_MODE -eq 1 ]]; then
         cmds="$cmds openssl"
+    fi
+    # The built-in ingress controller uses hostPorts, which the CNI's portmap plugin sets up with the host's iptables.
+    # Without it the controller stays in ContainerCreating and the install times out. An agent can't tell whether its
+    # cluster runs the ingress, so it only warns.
+    if [[ ( $INSTALL_MODE -eq 1 && $INSTALL_TYPE == "rke2" ) || $JOIN_MODE -eq 1 ]]; then
+        if [[ ${INSTALL_INGRESS,,} == "true" && $JOIN_TYPE != "agent" ]]; then
+            cmds="$cmds iptables"
+        elif ! command -v iptables >/dev/null 2>&1; then
+            echo "  WARNING: iptables isn't installed. Pods that use a hostPort, such as the built-in ingress controller, can't start on this node without it."
+        fi
     fi
     # shellcheck disable=SC2086
     require_cmds $cmds
@@ -2965,7 +3186,22 @@ if [[ $CNI_TYPE == "none" ]]; then
     CNI_NONE="true"
 fi
 # Verify AIR_GAPPED_MODE based on rke-save.tar.gz file presence
-[[ ! -f $base_dir/rke2-save-version.txt ]] || AIR_GAPPED_MODE=1
+if [[ -f $base_dir/rke2-save-version.txt ]]; then
+    if [[ ${RKE2_FORCE_ONLINE,,} == "true" ]]; then
+        echo "NOTE: rke2-save-version.txt is in $base_dir, but RKE2_FORCE_ONLINE=true: staying online."
+    else
+        AIR_GAPPED_MODE=1
+        # An install, join or push from a bundle needs the bundle's files. Without them, say so now, instead of
+        # failing later on a missing archive. uninstall and a rebuilding save don't need them.
+        if [[ ( $INSTALL_MODE -eq 1 && $INSTALL_TYPE == "rke2" ) || $JOIN_MODE -eq 1 || ( $PUSH_MODE -eq 1 && $SAVE_MODE -eq 0 ) ]] \
+           && [[ ! -f $WORKING_DIR/rke2-binaries/rke2.linux-amd64.tar.gz ]]; then
+            echo "Error: $base_dir has rke2-save-version.txt, so this run is air-gapped, but there is no extracted bundle"
+            echo "  in $WORKING_DIR. Extract rke2-save.tar.gz here again, delete the stale rke2-save-version.txt,"
+            echo "  or set RKE2_FORCE_ONLINE=true to install online."
+            exit 1
+        fi
+    fi
+fi
 
 os_check
 preflight_checks

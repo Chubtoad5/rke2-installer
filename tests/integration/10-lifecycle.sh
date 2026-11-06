@@ -9,9 +9,22 @@ W=$(mktemp -d); cd "$W" || exit 1
 cp "$REPO/rke2_installer.sh" .; chmod +x rke2_installer.sh
 export INSTALL_LOCAL_PATH_PROVISIONER=false INSTALL_DNS_UTILITY=false DEBUG=0
 K="/var/lib/rancher/rke2/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml"
+. /etc/os-release
+# Leap 16 and Ubuntu minimal have no iptables, which the built-in ingress needs. The installer should refuse before
+# installing anything, and name it. This comes first: it refuses before the SELinux check below can.
+if ! command -v iptables >/dev/null 2>&1; then
+  if ./rke2_installer.sh install >"$W/o" 2>&1; then bad "installed with no iptables"
+  elif grep -q "iptables" "$W/o" && [ ! -e /etc/rancher/rke2/config.yaml ]; then ok "refuses with no iptables, before installing anything, and names it"
+  else bad "the refusal doesn't name iptables, or something was installed"; tail -8 "$W/o" | cut -c1-170; fi
+  case "$ID" in
+    ubuntu|debian) DEBIAN_FRONTEND=noninteractive apt-get install -y iptables >/dev/null 2>&1 ;;
+    sles|opensuse-leap) zypper --non-interactive install -y iptables >/dev/null 2>&1 ;;
+    *) dnf install -y iptables >/dev/null 2>&1 ;;
+  esac
+  command -v iptables >/dev/null 2>&1 && ok "iptables installed" || bad "couldn't install iptables"
+fi
 # SUSE has no rke2-selinux policy. On an enforcing host the installer should refuse, and say to opt in to permissive.
 enforcing=0
-. /etc/os-release
 if [[ "$ID" =~ ^(sles|opensuse-leap)$ && "$(getenforce 2>/dev/null)" == Enforcing ]]; then
   enforcing=1
   if DEBUG=1 ./rke2_installer.sh install >"$W/o" 2>&1; then bad "installed with no SELinux policy"

@@ -34,3 +34,10 @@ render() { # render with the given settings, for a first install
   render
   ! grep -q 'rke2-ingress-nginx' "$out"
 }
+@test "no download URL for dnsutils.yaml or the upgrade controller names a branch or 'latest'" {
+  ! grep -nE 'kubernetes/website/(main|master)/' "$SCRIPT"
+  ! grep -n 'system-upgrade-controller/releases/latest' "$SCRIPT"
+}
+@test "SCRIPT_VERSION is set" {
+  grep -qE '^SCRIPT_VERSION="[0-9]+\.[0-9]+\.[0-9]+"' "$SCRIPT"
+}
