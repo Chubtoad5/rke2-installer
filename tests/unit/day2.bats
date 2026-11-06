@@ -133,6 +133,15 @@ airgap_setup() {
   grep -qx 'rancher/rke2-upgrade:v1.34.5-rke2r1' "$T/rke2-utilities/images/utility-images.txt"
 }
 
+@test "R4: the bundle holds the kubectl image the upgrade jobs cordon with" {
+  WORKING_DIR=$T; mkdir -p "$T/rke2-utilities/images"
+  RKE2_VERSION=v1.34.5+rke2r1
+  stub curl 'printf "  SYSTEM_UPGRADE_JOB_KUBECTL_IMAGE: rancher/kubectl:v1.30.3\n        image: rancher/system-upgrade-controller:v0.21.0\n" > "${@: -1}"'
+  resolve_rke2_stable_version() { :; }
+  download_upgrade_artifacts 2>/dev/null
+  grep -qx 'rancher/kubectl:v1.30.3' "$T/rke2-utilities/images/utility-images.txt"
+}
+
 @test "R4: system-upgrade-controller comes from SUC_VERSION, not latest" {
   WORKING_DIR=$T; mkdir -p "$T/rke2-utilities/images"
   SUC_VERSION=v0.99.0

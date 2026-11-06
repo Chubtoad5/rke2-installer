@@ -1525,6 +1525,7 @@ push_upgrade_images () {
     local upgrade_images_file="$WORKING_DIR/rke2-utilities/images/upgrade-images.txt"
     echo "rancher/rke2-upgrade:${upgrade_tag}" > "$upgrade_images_file"
     echo "$suc_image" >> "$upgrade_images_file"
+    suc_job_kubectl_image "$WORKING_DIR/rke2-utilities/system-upgrade-controller.yaml" >> "$upgrade_images_file" || true
 
     echo "--- Printing upgrade-images.txt"
     cat "$upgrade_images_file"
@@ -1553,6 +1554,13 @@ push_upgrade_images () {
     fi
 }
 
+# suc_job_kubectl_image <manifest>: the kubectl image the controller's jobs use to cordon and drain a node
+# (SYSTEM_UPGRADE_JOB_KUBECTL_IMAGE). The plans cordon, and the jobs pull with policy Always, so an air-gapped
+# upgrade needs it in the registry as much as the controller's own image.
+suc_job_kubectl_image () {
+    sed -n 's/^ *SYSTEM_UPGRADE_JOB_KUBECTL_IMAGE: *"\{0,1\}\([^" ]*\)"\{0,1\} *$/\1/p' "$1" | head -1
+}
+
 download_upgrade_artifacts () {
     echo "  Downloading system-upgrade-controller manifests..."
     curl -sfL https://github.com/rancher/system-upgrade-controller/releases/download/$SUC_VERSION/crd.yaml -o $WORKING_DIR/rke2-utilities/crd.yaml
@@ -1563,6 +1571,12 @@ download_upgrade_artifacts () {
     suc_image=$(grep 'rancher/system-upgrade-controller' $WORKING_DIR/rke2-utilities/system-upgrade-controller.yaml | awk '{print $2}') || true
     echo "  Adding SUC controller image to utility-images list: $suc_image"
     echo "$suc_image" >> $WORKING_DIR/rke2-utilities/images/utility-images.txt
+    local kubectl_image
+    kubectl_image=$(suc_job_kubectl_image "$WORKING_DIR/rke2-utilities/system-upgrade-controller.yaml") || kubectl_image=""
+    if [[ -n "$kubectl_image" ]]; then
+        echo "  Adding the upgrade jobs' kubectl image to utility-images list: $kubectl_image"
+        echo "$kubectl_image" >> $WORKING_DIR/rke2-utilities/images/utility-images.txt
+    fi
 
     # The upgrade image for the version this bundle is built for: an air-gapped upgrade needs an explicit version,
     # and this is the natural one. The stable release is kept as well, when it can be resolved.
@@ -2560,6 +2574,7 @@ push_utility_images () {
         local suc_image
         suc_image=$(grep 'rancher/system-upgrade-controller' $WORKING_DIR/rke2-utilities/system-upgrade-controller.yaml | awk '{print $2}') || true
         echo "$suc_image" >> $WORKING_DIR/rke2-utilities/images/utility-images.txt
+        suc_job_kubectl_image "$WORKING_DIR/rke2-utilities/system-upgrade-controller.yaml" >> $WORKING_DIR/rke2-utilities/images/utility-images.txt || true
         echo "rancher/rke2-upgrade:${RKE2_VERSION//+/-}" >> $WORKING_DIR/rke2-utilities/images/utility-images.txt
         local stable_tag
         stable_tag=$(rke2_upgrade_image_tag)

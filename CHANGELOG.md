@@ -26,7 +26,9 @@ tag missing from the registry.
   `CNI_TYPE` gives a clear error naming it.
 - **Air-gapped upgrades only worked when the target was that day's stable release.** The bundle held
   `rke2-upgrade` for stable only, while an air-gapped upgrade has to name a version, so the job sat in
-  `ImagePullBackOff` after `upgrade` exited 0. The bundle now holds the image for its own `RKE2_VERSION` as well.
+  `ImagePullBackOff` after `upgrade` exited 0. The bundle now holds the image for its own `RKE2_VERSION` as well,
+  and the `kubectl` image the controller's jobs cordon nodes with (`rancher/kubectl`, from the controller's own
+  config), which was never bundled or pushed.
   An air-gapped upgrade refuses when the node has no `registries.yaml`, or when the registry's tag list lacks the
   target, and warns if it can't ask. The README example used `stable`, which the script refuses. It now shows the rule:
   build the bundle for the target, then upgrade to that version.
