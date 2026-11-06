@@ -412,8 +412,8 @@ same_cluster_server () {
         SAME_CLUSTER_WHY="curl isn't installed, so the new server's CA can't be read"
         return 1
     fi
-    # To a file, not a command substitution, which would drop a trailing newline and change the hash.
-    if ! curl -sk -m 15 -o "$ca" "https://${server}:9345/cacerts" || [[ ! -s "$ca" ]]; then
+    # -f: an HTTP error page isn't a CA, so it counts as unreadable rather than as another cluster's.
+    if ! curl -sfk -m 15 -o "$ca" "https://${server}:9345/cacerts" || [[ ! -s "$ca" ]]; then
         SAME_CLUSTER_WHY="https://${server}:9345/cacerts couldn't be read"
         return 1
     fi

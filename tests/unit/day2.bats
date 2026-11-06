@@ -316,6 +316,12 @@ serves() { # serves <hash>: the new server's /cacerts body, and sha256sum report
   [[ "$SAME_CLUSTER_WHY" == *"current join token has no CA hash"* ]]
 }
 
+@test "RC1: the CA is fetched with -f, so an HTTP error page counts as unreadable" {
+  serves "$A"
+  same_cluster_server cp-new.x.lab "K10${A}::server:secret" "K10${A}::server:secret"
+  called "curl -sfk"
+}
+
 @test "RC1: an unreachable server is reported as unreachable" {
   stub curl 'exit 7'
   ! same_cluster_server cp-new.x.lab "K10${A}::server:secret" "K10${A}::server:secret"
