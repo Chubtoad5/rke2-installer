@@ -305,7 +305,8 @@ reconcile_existing_install () {
     #   - fresh host                          -> normal install (no-op here)
     #   - other role's service active         -> hard error (uninstall first)
     #   - running version != RKE2_VERSION     -> hard error directing to 'upgrade'
-    #   - join to a different cluster server  -> hard error (uninstall first)
+    #   - join to a different cluster server  -> hard error (uninstall first), unless RKE2_RECONFIGURE=true and the
+    #                                            new address is proven to serve the cluster this node is in
     #   - rendered config == live config      -> skip core install, re-run idempotent post-steps
     #   - rendered config != live config      -> apply + service restart, but ONLY when
     #                                            RKE2_RECONFIGURE=true; otherwise a clear error
@@ -342,14 +343,16 @@ reconcile_existing_install () {
         echo "  Use: sudo ./$SCRIPT_NAME upgrade [server|agent|both] $RKE2_VERSION"
         exit 1
     fi
-    # Foreign-cluster guard: joining a different cluster requires uninstall, always.
+    # Foreign-cluster guard: joining a different cluster requires uninstall, always. A new address for the SAME
+    # cluster is allowed under RKE2_RECONFIGURE=true, proven against the token this node already holds.
     if [[ $JOIN_MODE -eq 1 && -f /etc/rancher/rke2/config.yaml ]]; then
-        local existing_server
+        local existing_server existing_token
         existing_server=$(awk -F'https://' '/^server:/ {print $2}' /etc/rancher/rke2/config.yaml | cut -d: -f1)
+        existing_token=$(sed -n 's/^token: *"\{0,1\}\([^"]*\)"\{0,1\} *$/\1/p' /etc/rancher/rke2/config.yaml | head -1) || existing_token=""
         if [[ -n "$existing_server" && "$existing_server" != "$JOIN_SERVER_FQDN" ]]; then
-            if [[ "${RKE2_RECONFIGURE,,}" == "true" ]] && same_cluster_server "$JOIN_SERVER_FQDN" "$JOIN_TOKEN"; then
-                echo "  The join server changes from '$existing_server' to '$JOIN_SERVER_FQDN'. Its CA matches the join token,"
-                echo "  so it is the same cluster, and RKE2_RECONFIGURE=true applies the change."
+            if [[ "${RKE2_RECONFIGURE,,}" == "true" ]] && same_cluster_server "$JOIN_SERVER_FQDN" "$JOIN_TOKEN" "$existing_token"; then
+                echo "  The join server changes from '$existing_server' to '$JOIN_SERVER_FQDN'. It serves the CA of the cluster"
+                echo "  this node is in, so it is the same cluster, and RKE2_RECONFIGURE=true applies the change."
             else
                 echo "Error: this node is already joined to cluster server '$existing_server', but a join to"
                 echo "  '$JOIN_SERVER_FQDN' was requested. Joining a different cluster requires 'sudo ./$SCRIPT_NAME uninstall' first."
@@ -388,23 +391,35 @@ reconcile_existing_install () {
     fi
 }
 
-# same_cluster_server <server> <token>: true when the server's CA matches the hash in a secure join token
-# (K10<sha256 of the CA bundle>::...). The supervisor serves that bundle at https://<server>:9345/cacerts.
+# same_cluster_server <new server> <new token> <the node's current token>: true when the new server belongs to the
+# cluster this node is ALREADY in. A secure token is K10<sha256 of the cluster CA bundle>::..., and the supervisor
+# serves that bundle at https://<server>:9345/cacerts. The proof is against the current token: a new server and a new
+# token come from the same source, so checking them only against each other would accept a wrong pair, another
+# cluster's.
 SAME_CLUSTER_WHY=""
 same_cluster_server () {
-    local server="$1" token="$2" want got
-    if [[ ! "$token" =~ ^K10([0-9a-f]{64}):: ]]; then
-        SAME_CLUSTER_WHY="the join token has no CA hash (a secure token starts with K10<hash>::)"
+    local server="$1" new_token="$2" current_token="$3" want got ca="$TMP_DIR/new-server-cacerts"
+    if [[ ! "$current_token" =~ ^K10([0-9a-f]{64}):: ]]; then
+        SAME_CLUSTER_WHY="this node's current join token has no CA hash, so its cluster can't be proven"
         return 1
     fi
     want=${BASH_REMATCH[1]}
-    if ! command -v curl >/dev/null 2>&1; then
-        SAME_CLUSTER_WHY="curl isn't installed, so the server's CA can't be read"
+    if [[ "$new_token" =~ ^K10([0-9a-f]{64}):: && "${BASH_REMATCH[1]}" != "$want" ]]; then
+        SAME_CLUSTER_WHY="the new join token is for a different cluster: its CA hash differs from this node's current token"
         return 1
     fi
-    got=$(curl -sk -m 15 "https://${server}:9345/cacerts" | sha256sum | cut -d' ' -f1) || got=""
+    if ! command -v curl >/dev/null 2>&1; then
+        SAME_CLUSTER_WHY="curl isn't installed, so the new server's CA can't be read"
+        return 1
+    fi
+    # To a file, not a command substitution, which would drop a trailing newline and change the hash.
+    if ! curl -sk -m 15 -o "$ca" "https://${server}:9345/cacerts" || [[ ! -s "$ca" ]]; then
+        SAME_CLUSTER_WHY="https://${server}:9345/cacerts couldn't be read"
+        return 1
+    fi
+    got=$(sha256sum "$ca" | cut -d' ' -f1) || got=""
     if [[ "$got" != "$want" ]]; then
-        SAME_CLUSTER_WHY="the CA at https://${server}:9345/cacerts doesn't match the token's"
+        SAME_CLUSTER_WHY="the CA at https://${server}:9345/cacerts is another cluster's, not the one this node is in"
         return 1
     fi
 }

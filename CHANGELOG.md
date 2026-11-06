@@ -4,7 +4,10 @@
 
 The first release with `SCRIPT_VERSION`. Every defect was reproduced on Ubuntu 24.04 clones first (R11 in CI on Leap 16
 and Ubuntu minimal), and each fix has a test that failed before it. Commands, settings and exit codes that callers use
-are unchanged, apart from the additions below and two new refusals that replace failures which used to come later.
+are unchanged, apart from the additions below and some new refusals. Each replaces a failure that used to come later,
+or a silent `ImagePullBackOff`: no `iptables` on a server with the built-in ingress; a save marker with no extracted
+bundle; a bundle without this `CNI_TYPE`'s images; an air-gapped upgrade with no `registries.yaml`, or with the target
+tag missing from the registry.
 
 ### Fixed
 - **A failed re-run emptied the registry CA.** `ca.crt` was truncated before the certificate fetch, so one re-run
@@ -39,8 +42,9 @@ are unchanged, apart from the additions below and two new refusals that replace 
 
 ### Added
 - `join` to a new address for the **same** cluster, with `RKE2_RECONFIGURE=true`. It's allowed only when the new
-  address serves the CA whose hash is in the secure join token (`K10<hash>::…`). Any other server change is refused,
-  as before.
+  address serves the CA of the cluster the node is already in: its hash has to match the one in the node's current
+  secure join token (`K10<hash>::…`), and a new token has to carry the same hash. Another cluster's server and token,
+  passed together, are refused. So is any other server change, as before.
 - `UPGRADE_WAIT=true` (and `UPGRADE_WAIT_TIMEOUT`, default 1800 s): `upgrade` waits until every targeted node runs
   the new version and is schedulable again, and exits 1 if it doesn't in time. By default, `upgrade` still returns once
   the plans are applied.

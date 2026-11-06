@@ -256,8 +256,8 @@ reg_check() { # reg_check <curl output: body then a code line>
 @test "R11: with the ingress off, or on an agent, a missing iptables only warns" {
   INSTALL_MODE=1 INSTALL_TYPE=rke2 JOIN_MODE=0 JOIN_TYPE="" INSTALL_INGRESS=false AIR_GAPPED_MODE=1 REGISTRY_MODE=0
   require_cmds() { echo "REQUIRE $*"; }
-  PATH=$STUB_DIR:/nonexistent
-  hash -r
+  # This host may have iptables: hide it from the lookup only. Shrinking PATH would break bats' own cleanup.
+  command() { if [[ "$1" == -v && "$2" == iptables ]]; then return 1; fi; builtin command "$@"; }
   run preflight_checks
   [[ "$output" == *"WARNING: iptables isn't installed"* ]]
   [[ "$(grep REQUIRE <<< "$output")" != *iptables* ]]
@@ -274,28 +274,43 @@ reg_check() { # reg_check <curl output: body then a code line>
   [[ "$output" != *iptables* ]]
 }
 
-# --- RC1: a server change, only for the same cluster ---
+# --- RC1: a server change, only for the cluster the node is already in ---
 
-HASH=1b9e9bb201773f85a6213deb818a7a8717599100b4e30030a1286cb1e2dcb4e0
-@test "RC1: a server whose CA matches the token's hash is the same cluster" {
-  stub curl 'printf "ca-bundle"'
-  stub sha256sum 'echo "'"$HASH"'  -"'
-  same_cluster_server cp.x.lab "K10${HASH}::server:secret"
-  called "https://cp.x.lab:9345/cacerts"
+A=1b9e9bb201773f85a6213deb818a7a8717599100b4e30030a1286cb1e2dcb4e0
+B=2c0f0cc312884f96b7324efc929b8b9828600211c5f41141b2397dc2f3edc5f1
+serves() { # serves <hash>: the new server's /cacerts body, and sha256sum reporting that hash
+  stub curl 'while [ $# -gt 0 ]; do [ "$1" = -o ] && { printf "ca-bundle" > "$2"; shift; }; shift; done'
+  stub sha256sum 'echo "'"$1"'  file"'
 }
 
-@test "RC1: a different CA, or a token with no hash, is refused with the reason" {
-  stub curl 'printf "other"'
-  stub sha256sum 'echo "0000000000000000000000000000000000000000000000000000000000000000  -"'
-  ! same_cluster_server cp.x.lab "K10${HASH}::server:secret"
-  [[ "$SAME_CLUSTER_WHY" == *"doesn't match the token"* ]]
-  ! same_cluster_server cp.x.lab "plain-shared-secret"
-  [[ "$SAME_CLUSTER_WHY" == *"no CA hash"* ]]
+@test "RC1: a new address serving the CA of the node's current cluster is the same cluster" {
+  serves "$A"
+  same_cluster_server cp-new.x.lab "K10${A}::server:secret" "K10${A}::server:secret"
+  called "https://cp-new.x.lab:9345/cacerts"
 }
 
-@test "RC1: an unreachable server is refused" {
+@test "RC1: another cluster's real server and token, passed together, are refused" {
+  serves "$B"
+  ! same_cluster_server cp-b.x.lab "K10${B}::server:other" "K10${A}::server:secret"
+  [[ "$SAME_CLUSTER_WHY" == *"different cluster"* ]]
+}
+
+@test "RC1: a server with another cluster's CA is refused, even with the node's own token" {
+  serves "$B"
+  ! same_cluster_server cp-b.x.lab "K10${A}::server:secret" "K10${A}::server:secret"
+  [[ "$SAME_CLUSTER_WHY" == *"another cluster's"* ]]
+}
+
+@test "RC1: a current token with no CA hash can't prove the cluster" {
+  serves "$A"
+  ! same_cluster_server cp-new.x.lab "K10${A}::server:secret" "plain-shared-secret"
+  [[ "$SAME_CLUSTER_WHY" == *"current join token has no CA hash"* ]]
+}
+
+@test "RC1: an unreachable server is reported as unreachable" {
   stub curl 'exit 7'
-  ! same_cluster_server cp.x.lab "K10${HASH}::server:secret"
+  ! same_cluster_server cp-new.x.lab "K10${A}::server:secret" "K10${A}::server:secret"
+  [[ "$SAME_CLUSTER_WHY" == *"couldn't be read"* ]]
 }
 
 # --- RC2 ---

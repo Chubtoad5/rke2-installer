@@ -11,7 +11,8 @@ W=$(mktemp -d -p /var/tmp); cd "$W" || exit 1
 cp "$REPO/rke2_installer.sh" .; chmod +x rke2_installer.sh
 IP=${CI_CLONE_IP:-$(hostname -I | awk '{print $1}')}
 export INSTALL_LOCAL_PATH_PROVISIONER=false INSTALL_DNS_UTILITY=false DEBUG=0
-OLD=v1.33.4+rke2r1 NEW=v1.34.5+rke2r1
+# Rancher's EL10 packages start at 1.33.7 and 1.34.3, so OLD has to be at least that for Rocky 10.
+OLD=v1.33.13+rke2r1 NEW=v1.34.5+rke2r1
 K="/var/lib/rancher/rke2/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml"
 show() { tail -8 "$W/o" | cut -c1-170; }
 ready() { for _ in $(seq 1 60); do $K get nodes --no-headers 2>/dev/null | grep -qw Ready && return 0; sleep 5; done; return 1; }
