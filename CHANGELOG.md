@@ -42,6 +42,12 @@ tag missing from the registry.
   `ContainerCreating` and the install timed out. A server with the ingress on now refuses without it, naming the
   package. An agent warns.
 
+### Not covered
+- **An air-gapped upgrade end to end, with egress cut,** hasn't been run. The bundle and push lists, and the
+  pre-checks, were tested on their own.
+- **A cluster that already runs system-upgrade-controller** keeps it: `upgrade` doesn't replace an installed one, so a
+  controller installed earlier from `latest` keeps its own `kubectl` image tag, which a new bundle may not hold.
+
 ### Added
 - `join` to a new address for the **same** cluster, with `RKE2_RECONFIGURE=true`. It's allowed only when the new
   address serves the CA of the cluster the node is already in: its hash has to match the one in the node's current
