@@ -5,7 +5,7 @@ set -o errexit
 set -o nounset
 set -o pipefail
 
-SCRIPT_VERSION="1.1.0"
+SCRIPT_VERSION="1.2.0"
 
 # --- USER DEFINED VARIABLES ---#
 RKE2_VERSION=${RKE2_VERSION:-"v1.34.5+rke2r1"}
@@ -30,6 +30,7 @@ COREDNS_HOSTS=${COREDNS_HOSTS:-}                                              # 
 RKE2_FORCE_ONLINE=${RKE2_FORCE_ONLINE:-"false"}                               # true = ignore an rke2-save-version.txt in the working directory and stay online
 UPGRADE_WAIT=${UPGRADE_WAIT:-"false"}                                         # upgrade: true = wait until every targeted node runs the new version, and exit 1 if it doesn't in time
 UPGRADE_WAIT_TIMEOUT=${UPGRADE_WAIT_TIMEOUT:-"1800"}                          # upgrade: seconds UPGRADE_WAIT waits
+POD_WAIT_TIMEOUT=${POD_WAIT_TIMEOUT:-"300"}                                   # seconds install, join and the add-ons wait for their pods to be ready; raise it for a slow host or network
 SUC_VERSION=${SUC_VERSION:-"v0.21.0"}                                         # system-upgrade-controller release, for upgrades and for the bundle (was whatever was latest)
 RKE2_SELINUX_FALLBACK=${RKE2_SELINUX_FALLBACK:-}                              # 'permissive': on SUSE hosts (no upstream rke2-selinux policy exists) switch SELinux to permissive instead of failing pre-cluster; recorded in install state, restored to enforcing on uninstall (P4-08b)
 DEBUG=${DEBUG:-"1"}
@@ -625,8 +626,9 @@ start_rke2_service () {
         fi
         # Hard-fail: the rest of the install (utilities, add-ons) depends on a ready control plane.
         if ! check_namespace_pods_ready; then
-            echo "Error: kube-system pods did not become ready within the timeout. The cluster may still be"
-            echo "  converging - inspect with 'kubectl get pods -A' and re-run '$SCRIPT_NAME install' once it settles."
+            echo "Error: kube-system pods weren't ready after ${POD_WAIT_TIMEOUT}s: ${NOT_READY_PODS}."
+            echo "  The cluster may still be converging - inspect with 'kubectl get pods -A' and re-run"
+            echo "  '$SCRIPT_NAME install' once it settles. On a slow host or network, set POD_WAIT_TIMEOUT higher."
             exit 1
         fi
     fi
@@ -2830,6 +2832,10 @@ require_cmds () {
 }
 
 preflight_checks () {
+    if [[ ! "$POD_WAIT_TIMEOUT" =~ ^[0-9]+$ || "$POD_WAIT_TIMEOUT" -lt 1 ]]; then
+        echo "Error: POD_WAIT_TIMEOUT must be a whole number of seconds, 1 or more, not '$POD_WAIT_TIMEOUT'."
+        exit 1
+    fi
     local cmds="tar gzip awk sed grep"
     if [[ $AIR_GAPPED_MODE -eq 0 ]]; then
         cmds="$cmds curl"
@@ -2860,32 +2866,49 @@ image_pull_push_check () {
 }
 
 check_namespace_pods_ready() {
-  # Run this function as 'check_namespace_pods_ready $namespace', no argument will default to kube-system
-  # checks status of pods, deletes any completed pods, and loops until all pods are ready or 120s has elapsed
-  # Returns 1 on timeout (matches the ap-tools copy); callers decide fail-hard vs warn-and-continue.
-  local timeout_seconds=120
-  local start_time
+  # check_namespace_pods_ready [namespace]: kube-system by default. Deletes completed pods, then waits up to
+  # POD_WAIT_TIMEOUT seconds for every pod to be ready. Readiness is checked before the deadline, so a namespace that
+  # is ready at the deadline passes. On a timeout it names the pods that aren't ready in NOT_READY_PODS and on the
+  # console, and returns 1 (matches the ap-tools copy); callers decide fail-hard vs warn-and-continue.
+  local ns=${1:-"kube-system"} timeout_seconds=$POD_WAIT_TIMEOUT
+  local start_time elapsed_time completed_pods pod_name pods not_ready list_error
+  NOT_READY_PODS=""
   start_time=$(date +%s) || true
-  local ns=${1:-"kube-system"}
   while true; do
-    local completed_pods
-    completed_pods=$(kubectl get pods -n $ns --field-selector status.phase=Succeeded -o name) || true
+    completed_pods=$(kubectl get pods -n "$ns" --field-selector status.phase=Succeeded -o name 2>/dev/null) || true
     echo "  Checking pod status in $ns namespace..."
     for pod_name in $completed_pods; do
-      kubectl delete -n $ns "$pod_name" --ignore-not-found
+      kubectl delete -n "$ns" "$pod_name" --ignore-not-found
     done
-    local current_pods_not_ready
-    current_pods_not_ready=$(kubectl get pods -n $ns --no-headers | awk '{print $2}' | awk -F'/' '{if ($1 != $2) print $0}' | wc -l) || true
-    local elapsed_time=$(($(date +%s) - start_time))
-    if [ "$elapsed_time" -ge "$timeout_seconds" ]; then
-      echo "Error: Timeout reached after $timeout_seconds seconds. Not all pods are ready." >&2
-      kubectl get pods -A
-      return 1
+    # A failed listing isn't a ready namespace
+    list_error=""
+    if pods=$(kubectl get pods -n "$ns" --no-headers 2>&1); then
+      not_ready=$(awk '{split($2, r, "/"); if (r[1] != r[2]) print}' <<< "$pods") || true
+    else
+      list_error="the pods in $ns can't be listed: ${pods//$'\n'/ }"
+      not_ready=$list_error
     fi
-    if [ "$current_pods_not_ready" -eq 0 ]; then
+    if [[ -z "$not_ready" ]]; then
       break
     fi
-    echo "  - Wating on $current_pods_not_ready pods..."
+    elapsed_time=$(($(date +%s) - start_time))
+    if [ "$elapsed_time" -ge "$timeout_seconds" ]; then
+      kubectl get pods -A || true
+      if [[ -n "$list_error" ]]; then
+        NOT_READY_PODS="($list_error)"
+        echo "Error: after ${timeout_seconds}s (POD_WAIT_TIMEOUT), $list_error" >&2
+      else
+        NOT_READY_PODS=$(awk '{printf "%s%s (%s, %s)", sep, $1, $3, $2; sep = ", "}' <<< "$not_ready")
+        echo "Error: $(wc -l <<< "$not_ready") pods in $ns weren't ready after ${timeout_seconds}s (POD_WAIT_TIMEOUT):" >&2
+        awk '{printf "  %-60s %-6s %s, %s old\n", $1, $2, $3, $5}' <<< "$not_ready" >&2
+      fi
+      return 1
+    fi
+    if [[ -n "$list_error" ]]; then
+      echo "  - Waiting: $list_error"
+    else
+      echo "  - Waiting on $(wc -l <<< "$not_ready") pods..."
+    fi
     echo "  - Elapsed: ${elapsed_time}s/${timeout_seconds}s"
     sleep 10
   done

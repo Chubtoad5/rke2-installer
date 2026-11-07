@@ -40,4 +40,9 @@ systemctl is-active --quiet rke2-server && ok "rke2-server stayed up" || bad "rk
 ./rke2_installer.sh uninstall >"$W/o" 2>&1 && ok "uninstall" || { bad "uninstall"; tail -8 "$W/o" | cut -c1-170; }
 systemctl is-active --quiet rke2-server && bad "rke2-server is still running" || ok "rke2-server is gone"
 if ((enforcing)); then [[ "$(getenforce)" == Enforcing ]] && ok "uninstall put SELinux back to enforcing" || bad "SELinux is $(getenforce) after uninstall"; fi
+# Spec 11, U3: a wait that runs out says which pods weren't ready. Pods can't all be ready 1 s into a fresh install.
+if POD_WAIT_TIMEOUT=1 ./rke2_installer.sh install >"$W/o" 2>&1; then bad "an install with POD_WAIT_TIMEOUT=1 exited 0"
+elif grep -qE "weren't ready after 1s: [a-z0-9.-]+ \(" "$W/o"; then ok "with POD_WAIT_TIMEOUT=1, install fails, and the error names the pods"
+else bad "the timeout's error doesn't name the pods"; tail -8 "$W/o" | cut -c1-170; fi
+./rke2_installer.sh uninstall >"$W/o" 2>&1 && ok "uninstall after an install that timed out" || { bad "uninstall after the timeout"; tail -8 "$W/o" | cut -c1-170; }
 echo "=== exit $fail"; exit $fail

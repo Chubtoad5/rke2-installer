@@ -1,5 +1,29 @@
 # Changelog — rke2-installer
 
+## v1.2.0 — 2026-11-07 — The pod wait on a slow host
+
+### Fixed
+- **A cluster that's ready at the deadline no longer fails.** The wait for kube-system, and for each add-on's
+  namespace, checked the timeout before checking the pods, so pods that turned ready in the last 10 s still failed
+  the install. It now checks the pods first.
+- **The wait is 300 s, not 120 s.** With six CI hosts installing at once, the first `install` failed on Ubuntu 24.04
+  and Rocky 10 with every pod it showed already running; both passed alone. That's the same 300 s as `ap-tools`'
+  own wait.
+- **A timeout names the pods that weren't ready, and their state, on the console.** For example
+  `kube-system pods weren't ready after 300s: rke2-ingress-nginx-controller-r7wxw (ContainerCreating, 0/1)`. Before,
+  the error said only that some weren't, and the listing before it showed the last pods, which were often ready.
+  Pods that can't be listed at all no longer count as ready.
+
+### Added
+- **`POD_WAIT_TIMEOUT`** (default `300`): seconds `install`, `join` and the add-ons wait for their pods. Raise it for a
+  slow host or network: over a 20 Mbit/s link, a first install needed about 330 s. A value that isn't a whole number of
+  seconds, 1 or more, is refused before anything changes. `ap-tools` passes it on when it's set in the environment.
+
+### Tests
+- `tests/unit/pod-wait.bats`, with a fake clock: pods ready exactly at the deadline pass (this failed at v1.1.0), the
+  default, the error naming each pod, pods that can't be listed, and the setting's check.
+- `tests/integration/10-lifecycle.sh`: an install with `POD_WAIT_TIMEOUT=1` fails and names the pods, then uninstalls.
+
 ## v1.1.0 — 2026-11-06 — Day-2 fixes
 
 The first release with `SCRIPT_VERSION`. Every defect was reproduced on Ubuntu 24.04 clones first (R11 in CI on Leap 16
