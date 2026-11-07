@@ -1,8 +1,16 @@
 # Changelog — rke2-installer
 
-## v1.2.0 — 2026-11-07 — The pod wait on a slow host
+## v1.2.0 — 2026-11-07 — The pod wait on a slow host, and Rocky 10's image kernel
 
 ### Fixed
+- **`install` and `join` work on Rocky, Alma and RHEL 10's cloud image as shipped.** That image has only
+  `kernel-modules-core`, and `br_netfilter` is in `kernel-modules-extra`, so every install failed with `required kernel
+  module 'br_netfilter' could not be loaded`. The installer now installs `kernel-modules-extra` for the running kernel,
+  and `br_netfilter` loads with no new kernel and no reboot. If that package has left the repositories, it stops and
+  says to update and reboot. Air-gapped, it names the package to install from local media. Hosts updated since their
+  image already have it.
+- **A required module that won't load says what to do:** install the extra modules package for the running kernel, or
+  reboot into a newer kernel.
 - **A cluster that's ready at the deadline no longer fails.** The wait for kube-system, and for each add-on's
   namespace, checked the timeout before checking the pods, so pods that turned ready in the last 10 s still failed
   the install. It now checks the pods first.
@@ -25,6 +33,8 @@
   default, the error naming each pod, pods that can't be listed, kubectl's warnings, an empty namespace, and the
   setting's check.
 - `tests/integration/10-lifecycle.sh`: an install with `POD_WAIT_TIMEOUT=1` fails and names the pods, then uninstalls.
+- `tests/unit/el-modules.bats`: the module package online, one that has left the repo, air-gapped, and other distros.
+  The integration tests on a Rocky 10 host with no first-boot upgrade failed 13 of 27 at v1.1.0.
 
 ## v1.1.0 — 2026-11-06 — Day-2 fixes
 

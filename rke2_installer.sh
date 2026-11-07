@@ -1055,8 +1055,35 @@ record_install_state () {
     state_set RKE2I_NTP_CONFIGURED "none"
 }
 
+# Rocky, Alma and RHEL 10's cloud images ship only kernel-modules-core, and br_netfilter is in kernel-modules-extra.
+# Online, install the running kernel's own package: a newer kernel's modules can't load until a reboot. If that package
+# has left the repo, stop and say to update and reboot. Air-gapped, name the package. Spec 11, U4.
+ensure_el_required_modules () {
+    case "$OS_ID" in rhel|centos|rocky|almalinux|fedora) ;; *) return 0 ;; esac
+    local mod missing="" kver pm=dnf
+    for mod in overlay br_netfilter; do
+        modprobe -n "$mod" >/dev/null 2>&1 || missing="$missing $mod"
+    done
+    [[ -z "$missing" ]] && return 0
+    kver=$(uname -r)
+    command -v dnf >/dev/null 2>&1 || pm=yum
+    echo "  The running kernel ($kver) has no$missing: it's in kernel-modules-extra, which this image leaves out."
+    if [[ $AIR_GAPPED_MODE -eq 1 ]]; then
+        echo "Error: install kernel-modules-extra for the running kernel from local media"
+        echo "  ($pm install kernel-modules-extra-$kver), then re-run this script."
+        exit 1
+    fi
+    echo "  Installing kernel-modules-extra-$kver to match the running kernel..."
+    if ! "$pm" install -y "kernel-modules-extra-$kver"; then
+        echo "Error: kernel-modules-extra-$kver is no longer in this host's repositories, so the running kernel"
+        echo "  can't get$missing. Update the host ($pm upgrade), reboot into the new kernel, then re-run this script."
+        exit 1
+    fi
+}
+
 config_host_settings () {
     record_install_state
+    ensure_el_required_modules
     # Common kubernetes requirments
     # RK-7: probe per module. overlay and br_netfilter are hard requirements; dm_crypt and
     # nfs are only needed for encrypted/NFS-backed storage and are absent from minimal
@@ -1070,6 +1097,8 @@ config_host_settings () {
             case "$mod" in
                 overlay|br_netfilter)
                     echo "Error: required kernel module '$mod' could not be loaded. RKE2 cannot run without it."
+                    echo "  Install the extra kernel modules package for the running kernel ($(uname -r)), or, if a"
+                    echo "  newer kernel was installed since the last boot, reboot into it, then re-run this script."
                     exit 1
                     ;;
                 *)
