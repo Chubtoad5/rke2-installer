@@ -45,6 +45,13 @@ esac'
   [[ "$output" == *"rke2-canal-2whhz"*"Init:0/2"* ]]
   [[ "$output" != *"rke2-metrics-server-69f4  "*"Running"*"old"* ]]
 }
+@test "one pod is one pod" {
+  POD_WAIT_TIMEOUT=10
+  stub kubectl 'case "$*" in *Succeeded*) exit 0 ;; *"get pods -n"*) echo "rke2-ingress-nginx-controller-r7wxw   0/1   ContainerCreating   0   118s" ;; esac'
+  run check_namespace_pods_ready
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"1 pod in kube-system wasn't ready after 10s"* ]]
+}
 @test "the error comes after the full listing, so it's the last thing shown" {
   POD_WAIT_TIMEOUT=10
   run check_namespace_pods_ready

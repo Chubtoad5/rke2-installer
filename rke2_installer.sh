@@ -2901,7 +2901,13 @@ check_namespace_pods_ready() {
         echo "Error: after ${timeout_seconds}s (POD_WAIT_TIMEOUT), $list_error" >&2
       else
         NOT_READY_PODS=$(awk '{printf "%s%s (%s, %s)", sep, $1, $3, $2; sep = ", "}' <<< "$not_ready")
-        echo "Error: $(wc -l <<< "$not_ready") pods in $ns weren't ready after ${timeout_seconds}s (POD_WAIT_TIMEOUT):" >&2
+        local count
+        count=$(wc -l <<< "$not_ready")
+        if [[ $count -eq 1 ]]; then
+          echo "Error: 1 pod in $ns wasn't ready after ${timeout_seconds}s (POD_WAIT_TIMEOUT):" >&2
+        else
+          echo "Error: $count pods in $ns weren't ready after ${timeout_seconds}s (POD_WAIT_TIMEOUT):" >&2
+        fi
         awk '{printf "  %-60s %-6s %s, %s old\n", $1, $2, $3, $5}' <<< "$not_ready" >&2
       fi
       return 1
