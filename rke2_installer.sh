@@ -1112,7 +1112,7 @@ config_host_settings () {
         echo "  They are only needed for NFS-backed or encrypted (dm-crypt) storage. To add them,"
         echo "  install the extra kernel-modules package for your running kernel and re-run:"
         echo "    Ubuntu/Debian:  apt-get install -y linux-modules-extra-\$(uname -r)"
-        echo "    RHEL/Rocky:     dnf install -y kernel-modules-extra"
+        echo "    RHEL/Rocky:     dnf install -y kernel-modules-extra-\$(uname -r)"
         echo "    SUSE/Leap:      zypper install -y kernel-default   (minimal images ship kernel-default-base)"
     fi
     # Persist only the modules that actually loaded so systemd-modules-load stays clean at boot.
