@@ -37,7 +37,12 @@ for _ in $(seq 1 60); do $K get nodes --no-headers 2>/dev/null | grep -qw Ready 
 $K get nodes --no-headers 2>/dev/null | grep -qw Ready && ok "the node is Ready" || bad "the node isn't Ready"
 ./rke2_installer.sh install >"$W/o" 2>&1 && ok "same-settings re-run" || { bad "re-run"; tail -8 "$W/o" | cut -c1-170; }
 systemctl is-active --quiet rke2-server && ok "rke2-server stayed up" || bad "rke2-server is down"
-./rke2_installer.sh uninstall >"$W/o" 2>&1 && ok "uninstall" || { bad "uninstall"; tail -8 "$W/o" | cut -c1-170; }
+# Spec 11, U3: a mount containerd left under its tmpmounts, seen now and then after an upgrade, made uninstall fail with
+# "Device or resource busy". One is left there on purpose, so it fails every time without the fix.
+leak=/var/lib/rancher/rke2/agent/containerd/tmpmounts/containerd-mount-ci-test
+mkdir -p "$leak" && mount -t tmpfs ci-leak "$leak" && touch "$leak/f"
+./rke2_installer.sh uninstall >"$W/o" 2>&1 && ok "uninstall, with a mount left under containerd's tmpmounts" || { bad "uninstall"; tail -8 "$W/o" | cut -c1-170; }
+findmnt "$leak" >/dev/null 2>&1 && { bad "the leftover mount is still there"; umount -l "$leak"; } || ok "and the leftover mount is gone"
 systemctl is-active --quiet rke2-server && bad "rke2-server is still running" || ok "rke2-server is gone"
 if ((enforcing)); then [[ "$(getenforce)" == Enforcing ]] && ok "uninstall put SELinux back to enforcing" || bad "SELinux is $(getenforce) after uninstall"; fi
 # Spec 11, U3: a wait that runs out says which pods weren't ready. Pods can't all be ready 1 s into a fresh install.

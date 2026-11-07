@@ -9,6 +9,10 @@
   and `br_netfilter` loads with no new kernel and no reboot. If that package has left the repositories, it stops and
   says to update and reboot. Air-gapped, it names the package to install from local media. Hosts updated since their
   image already have it.
+- **`uninstall` no longer fails on a mount containerd left behind.** Now and then, after an upgrade, a mount stays under
+  `agent/containerd/tmpmounts`. Rancher's `rke2-killall.sh` doesn't unmount it, so removing the data folder failed with
+  `Device or resource busy`: Rancher's uninstaller skipped its last steps and deleted itself, and `uninstall` exited 1.
+  Those mounts are now unmounted, lazily if need be, before Rancher's uninstaller and before the data folder is removed.
 - **A required module that won't load says what to do:** install the extra modules package for the running kernel, or
   reboot into a newer kernel.
 - **A cluster that's ready at the deadline no longer fails.** The wait for kube-system, and for each add-on's
@@ -33,6 +37,8 @@
   default, the error naming each pod, pods that can't be listed, kubectl's warnings, an empty namespace, and the
   setting's check.
 - `tests/integration/10-lifecycle.sh`: an install with `POD_WAIT_TIMEOUT=1` fails and names the pods, then uninstalls.
+- `tests/unit/tmpmounts.bats`, and `tests/integration/10-lifecycle.sh` uninstalls with a mount left under containerd's
+  tmpmounts on purpose, which failed every time at v1.1.0.
 - `tests/unit/el-modules.bats`: the module package online, one that has left the repo, air-gapped, and other distros.
   The integration tests on a Rocky 10 host with no first-boot upgrade failed 13 of 27 at v1.1.0.
 

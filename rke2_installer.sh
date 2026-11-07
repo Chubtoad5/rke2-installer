@@ -2103,6 +2103,20 @@ FBEOF
 
 # -- Uninstall Definitions -- #
 
+# rke2-killall.sh unmounts /run/k3s, kubelet's pods and the CNI namespaces, but not containerd's tmpmounts. One left
+# behind (seen after an upgrade, now and then) is a mount point, so removing the data folder fails with "Device or
+# resource busy": Rancher's uninstaller then skips its last steps and deletes itself, and this script's own removal
+# fails too. So they're unmounted first, lazily if need be. Spec 11, U3.
+unmount_containerd_tmpmounts () {
+    local data=${RKE2_DATA:-default} mnt
+    [[ "$data" == "default" ]] && data=/var/lib/rancher/rke2
+    [[ "$data" == /* && "$data" != "/" ]] || return 0
+    findmnt -rn -o TARGET 2>/dev/null | grep -F -- "$data/agent/containerd/tmpmounts/" | sort -r | while read -r mnt; do
+        echo "  Unmounting $mnt, left behind by containerd"
+        umount -- "$mnt" 2>/dev/null || umount -l -- "$mnt" 2>/dev/null || echo "  WARNING: couldn't unmount $mnt"
+    done || true
+}
+
 uninstall_rke2() {
     echo "--- Uninstalling RKE2"
     # Load recorded install state (written at install time; RK-13).
@@ -2129,6 +2143,7 @@ uninstall_rke2() {
             break
         fi
     done
+    unmount_containerd_tmpmounts
     if [[ -n "$uninstaller" ]]; then
         echo "  Running upstream uninstaller $uninstaller..."
         "$uninstaller" || echo "  WARNING: $uninstaller exited non-zero; continuing local cleanup."
@@ -2249,6 +2264,7 @@ uninstall_rke2() {
         if [[ "$RKE2_DATA" != /* || "$RKE2_DATA" == "/" ]]; then
             echo "Refusing removal of dir RKE2_DATA=$RKE2_DATA"
         else
+            unmount_containerd_tmpmounts
             rm -rf -- "$RKE2_DATA"
         fi
     fi
