@@ -12,16 +12,18 @@
 - **A timeout names the pods that weren't ready, and their state, on the console.** For example
   `kube-system pods weren't ready after 300s: rke2-ingress-nginx-controller-r7wxw (ContainerCreating, 0/1)`. Before,
   the error said only that some weren't, and the listing before it showed the last pods, which were often ready.
-  Pods that can't be listed at all no longer count as ready.
+  Pods that can't be listed at all no longer count as ready. kubectl's warnings, which go to stderr, aren't read as pods.
 
 ### Added
 - **`POD_WAIT_TIMEOUT`** (default `300`): seconds `install`, `join` and the add-ons wait for their pods. Raise it for a
   slow host or network: over a 20 Mbit/s link, a first install needed about 330 s. A value that isn't a whole number of
-  seconds, 1 or more, is refused before anything changes. `ap-tools` passes it on when it's set in the environment.
+  seconds, 1 or more, is refused before anything changes. Through `ap-tools`, give it on the command line
+  (`sudo POD_WAIT_TIMEOUT=600 ./ap-tools install rke2`): `ap-tools` doesn't pass it on from `inputs.env`.
 
 ### Tests
 - `tests/unit/pod-wait.bats`, with a fake clock: pods ready exactly at the deadline pass (this failed at v1.1.0), the
-  default, the error naming each pod, pods that can't be listed, and the setting's check.
+  default, the error naming each pod, pods that can't be listed, kubectl's warnings, an empty namespace, and the
+  setting's check.
 - `tests/integration/10-lifecycle.sh`: an install with `POD_WAIT_TIMEOUT=1` fails and names the pods, then uninstalls.
 
 ## v1.1.0 — 2026-11-06 — Day-2 fixes

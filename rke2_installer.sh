@@ -2880,11 +2880,13 @@ check_namespace_pods_ready() {
     for pod_name in $completed_pods; do
       kubectl delete -n "$ns" "$pod_name" --ignore-not-found
     done
-    # A failed listing isn't a ready namespace
+    # A failed listing isn't a ready namespace. Only stdout is the listing: kubectl's stderr carries "No resources
+    # found" and API discovery warnings, which aren't pods.
     list_error=""
-    if pods=$(kubectl get pods -n "$ns" --no-headers 2>&1); then
-      not_ready=$(awk '{split($2, r, "/"); if (r[1] != r[2]) print}' <<< "$pods") || true
+    if pods=$(kubectl get pods -n "$ns" --no-headers 2>/dev/null); then
+      not_ready=$(awk 'NF {split($2, r, "/"); if (r[1] != r[2]) print}' <<< "$pods") || true
     else
+      pods=$(kubectl get pods -n "$ns" --no-headers 2>&1 >/dev/null) || true
       list_error="the pods in $ns can't be listed: ${pods//$'\n'/ }"
       not_ready=$list_error
     fi

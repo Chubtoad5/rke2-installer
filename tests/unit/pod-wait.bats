@@ -64,6 +64,22 @@ esac'
   [ "$status" -eq 1 ]
   [[ "$output" == *"the pods in kube-system can't be listed: The connection to the server 127.0.0.1:6443 was refused"* ]]
 }
+@test "kubectl's warnings on stderr aren't pods" {
+  stub kubectl 'case "$*" in
+  *Succeeded*) exit 0 ;;
+  *"get pods -n"*)
+    echo "E1107 13:21:40.1 memcache.go:265] couldn'"'"'t get current server API group list: the server is currently unable to handle the request" >&2
+    echo "Warning: metrics.k8s.io/v1beta1 is not available" >&2
+    echo "rke2-coredns-x   1/1   Running   0   2m" ;;
+esac'
+  run check_namespace_pods_ready
+  [ "$status" -eq 0 ]
+}
+@test "a namespace with no pods is ready, as before" {
+  stub kubectl 'case "$*" in *Succeeded*) exit 0 ;; *"get pods -n"*) echo "No resources found in velero namespace." >&2 ;; esac'
+  run check_namespace_pods_ready velero
+  [ "$status" -eq 0 ]
+}
 @test "completed pods are deleted, and don't hold the wait up" {
   stub kubectl 'case "$*" in
   *Succeeded*) echo "pod/helm-install-rke2-canal-x" ;;
