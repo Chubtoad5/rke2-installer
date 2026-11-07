@@ -19,6 +19,12 @@ setup() {
   ! called "umount -- /var/lib/kubelet"
   ! called "umount -- /data/rke2"
 }
+@test "a path that only contains the data folder's tmpmounts isn't touched" {
+  stub findmnt 'echo /mnt/node2/var/lib/rancher/rke2/agent/containerd/tmpmounts/m1'
+  run unmount_containerd_tmpmounts
+  [ "$status" -eq 0 ]
+  ! called "umount"
+}
 @test "a custom RKE2_DATA is followed" {
   RKE2_DATA=/data/rke2
   run unmount_containerd_tmpmounts

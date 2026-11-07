@@ -2111,7 +2111,7 @@ unmount_containerd_tmpmounts () {
     local data=${RKE2_DATA:-default} mnt
     [[ "$data" == "default" ]] && data=/var/lib/rancher/rke2
     [[ "$data" == /* && "$data" != "/" ]] || return 0
-    findmnt -rn -o TARGET 2>/dev/null | grep -F -- "$data/agent/containerd/tmpmounts/" | sort -r | while read -r mnt; do
+    findmnt -rn -o TARGET 2>/dev/null | awk -v p="$data/agent/containerd/tmpmounts/" 'index($0, p) == 1' | sort -r | while read -r mnt; do
         echo "  Unmounting $mnt, left behind by containerd"
         umount -- "$mnt" 2>/dev/null || umount -l -- "$mnt" 2>/dev/null || echo "  WARNING: couldn't unmount $mnt"
     done || true
