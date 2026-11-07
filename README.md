@@ -57,6 +57,8 @@ A flexible RKE2 installer for Linux systems that supports online and air-gapped 
 - RHEL / CentOS / Rocky Linux / AlmaLinux / Fedora
 - SLES / OpenSUSE Leap
 
+With the built-in ingress (`INSTALL_INGRESS=true`, the default), a server needs `iptables` installed, because the ingress controller's host ports are set up with it. `install` and `join server` refuse without it, naming the package. Leap 16 and Ubuntu minimal don't ship it. An agent only warns, because it can't tell whether its cluster runs the ingress.
+
 ---
 
 ## Quick Start
@@ -118,6 +120,10 @@ All configuration is done by editing the `USER DEFINED VARIABLES` section at the
 | `NTP_SERVERS` | *(empty)* | Optional space/comma-separated NTP server list applied during `install`/`join` (chrony or systemd-timesyncd auto-detected). Empty = the host's time source is left completely untouched. Same semantics as the `ap-tools` variable of the same name |
 | `COREDNS_HOSTS` | *(empty)* | Optional in-cluster DNS pins, `<fqdn>=<ipv4>` (comma or space separated), applied on `install` (and kept on re-runs). Pods resolve these names to the given IP regardless of what the host's DNS says. Use it for split-horizon setups where LAN DNS sends browsers to a TLS-terminating reverse proxy, but workloads must keep reaching the cluster's own ingress — e.g. Dell Automation Platform, whose services call their own portal FQDN and trust only DAP's CA. Empty = no pins |
 | `DEBUG` | `1` | Set to `1` for verbose output, `0` to suppress (failures still print the failed step's captured output) |
+| `RKE2_FORCE_ONLINE` | `false` | Set `true` to ignore an `rke2-save-version.txt` in the working directory and run online. Without it, that file makes the run air-gapped, and an `install`, `join` or `push` with no extracted bundle next to it stops with an error |
+| `UPGRADE_WAIT` | `false` | `upgrade`: set `true` to wait until every targeted node runs the new version and is schedulable again, and exit 1 if that doesn't happen within `UPGRADE_WAIT_TIMEOUT`. By default `upgrade` exits once the plans are applied, and the nodes upgrade in the background |
+| `UPGRADE_WAIT_TIMEOUT` | `1800` | Seconds `UPGRADE_WAIT` waits |
+| `SUC_VERSION` | `v0.21.0` | The system-upgrade-controller release used by `upgrade` and bundled by `save`. It used to follow whatever release was latest |
 
 ### Optional Component Settings (on by default)
 
@@ -205,12 +211,18 @@ requested `config.yaml` and compares it with the live `/etc/rancher/rke2/config.
 | Config differs, `RKE2_RECONFIGURE=true` | New config is written and the rke2 service is **restarted** |
 | Requested `RKE2_VERSION` differs from the running version | Error directing you to the `upgrade` command |
 | `join` pointed at a different cluster server | Error — a node cannot switch clusters; `uninstall` first |
+| `join` pointed at a new address for the **same** cluster, `RKE2_RECONFIGURE=true` | Allowed, if the join token is a secure one (`K10<hash>::…`) and the CA the new address serves at `https://<address>:9345/cacerts` matches the token's hash. The node's `server:` changes, and the service restarts. Otherwise the error above stands |
+| A run without `-registry` on a node that has a registry configured | The registry config is left in place, with a warning naming it |
+| `join agent` with settings only servers read (`CLUSTER_CIDR`, `SERVICE_CIDR`, `INSTALL_SERVICELB`, `INSTALL_LOCAL_PATH_PROVISIONER`, `INSTALL_DNS_UTILITY`, `CONTROL_PLANE_TAINT`, `COREDNS_HOSTS`, `PVC_DATA`) | A warning naming the ones it ignores |
 | The host runs the other RKE2 role (server vs agent) | Error — `uninstall` first |
 
 **Pod-readiness timeouts now fail the command.** If pods are not ready within 120s the install exits
 non-zero (previously it printed an error but exited 0). The only warn-and-continue site is the
 non-critical `dnsutils` check in the `default` namespace. Re-running `install` after the cluster
 settles completes the remaining steps.
+
+**`CNI_TYPE=none`** brings up the control plane with no CNI, for you to install your own. No pod can start until you
+do, so the install waits only for the API server, and doesn't wait for any pod. The node stays `NotReady` until then.
 
 **Uninstall restores recorded host state.** The first install writes
 `/etc/rke2-installer/install-state.env` (mode 0600) recording the pre-install state of swap,
@@ -444,6 +456,8 @@ sudo ./rke2_installer.sh upgrade [server|agent|both] [stable|version] [-registry
 
 When `both` is specified, the agent upgrade plan waits for the server plan to complete before proceeding.
 
+`upgrade` exits once the plans are applied, and the nodes upgrade in the background. Set `UPGRADE_WAIT=true` to wait until they all run the new version and are schedulable again. The server plan tolerates the control-plane taint (`CONTROL_PLANE_TAINT=true`), so a tainted control plane upgrades too.
+
 #### Examples
 
 ```bash
@@ -466,18 +480,20 @@ kubectl get nodes                       # Verify node versions
 
 #### Air-Gapped Upgrades
 
-The `save` command automatically includes the system-upgrade-controller manifests and upgrade images. For air-gapped environments with a private registry:
+The `save` command includes the system-upgrade-controller manifests and the `rancher/rke2-upgrade` image for the `RKE2_VERSION` the bundle is built for, plus the stable release's when it can be looked up. An air-gapped upgrade can't use `stable`, because that needs `update.rke2.io`. So the rule is: build the bundle with `RKE2_VERSION=<target>`, then upgrade to that same version.
 
-1. On an internet-connected machine, run `save` and `push` to populate the registry with upgrade images
-2. On the air-gapped host, run `upgrade` with `-registry` — the script will skip image downloads and use the pre-pushed images
+1. On an internet-connected machine, run `save` and `push` for the target version, to put its upgrade images in the registry
+2. On the air-gapped host, run `upgrade` to that version with `-registry`. The script skips the downloads and uses the pushed images
 
 ```bash
-# Online machine: save and push (includes upgrade artifacts)
-sudo ./rke2_installer.sh save push -registry my.registry.com:443 myuser mypassword
+# Online machine: save and push the target version (includes upgrade artifacts)
+sudo RKE2_VERSION=v1.34.5+rke2r1 ./rke2_installer.sh save push -registry my.registry.com:443 myuser mypassword
 
-# Air-gapped host: upgrade using the registry
-sudo ./rke2_installer.sh upgrade both stable -registry my.registry.com:443 myuser mypassword
+# Air-gapped host: upgrade to that same version, using the registry
+sudo ./rke2_installer.sh upgrade both v1.34.5+rke2r1 -registry my.registry.com:443 myuser mypassword
 ```
+
+Before it starts, an air-gapped upgrade refuses when the node has no `/etc/rancher/rke2/registries.yaml`, or when the registry's tag list lacks `rancher/rke2-upgrade:<version>`. Without those, the upgrade job would sit in `ImagePullBackOff`. If the registry can't be asked (no `curl`, or an answer it can't read), it warns and goes on.
 
 > When `-registry` is used with `upgrade`, the script verifies that `/etc/rancher/rke2/registries.yaml` exists and contains the specified registry.
 
