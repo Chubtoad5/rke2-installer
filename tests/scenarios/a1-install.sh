@@ -14,7 +14,7 @@ K="/var/lib/rancher/rke2/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml"
 if [[ "$ID" =~ ^(sles|opensuse-leap)$ && "$(getenforce 2>/dev/null)" == Enforcing ]]; then export RKE2_SELINUX_FALLBACK=permissive; fi
 cp "$REPO/rke2_installer.sh" .; chmod +x rke2_installer.sh
 tar -xzf "$CI_HANDOFF/rke2-save.tar.gz" && ok "unpack the bundle" || { bad "unpack the bundle"; echo "=== exit 1"; exit 1; }
-DEBUG=0 ./rke2_installer.sh install > "$W/o" 2>&1 && ok "install with no route out" || { bad "install with no route out"; tail -10 "$W/o" | cut -c1-170; }
+DEBUG=0 ./rke2_installer.sh install > "$W/o" 2>&1 && ok "install with no route out" || { bad "install with no route out"; tail -10 "$W/o" | cut -c1-170; echo "  (the checks after it would only fail too)"; echo "=== exit 1"; exit 1; }
 ready() { $K get nodes --no-headers 2>/dev/null | grep -qw Ready; }
 within 300 ready && ok "the node is Ready" || bad "the node isn't Ready"
 notready() { local out; out=$($K get pods -A --no-headers 2>/dev/null | grep -vE 'Running|Completed'); [ -z "$out" ]; }
