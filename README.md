@@ -123,6 +123,7 @@ All configuration is done by editing the `USER DEFINED VARIABLES` section at the
 | `RKE2_FORCE_ONLINE` | `false` | Set `true` to ignore an `rke2-save-version.txt` in the working directory and run online. Without it, that file makes the run air-gapped, and an `install`, `join` or `push` with no extracted bundle next to it stops with an error |
 | `UPGRADE_WAIT` | `false` | `upgrade`: set `true` to wait until every targeted node runs the new version and is schedulable again, and exit 1 if that doesn't happen within `UPGRADE_WAIT_TIMEOUT`. By default `upgrade` exits once the plans are applied, and the nodes upgrade in the background |
 | `UPGRADE_WAIT_TIMEOUT` | `1800` | Seconds `UPGRADE_WAIT` waits |
+| `POD_WAIT_TIMEOUT` | `300` | Seconds `install`, `join` and the add-ons wait for their pods to be ready. If they aren't ready in time, the error names each pod and its state. Raise it for a slow host or network. Through `ap-tools`, give it on the command line, `sudo POD_WAIT_TIMEOUT=600 ./ap-tools install rke2`: `ap-tools` doesn't pass it on from `inputs.env` |
 | `SUC_VERSION` | `v0.21.0` | The system-upgrade-controller release used by `upgrade` and bundled by `save`. It used to follow whatever release was latest |
 
 ### Optional Component Settings (on by default)
@@ -216,8 +217,8 @@ requested `config.yaml` and compares it with the live `/etc/rancher/rke2/config.
 | `join agent` with settings only servers read (`CLUSTER_CIDR`, `SERVICE_CIDR`, `INSTALL_SERVICELB`, `INSTALL_LOCAL_PATH_PROVISIONER`, `INSTALL_DNS_UTILITY`, `CONTROL_PLANE_TAINT`, `COREDNS_HOSTS`, `PVC_DATA`) | A warning naming the ones it ignores |
 | The host runs the other RKE2 role (server vs agent) | Error — `uninstall` first |
 
-**Pod-readiness timeouts now fail the command.** If pods are not ready within 120s the install exits
-non-zero (previously it printed an error but exited 0). The only warn-and-continue site is the
+**Pod-readiness timeouts now fail the command.** If pods are not ready within `POD_WAIT_TIMEOUT` (300 s) the install
+exits non-zero, and names the pods that weren't ready (previously it printed an error but exited 0). The only warn-and-continue site is the
 non-critical `dnsutils` check in the `default` namespace. Re-running `install` after the cluster
 settles completes the remaining steps.
 

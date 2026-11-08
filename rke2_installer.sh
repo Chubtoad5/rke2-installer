@@ -5,7 +5,7 @@ set -o errexit
 set -o nounset
 set -o pipefail
 
-SCRIPT_VERSION="1.1.0"
+SCRIPT_VERSION="1.2.0"
 
 # --- USER DEFINED VARIABLES ---#
 RKE2_VERSION=${RKE2_VERSION:-"v1.34.5+rke2r1"}
@@ -30,6 +30,7 @@ COREDNS_HOSTS=${COREDNS_HOSTS:-}                                              # 
 RKE2_FORCE_ONLINE=${RKE2_FORCE_ONLINE:-"false"}                               # true = ignore an rke2-save-version.txt in the working directory and stay online
 UPGRADE_WAIT=${UPGRADE_WAIT:-"false"}                                         # upgrade: true = wait until every targeted node runs the new version, and exit 1 if it doesn't in time
 UPGRADE_WAIT_TIMEOUT=${UPGRADE_WAIT_TIMEOUT:-"1800"}                          # upgrade: seconds UPGRADE_WAIT waits
+POD_WAIT_TIMEOUT=${POD_WAIT_TIMEOUT:-"300"}                                   # seconds install, join and the add-ons wait for their pods to be ready; raise it for a slow host or network
 SUC_VERSION=${SUC_VERSION:-"v0.21.0"}                                         # system-upgrade-controller release, for upgrades and for the bundle (was whatever was latest)
 RKE2_SELINUX_FALLBACK=${RKE2_SELINUX_FALLBACK:-}                              # 'permissive': on SUSE hosts (no upstream rke2-selinux policy exists) switch SELinux to permissive instead of failing pre-cluster; recorded in install state, restored to enforcing on uninstall (P4-08b)
 DEBUG=${DEBUG:-"1"}
@@ -625,8 +626,9 @@ start_rke2_service () {
         fi
         # Hard-fail: the rest of the install (utilities, add-ons) depends on a ready control plane.
         if ! check_namespace_pods_ready; then
-            echo "Error: kube-system pods did not become ready within the timeout. The cluster may still be"
-            echo "  converging - inspect with 'kubectl get pods -A' and re-run '$SCRIPT_NAME install' once it settles."
+            echo "Error: kube-system pods weren't ready after ${POD_WAIT_TIMEOUT}s: ${NOT_READY_PODS}."
+            echo "  The cluster may still be converging - inspect with 'kubectl get pods -A' and re-run"
+            echo "  '$SCRIPT_NAME install' once it settles. On a slow host or network, set POD_WAIT_TIMEOUT higher."
             exit 1
         fi
     fi
@@ -1053,8 +1055,35 @@ record_install_state () {
     state_set RKE2I_NTP_CONFIGURED "none"
 }
 
+# Rocky, Alma and RHEL 10's cloud images ship only kernel-modules-core, and br_netfilter is in kernel-modules-extra.
+# Online, install the running kernel's own package: a newer kernel's modules can't load until a reboot. If that package
+# has left the repo, stop and say to update and reboot. Air-gapped, name the package. Spec 11, U4.
+ensure_el_required_modules () {
+    case "$OS_ID" in rhel|centos|rocky|almalinux|fedora) ;; *) return 0 ;; esac
+    local mod missing="" kver pm=dnf
+    for mod in overlay br_netfilter; do
+        modprobe -n "$mod" >/dev/null 2>&1 || missing="$missing $mod"
+    done
+    [[ -z "$missing" ]] && return 0
+    kver=$(uname -r)
+    command -v dnf >/dev/null 2>&1 || pm=yum
+    echo "  The running kernel ($kver) has no$missing: it's in kernel-modules-extra, which this image leaves out."
+    if [[ $AIR_GAPPED_MODE -eq 1 ]]; then
+        echo "Error: install kernel-modules-extra for the running kernel from local media"
+        echo "  ($pm install kernel-modules-extra-$kver), then re-run this script."
+        exit 1
+    fi
+    echo "  Installing kernel-modules-extra-$kver to match the running kernel..."
+    if ! "$pm" install -y "kernel-modules-extra-$kver"; then
+        echo "Error: kernel-modules-extra-$kver is no longer in this host's repositories, so the running kernel"
+        echo "  can't get$missing. Update the host ($pm upgrade), reboot into the new kernel, then re-run this script."
+        exit 1
+    fi
+}
+
 config_host_settings () {
     record_install_state
+    ensure_el_required_modules
     # Common kubernetes requirments
     # RK-7: probe per module. overlay and br_netfilter are hard requirements; dm_crypt and
     # nfs are only needed for encrypted/NFS-backed storage and are absent from minimal
@@ -1068,6 +1097,8 @@ config_host_settings () {
             case "$mod" in
                 overlay|br_netfilter)
                     echo "Error: required kernel module '$mod' could not be loaded. RKE2 cannot run without it."
+                    echo "  Install the extra kernel modules package for the running kernel ($(uname -r)), or, if a"
+                    echo "  newer kernel was installed since the last boot, reboot into it, then re-run this script."
                     exit 1
                     ;;
                 *)
@@ -1081,7 +1112,7 @@ config_host_settings () {
         echo "  They are only needed for NFS-backed or encrypted (dm-crypt) storage. To add them,"
         echo "  install the extra kernel-modules package for your running kernel and re-run:"
         echo "    Ubuntu/Debian:  apt-get install -y linux-modules-extra-\$(uname -r)"
-        echo "    RHEL/Rocky:     dnf install -y kernel-modules-extra"
+        echo "    RHEL/Rocky:     dnf install -y kernel-modules-extra-\$(uname -r)"
         echo "    SUSE/Leap:      zypper install -y kernel-default   (minimal images ship kernel-default-base)"
     fi
     # Persist only the modules that actually loaded so systemd-modules-load stays clean at boot.
@@ -2072,6 +2103,20 @@ FBEOF
 
 # -- Uninstall Definitions -- #
 
+# rke2-killall.sh unmounts /run/k3s, kubelet's pods and the CNI namespaces, but not containerd's tmpmounts. One left
+# behind (seen after an upgrade, now and then) is a mount point, so removing the data folder fails with "Device or
+# resource busy": Rancher's uninstaller then skips its last steps and deletes itself, and this script's own removal
+# fails too. So they're unmounted first, lazily if need be. Spec 11, U3.
+unmount_containerd_tmpmounts () {
+    local data=${RKE2_DATA:-default} mnt
+    [[ "$data" == "default" ]] && data=/var/lib/rancher/rke2
+    [[ "$data" == /* && "$data" != "/" ]] || return 0
+    findmnt -rn -o TARGET 2>/dev/null | awk -v p="$data/agent/containerd/tmpmounts/" 'index($0, p) == 1' | sort -r | while read -r mnt; do
+        echo "  Unmounting $mnt, left behind by containerd"
+        umount -- "$mnt" 2>/dev/null || umount -l -- "$mnt" 2>/dev/null || echo "  WARNING: couldn't unmount $mnt"
+    done || true
+}
+
 uninstall_rke2() {
     echo "--- Uninstalling RKE2"
     # Load recorded install state (written at install time; RK-13).
@@ -2098,6 +2143,7 @@ uninstall_rke2() {
             break
         fi
     done
+    unmount_containerd_tmpmounts
     if [[ -n "$uninstaller" ]]; then
         echo "  Running upstream uninstaller $uninstaller..."
         "$uninstaller" || echo "  WARNING: $uninstaller exited non-zero; continuing local cleanup."
@@ -2218,6 +2264,7 @@ uninstall_rke2() {
         if [[ "$RKE2_DATA" != /* || "$RKE2_DATA" == "/" ]]; then
             echo "Refusing removal of dir RKE2_DATA=$RKE2_DATA"
         else
+            unmount_containerd_tmpmounts
             rm -rf -- "$RKE2_DATA"
         fi
     fi
@@ -2830,6 +2877,10 @@ require_cmds () {
 }
 
 preflight_checks () {
+    if [[ ! "$POD_WAIT_TIMEOUT" =~ ^[0-9]+$ || "$POD_WAIT_TIMEOUT" -lt 1 ]]; then
+        echo "Error: POD_WAIT_TIMEOUT must be a whole number of seconds, 1 or more, not '$POD_WAIT_TIMEOUT'."
+        exit 1
+    fi
     local cmds="tar gzip awk sed grep"
     if [[ $AIR_GAPPED_MODE -eq 0 ]]; then
         cmds="$cmds curl"
@@ -2860,32 +2911,57 @@ image_pull_push_check () {
 }
 
 check_namespace_pods_ready() {
-  # Run this function as 'check_namespace_pods_ready $namespace', no argument will default to kube-system
-  # checks status of pods, deletes any completed pods, and loops until all pods are ready or 120s has elapsed
-  # Returns 1 on timeout (matches the ap-tools copy); callers decide fail-hard vs warn-and-continue.
-  local timeout_seconds=120
-  local start_time
+  # check_namespace_pods_ready [namespace]: kube-system by default. Deletes completed pods, then waits up to
+  # POD_WAIT_TIMEOUT seconds for every pod to be ready. Readiness is checked before the deadline, so a namespace that
+  # is ready at the deadline passes. On a timeout it names the pods that aren't ready in NOT_READY_PODS and on the
+  # console, and returns 1 (matches the ap-tools copy); callers decide fail-hard vs warn-and-continue.
+  local ns=${1:-"kube-system"} timeout_seconds=$POD_WAIT_TIMEOUT
+  local start_time elapsed_time completed_pods pod_name pods not_ready list_error
+  NOT_READY_PODS=""
   start_time=$(date +%s) || true
-  local ns=${1:-"kube-system"}
   while true; do
-    local completed_pods
-    completed_pods=$(kubectl get pods -n $ns --field-selector status.phase=Succeeded -o name) || true
+    completed_pods=$(kubectl get pods -n "$ns" --field-selector status.phase=Succeeded -o name 2>/dev/null) || true
     echo "  Checking pod status in $ns namespace..."
     for pod_name in $completed_pods; do
-      kubectl delete -n $ns "$pod_name" --ignore-not-found
+      kubectl delete -n "$ns" "$pod_name" --ignore-not-found
     done
-    local current_pods_not_ready
-    current_pods_not_ready=$(kubectl get pods -n $ns --no-headers | awk '{print $2}' | awk -F'/' '{if ($1 != $2) print $0}' | wc -l) || true
-    local elapsed_time=$(($(date +%s) - start_time))
-    if [ "$elapsed_time" -ge "$timeout_seconds" ]; then
-      echo "Error: Timeout reached after $timeout_seconds seconds. Not all pods are ready." >&2
-      kubectl get pods -A
-      return 1
+    # A failed listing isn't a ready namespace. Only stdout is the listing: kubectl's stderr carries "No resources
+    # found" and API discovery warnings, which aren't pods.
+    list_error=""
+    if pods=$(kubectl get pods -n "$ns" --no-headers 2>/dev/null); then
+      not_ready=$(awk 'NF {split($2, r, "/"); if (r[1] != r[2]) print}' <<< "$pods") || true
+    else
+      pods=$(kubectl get pods -n "$ns" --no-headers 2>&1 >/dev/null) || true
+      list_error="the pods in $ns can't be listed: ${pods//$'\n'/ }"
+      not_ready=$list_error
     fi
-    if [ "$current_pods_not_ready" -eq 0 ]; then
+    if [[ -z "$not_ready" ]]; then
       break
     fi
-    echo "  - Wating on $current_pods_not_ready pods..."
+    elapsed_time=$(($(date +%s) - start_time))
+    if [ "$elapsed_time" -ge "$timeout_seconds" ]; then
+      kubectl get pods -A || true
+      if [[ -n "$list_error" ]]; then
+        NOT_READY_PODS="($list_error)"
+        echo "Error: after ${timeout_seconds}s (POD_WAIT_TIMEOUT), $list_error" >&2
+      else
+        NOT_READY_PODS=$(awk '{printf "%s%s (%s, %s)", sep, $1, $3, $2; sep = ", "}' <<< "$not_ready")
+        local count
+        count=$(wc -l <<< "$not_ready")
+        if [[ $count -eq 1 ]]; then
+          echo "Error: 1 pod in $ns wasn't ready after ${timeout_seconds}s (POD_WAIT_TIMEOUT):" >&2
+        else
+          echo "Error: $count pods in $ns weren't ready after ${timeout_seconds}s (POD_WAIT_TIMEOUT):" >&2
+        fi
+        awk '{printf "  %-60s %-6s %s, %s old\n", $1, $2, $3, $5}' <<< "$not_ready" >&2
+      fi
+      return 1
+    fi
+    if [[ -n "$list_error" ]]; then
+      echo "  - Waiting: $list_error"
+    else
+      echo "  - Waiting on $(wc -l <<< "$not_ready") pods..."
+    fi
     echo "  - Elapsed: ${elapsed_time}s/${timeout_seconds}s"
     sleep 10
   done
