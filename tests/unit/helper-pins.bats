@@ -10,7 +10,7 @@ setup() {
   WORKING_DIR=$BATS_TEST_TMPDIR/w
   DEST=$WORKING_DIR/rke2-utilities/image_pull_push.sh
   REF_FILE=$WORKING_DIR/rke2-utilities/.image_pull_push.sh.ref
-  AIR_GAPPED_MODE=0
+  AIR_GAPPED_MODE=0 SAVE_MODE=0
   # A curl that writes a small script to its -o path
   stub curl 'out=""; prev=""; for a in "$@"; do [ "$prev" = "-o" ] && out=$a; prev=$a; done
 printf "#!/bin/bash\necho helper\n" > "$out"'
@@ -99,6 +99,20 @@ helper_sha() { printf '#!/bin/bash\necho helper\n' | sha256sum | cut -d' ' -f1; 
   [ "$status" -eq 1 ]
   [[ "$output" == *"Extract the whole rke2-save.tar.gz"* ]]
   ! called "curl" || false
+}
+@test "air-gapped with no copy names RKE2_FORCE_ONLINE, for a build host with a left-over sentinel" {
+  AIR_GAPPED_MODE=1
+  run image_pull_push_check
+  [[ "$output" == *"RKE2_FORCE_ONLINE=true"* ]]
+}
+@test "a save fetches the pinned copy even where a left-over sentinel made the run air-gapped" {
+  AIR_GAPPED_MODE=1 SAVE_MODE=1
+  mkdir -p "$(dirname "$DEST")"
+  echo old > "$DEST"
+  run image_pull_push_check
+  [ "$status" -eq 0 ]
+  called "curl -fsSL https://raw.githubusercontent.com/Chubtoad5/images-pull-push/v1.1.1/image_pull_push.sh"
+  [ "$(cat "$REF_FILE")" = v1.1.1 ]
 }
 @test "nothing fetches image_pull_push.sh from main any more" {
   ! grep -n 'images-pull-push/raw/refs/heads/main' "$BATS_TEST_DIRNAME/../../rke2_installer.sh" || false

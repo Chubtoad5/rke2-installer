@@ -9,7 +9,8 @@
   `.image_pull_push.sh.ref`. Before, any copy was kept for good, so a host never saw a fix. A copy with no record is
   fetched again once.
 - **Air-gapped, the copy in the bundle is used, and nothing is downloaded.** With no copy there, the run stops and says
-  to extract the whole bundle, where it used to try the download.
+  to extract the whole bundle, or to set `RKE2_FORCE_ONLINE=true` on an online host with a left-over sentinel, where it
+  used to try the download. A `save` always fetches the pinned copy, since it downloads everything else anyway.
 
 ### Added
 - **`IMAGE_PULL_PUSH_REF`** (default `v1.1.1`): the tag, branch or commit to fetch.

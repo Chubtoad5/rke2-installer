@@ -2933,10 +2933,12 @@ fetch_helper () {
 image_pull_push_check () {
     local dest=$WORKING_DIR/rke2-utilities/image_pull_push.sh
     mkdir -p "$WORKING_DIR/rke2-utilities"
-    # A bundle uses the copy it brought, and an air-gapped run must never reach the download
-    if [[ $AIR_GAPPED_MODE -eq 1 ]]; then
+    # A bundle uses the copy it brought, and an air-gapped run must never reach the download. A save is online whatever
+    # the folder holds (it downloads everything else), so it always fetches the pinned copy.
+    if [[ $AIR_GAPPED_MODE -eq 1 && $SAVE_MODE -eq 0 ]]; then
         [[ -s "$dest" ]] && return 0
-        echo "Error: air-gapped, but $dest isn't here. Extract the whole rke2-save.tar.gz in this folder."
+        echo "Error: air-gapped, but $dest isn't here. Extract the whole rke2-save.tar.gz in this folder,"
+        echo "  or set RKE2_FORCE_ONLINE=true if this host is online and the rke2-save-version.txt here is left over."
         exit 1
     fi
     fetch_helper "$dest" "$IMAGE_PULL_PUSH_URL" "$IMAGE_PULL_PUSH_REF" "$IMAGE_PULL_PUSH_SHA256" || exit 1
