@@ -20,9 +20,10 @@
 ### Tests
 - `tests/unit/helper-pins.bats`: the default tag, the ref and URL settings, reuse and refetch, both checksum cases, a
   failed download, and both air-gapped cases.
-- `tests/integration/20-day2.sh`: the registry case keeps its TLS endpoint up until the certificate is saved or the
-  install ends, up to 600 s. A fixed 120 s killed it before a slow host reached the fetch, and failed the install for the
-  test's own reason.
+- `tests/integration/20-day2.sh`: the registry case's TLS stand-in listens on the clone's address, and the install
+  starts only once its port answers. Before, nothing waited for it, and a lab run failed there for the test's own
+  reason. The stand-in stays up until the certificate is saved or the install ends, up to 600 s, and its own errors are
+  shown if it never listens.
 
 ## v1.2.0 — 2026-11-07 — The pod wait on a slow host, and Rocky 10's image kernel
 
