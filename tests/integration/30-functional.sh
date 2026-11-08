@@ -18,6 +18,8 @@ unset INSTALL_LOCAL_PATH_PROVISIONER INSTALL_DNS_UTILITY CNI_TYPE MAX_PODS
 export DEBUG=0
 K="/var/lib/rancher/rke2/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml"
 show() { tail -8 "$W/o" | cut -c1-170; }
+# events: the namespace's latest events, so a pod that never started says why (an image pull refused, a volume not bound)
+events() { $K get events -n "${1:-ci-c2}" --sort-by=.lastTimestamp 2>/dev/null | tail -6 | cut -c1-200; }
 ready() { for _ in $(seq 1 60); do $K get nodes --no-headers 2>/dev/null | grep -qw Ready && return 0; sleep 5; done; return 1; }
 # within <seconds> <command...>: true once the command is, checking every 3 seconds
 within() { local t=$1 i; shift; for ((i = 0; i < t; i += 3)); do "$@" && return 0; sleep 3; done; "$@"; }
@@ -81,7 +83,7 @@ EOF
 }
 pod_done() { [ "$($K get pod -n ci-c2 "$1" -o jsonpath='{.status.phase}' 2>/dev/null)" = Succeeded ]; }
 web_ok() { [ "$(curl -s -m 5 -H 'Host: web.ci.test' "http://$IP/")" = ci-c2-web ]; }
-dns_ok() { $K exec -n default dnsutils -- nslookup web.ci-c2.svc.cluster.local 2>/dev/null | grep -q "Address"; }
+dns_ok() { $K exec -n default dnsutils -- nslookup web.ci-c2.svc.cluster.local 2>/dev/null | grep -q "^Name:"; }
 pod_end() { [[ "$($K get pod -n ci-c2 "$1" -o jsonpath='{.status.phase}' 2>/dev/null)" =~ ^(Succeeded|Failed)$ ]]; }
 # A pod that fetches the app through its Service's name. Not "kubectl run -i": a pod that quick can end before kubectl
 # attaches, and its output is lost.
@@ -97,11 +99,11 @@ ready && ok "the node is Ready" || bad "the node isn't Ready"
 $K get storageclass local-path >/dev/null 2>&1 && ok "the local-path StorageClass is there" || bad "no local-path StorageClass"
 $K wait -n default --for=condition=Ready pod/dnsutils --timeout=300s >/dev/null 2>&1 && ok "the DNS utility pod is ready" || bad "the DNS utility pod isn't ready"
 workload && ok "apply the test workload" || { bad "apply the test workload"; tail -5 "$W/k"; }
-within 300 pod_done writer && ok "a pod writes to a local-path volume" || bad "the writer pod: $($K get pod -n ci-c2 writer --no-headers 2>&1)"
+within 300 pod_done writer && ok "a pod writes to a local-path volume" || { bad "the writer pod: $($K get pod -n ci-c2 writer --no-headers 2>&1)"; events; events local-path-storage; }
 $K run -n ci-c2 reader --restart=Never --image=busybox:1.36 --overrides='{"spec":{"containers":[{"name":"reader","image":"busybox:1.36","command":["cat","/data/f"],"volumeMounts":[{"name":"d","mountPath":"/data"}]}],"volumes":[{"name":"d","persistentVolumeClaim":{"claimName":"data"}}]}}' >/dev/null 2>&1
 within 180 pod_done reader && [ "$($K logs -n ci-c2 reader 2>/dev/null)" = ci-c2-volume ] && ok "another pod reads the file back from the volume" \
-  || bad "the reader pod: $($K logs -n ci-c2 reader 2>&1 | tail -1)"
-$K wait -n ci-c2 --for=condition=Available deployment/web --timeout=300s >/dev/null 2>&1 && ok "the web app is up" || bad "the web app isn't up"
+  || { bad "the reader pod: $($K logs -n ci-c2 reader 2>&1 | tail -1)"; events; }
+$K wait -n ci-c2 --for=condition=Available deployment/web --timeout=300s >/dev/null 2>&1 && ok "the web app is up" || { bad "the web app isn't up"; events; }
 within 60 dns_ok && ok "the cluster DNS resolves a Service by name" || bad "nslookup web.ci-c2.svc.cluster.local failed"
 svc_ok a && ok "a pod reaches the Service by name" || bad "a pod can't reach http://web.ci-c2"
 within 180 web_ok && ok "a request through the ingress reaches the app" || bad "the ingress: '$(curl -s -m 5 -H 'Host: web.ci.test' "http://$IP/" | head -c 120)'"
@@ -133,8 +135,9 @@ echo "=== Calico"
 CNI_TYPE=calico ./rke2_installer.sh install > "$W/o" 2>&1 && ok "install with CNI_TYPE=calico" || { bad "install with CNI_TYPE=calico"; show; }
 ready && ok "the node is Ready" || bad "the node isn't Ready"
 $K get pods -A --no-headers 2>/dev/null | grep -q calico-node && ok "Calico runs" || bad "no calico-node pod"
-workload >/dev/null 2>&1
-$K wait -n ci-c2 --for=condition=Available deployment/web --timeout=300s >/dev/null 2>&1 && ok "the web app is up on Calico" || bad "the web app isn't up on Calico"
+# The ingress controller's admission webhook can still be starting: give the apply a minute.
+within 60 workload && ok "apply the test workload on Calico" || { bad "apply the test workload on Calico"; tail -5 "$W/k"; }
+$K wait -n ci-c2 --for=condition=Available deployment/web --timeout=300s >/dev/null 2>&1 && ok "the web app is up on Calico" || { bad "the web app isn't up on Calico"; events; }
 svc_ok b && ok "a pod reaches the Service by name on Calico" || bad "a pod can't reach the Service on Calico"
 within 180 web_ok && ok "the ingress works on Calico" || bad "the ingress on Calico"
 ./rke2_installer.sh uninstall > "$W/o" 2>&1 && ok "uninstall" || { bad "uninstall"; show; }
