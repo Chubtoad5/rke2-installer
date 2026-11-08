@@ -83,7 +83,8 @@ EOF
 }
 pod_done() { [ "$($K get pod -n ci-c2 "$1" -o jsonpath='{.status.phase}' 2>/dev/null)" = Succeeded ]; }
 web_ok() { [ "$(curl -s -m 5 -H 'Host: web.ci.test' "http://$IP/")" = ci-c2-web ]; }
-dns_ok() { $K exec -n default dnsutils -- nslookup web.ci-c2.svc.cluster.local 2>/dev/null | grep -q "^Name:"; }
+# Output is captured before grep sees it: with pipefail, grep -q stopping at its match can fail a pipe that's still writing.
+dns_ok() { local out; out=$($K exec -n default dnsutils -- nslookup web.ci-c2.svc.cluster.local 2>/dev/null); grep -q "^Name:" <<< "$out"; }
 pod_end() { [[ "$($K get pod -n ci-c2 "$1" -o jsonpath='{.status.phase}' 2>/dev/null)" =~ ^(Succeeded|Failed)$ ]]; }
 # A pod that fetches the app through its Service's name. Not "kubectl run -i": a pod that quick can end before kubectl
 # attaches, and its output is lost.
@@ -134,7 +135,7 @@ fi
 echo "=== Calico"
 CNI_TYPE=calico ./rke2_installer.sh install > "$W/o" 2>&1 && ok "install with CNI_TYPE=calico" || { bad "install with CNI_TYPE=calico"; show; }
 ready && ok "the node is Ready" || bad "the node isn't Ready"
-$K get pods -A --no-headers 2>/dev/null | grep -q calico-node && ok "Calico runs" || bad "no calico-node pod"
+grep -q calico-node <<< "$($K get pods -A --no-headers 2>/dev/null)" && ok "Calico runs" || bad "no calico-node pod"
 # The ingress controller's admission webhook can still be starting: give the apply a minute.
 within 60 workload && ok "apply the test workload on Calico" || { bad "apply the test workload on Calico"; tail -5 "$W/k"; }
 $K wait -n ci-c2 --for=condition=Available deployment/web --timeout=300s >/dev/null 2>&1 && ok "the web app is up on Calico" || { bad "the web app isn't up on Calico"; events; }
