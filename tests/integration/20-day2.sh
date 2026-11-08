@@ -43,7 +43,9 @@ openssl s_server -quiet -accept 5443 -cert "$W/c.pem" -key "$W/k.pem" -www >/dev
 SRV=$!
 CA=/etc/rancher/rke2/certs.d/$IP:5443/ca.crt
 ( RKE2_VERSION=$OLD ./rke2_installer.sh install -registry "$IP:5443" u p > "$W/o" 2>&1; echo $? > "$W/rc" ) &
-for _ in $(seq 1 120); do [ -s "$CA" ] && break; sleep 1; done
+# Keep the endpoint up until the certificate is saved or the install has ended: a fixed 120 s killed it before a slow
+# host reached the fetch (lab run 42441967171, Ubuntu 24.04), which failed the install for the test's own reason
+for _ in $(seq 1 600); do { [ -s "$CA" ] || [ -f "$W/rc" ]; } && break; sleep 1; done
 kill "$SRV" 2>/dev/null
 for _ in $(seq 1 180); do [ -f "$W/rc" ] && break; sleep 5; done
 [ "$(cat "$W/rc" 2>/dev/null)" = 0 ] && ok "install $OLD with -registry" || { bad "install $OLD with -registry"; show; }
