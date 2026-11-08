@@ -5,7 +5,7 @@ set -o errexit
 set -o nounset
 set -o pipefail
 
-SCRIPT_VERSION="1.2.0"
+SCRIPT_VERSION="1.3.0"
 
 # --- USER DEFINED VARIABLES ---#
 RKE2_VERSION=${RKE2_VERSION:-"v1.34.5+rke2r1"}
@@ -28,6 +28,9 @@ RKE2_RECONFIGURE=${RKE2_RECONFIGURE:-"false"}                                 # 
 NTP_SERVERS=${NTP_SERVERS:-}                                                  # Optional space/comma-separated NTP server list applied during 'install'/'join'; empty = leave the OS default time source unchanged
 COREDNS_HOSTS=${COREDNS_HOSTS:-}                                              # Optional in-cluster DNS pins '<fqdn>=<ipv4>[,...]' (split-horizon: pods resolve these names to the given IP regardless of the host's DNS); empty = chart defaults
 RKE2_FORCE_ONLINE=${RKE2_FORCE_ONLINE:-"false"}                               # true = ignore an rke2-save-version.txt in the working directory and stay online
+IMAGE_PULL_PUSH_REF=${IMAGE_PULL_PUSH_REF:-"v1.1.1"}                          # images-pull-push release (tag, branch or commit) whose image_pull_push.sh is fetched
+IMAGE_PULL_PUSH_URL=${IMAGE_PULL_PUSH_URL:-"https://raw.githubusercontent.com/Chubtoad5/images-pull-push/${IMAGE_PULL_PUSH_REF}/image_pull_push.sh"}  # full URL of image_pull_push.sh; wins over IMAGE_PULL_PUSH_REF
+IMAGE_PULL_PUSH_SHA256=${IMAGE_PULL_PUSH_SHA256:-}                            # optional sha256 of image_pull_push.sh; a mismatch stops the run
 UPGRADE_WAIT=${UPGRADE_WAIT:-"false"}                                         # upgrade: true = wait until every targeted node runs the new version, and exit 1 if it doesn't in time
 UPGRADE_WAIT_TIMEOUT=${UPGRADE_WAIT_TIMEOUT:-"1800"}                          # upgrade: seconds UPGRADE_WAIT waits
 POD_WAIT_TIMEOUT=${POD_WAIT_TIMEOUT:-"300"}                                   # seconds install, join and the add-ons wait for their pods to be ready; raise it for a slow host or network
@@ -2902,12 +2905,41 @@ preflight_checks () {
     require_cmds $cmds
 }
 
-image_pull_push_check () {
-    if [[ ! -f $WORKING_DIR/rke2-utilities/image_pull_push.sh ]]; then
-        echo "  Downloading image_pull_push.sh..."
-        curl -sfL https://github.com/Chubtoad5/images-pull-push/raw/refs/heads/main/image_pull_push.sh  -o $WORKING_DIR/rke2-utilities/image_pull_push.sh
-        chmod +x $WORKING_DIR/rke2-utilities/image_pull_push.sh
+# fetch_helper <dest> <url> <ref> [sha256]: a helper script at a given ref (spec 12, as Harbor does). A copy is reused
+# only when the .ref file beside it names the same ref; any other copy is fetched again. A failed download or a
+# checksum mismatch leaves no file behind.
+fetch_helper () {
+    local dest=$1 url=$2 ref=$3 sha=${4:-} ref_file
+    ref_file="$(dirname "$dest")/.$(basename "$dest").ref"
+    if [[ -s "$dest" && "$(cat "$ref_file" 2>/dev/null)" == "$ref" ]]; then
+        return 0
     fi
+    echo "  Downloading $(basename "$dest") ($ref)..."
+    if ! curl -fsSL "$url" -o "$dest.tmp"; then
+        rm -f "$dest.tmp"
+        echo "Error: failed to download $url"
+        return 1
+    fi
+    if [[ -n "$sha" ]] && ! echo "$sha  $dest.tmp" | sha256sum -c --status; then
+        rm -f "$dest.tmp"
+        echo "Error: $(basename "$dest") from $url doesn't match IMAGE_PULL_PUSH_SHA256."
+        return 1
+    fi
+    mv "$dest.tmp" "$dest"
+    chmod +x "$dest"
+    printf '%s\n' "$ref" > "$ref_file"
+}
+
+image_pull_push_check () {
+    local dest=$WORKING_DIR/rke2-utilities/image_pull_push.sh
+    mkdir -p "$WORKING_DIR/rke2-utilities"
+    # A bundle uses the copy it brought, and an air-gapped run must never reach the download
+    if [[ $AIR_GAPPED_MODE -eq 1 ]]; then
+        [[ -s "$dest" ]] && return 0
+        echo "Error: air-gapped, but $dest isn't here. Extract the whole rke2-save.tar.gz in this folder."
+        exit 1
+    fi
+    fetch_helper "$dest" "$IMAGE_PULL_PUSH_URL" "$IMAGE_PULL_PUSH_REF" "$IMAGE_PULL_PUSH_SHA256" || exit 1
 }
 
 check_namespace_pods_ready() {
