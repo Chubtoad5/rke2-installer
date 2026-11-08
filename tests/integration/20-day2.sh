@@ -39,13 +39,19 @@ echo "=== Install $OLD with a registry (R1, R8)"
 # certificate is in place, so containerd's mirror falls straight back to the public registries.
 openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj "/CN=$IP" -addext "subjectAltName=IP:$IP" \
   -keyout "$W/k.pem" -out "$W/c.pem" >/dev/null 2>&1
-openssl s_server -quiet -accept 5443 -cert "$W/c.pem" -key "$W/k.pem" -www >/dev/null 2>&1 &
+openssl s_server -quiet -accept "$IP:5443" -cert "$W/c.pem" -key "$W/k.pem" -www > "$W/srv.log" 2>&1 &
 SRV=$!
+# The installer fetches the certificate within seconds, so the endpoint must be listening first. Lab run 42441967171
+# (Ubuntu 24.04) failed this case for the test's own reason: nothing waited for the port.
+for _ in $(seq 1 30); do timeout 2 bash -c "exec 3<>/dev/tcp/$IP/5443" 2>/dev/null && break; sleep 1; done
+kill -0 "$SRV" 2>/dev/null && timeout 2 bash -c "exec 3<>/dev/tcp/$IP/5443" 2>/dev/null \
+  || { bad "the test's TLS endpoint on $IP:5443 never listened: $(tail -2 "$W/srv.log")"; }
 CA=/etc/rancher/rke2/certs.d/$IP:5443/ca.crt
 ( RKE2_VERSION=$OLD ./rke2_installer.sh install -registry "$IP:5443" u p > "$W/o" 2>&1; echo $? > "$W/rc" ) &
-for _ in $(seq 1 120); do [ -s "$CA" ] && break; sleep 1; done
+# The endpoint stays up until the certificate is saved or the install has ended
+for _ in $(seq 1 600); do { [ -s "$CA" ] || [ -s "$W/rc" ]; } && break; sleep 1; done
 kill "$SRV" 2>/dev/null
-for _ in $(seq 1 180); do [ -f "$W/rc" ] && break; sleep 5; done
+for _ in $(seq 1 180); do [ -s "$W/rc" ] && break; sleep 5; done
 [ "$(cat "$W/rc" 2>/dev/null)" = 0 ] && ok "install $OLD with -registry" || { bad "install $OLD with -registry"; show; }
 ready && ok "the node is Ready" || bad "the node isn't Ready"
 [ -s "$CA" ] && ok "the registry's CA is saved" || bad "no registry CA"

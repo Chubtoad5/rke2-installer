@@ -1,5 +1,30 @@
 # Changelog — rke2-installer
 
+## v1.3.0 — 2026-11-08 — image_pull_push.sh comes from a release
+
+### Changed
+- **`image_pull_push.sh` is fetched from an `images-pull-push` release, `v1.1.1`, instead of `main`.** So a merge in
+  `images-pull-push` no longer reaches this installer, or `ap-tools`, until a pin moves (spec 12).
+- **A copy already in `rke2-utilities/` is reused only if it came from the same ref,** recorded beside it in
+  `.image_pull_push.sh.ref`. Before, any copy was kept for good, so a host never saw a fix. A copy with no record is
+  fetched again once.
+- **Air-gapped, the copy in the bundle is used, and nothing is downloaded.** With no copy there, the run stops and says
+  to extract the whole bundle, or to set `RKE2_FORCE_ONLINE=true` on an online host with a left-over sentinel, where it
+  used to try the download. A `save` always fetches the pinned copy, since it downloads everything else anyway.
+
+### Added
+- **`IMAGE_PULL_PUSH_REF`** (default `v1.1.1`): the tag, branch or commit to fetch.
+- **`IMAGE_PULL_PUSH_URL`**: a full URL, for a mirror. Wins over the ref.
+- **`IMAGE_PULL_PUSH_SHA256`**: an optional checksum. A mismatch, or a failed download, stops the run and leaves no file.
+
+### Tests
+- `tests/unit/helper-pins.bats`: the default tag, the ref and URL settings, reuse and refetch, both checksum cases, a
+  failed download, and both air-gapped cases.
+- `tests/integration/20-day2.sh`: the registry case's TLS stand-in listens on the clone's address, and the install
+  starts only once its port answers. Before, nothing waited for it, and a lab run failed there for the test's own
+  reason. The stand-in stays up until the certificate is saved or the install ends, up to 600 s, and its own errors are
+  shown if it never listens.
+
 ## v1.2.0 — 2026-11-07 — The pod wait on a slow host, and Rocky 10's image kernel
 
 ### Fixed
