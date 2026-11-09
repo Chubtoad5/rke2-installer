@@ -1,5 +1,31 @@
 # Changelog — rke2-installer
 
+## v1.3.1 — 2026-11-09 — Air-gapped installs on hosts without iptables or br_netfilter
+
+### Fixed
+- **An air-gapped install on Ubuntu minimal, Rocky 10 or Leap 16 no longer stops for `iptables`** (spec 15, F6). Those
+  images don't ship it, and with the built-in ingress a server refuses to install without it (R11). `save` now bundles
+  `iptables` with what it needs on the build host's OS, through `install-packages`, in `rke2-install/rke2-packages`. An
+  air-gapped install or join that finds `iptables` missing installs it from there before the check.
+- **An air-gapped install on Rocky, Alma or RHEL 10 no longer stops for `br_netfilter`** (spec 15, F1). Those images keep
+  it in `kernel-modules-extra`, which they leave out. `save` on an EL host also bundles `kernel-modules-extra-$(uname -r)`
+  when the build host's repos still have it, and an air-gapped install installs it when the target runs that same kernel.
+  On another kernel the message names the kernel the bundle was built for, and today's advice follows.
+- `fetch_helper`'s checksum error names the setting that holds the checksum.
+
+### Added
+- `INSTALL_PACKAGES_REF` (default `v1.1.3`), `INSTALL_PACKAGES_URL` and `INSTALL_PACKAGES_SHA256`: which
+  `install_packages.sh` `save` uses. rke2-installer now uses `install-packages` directly, for `save` only.
+- The bundle's `LICENSES/` lists those OS packages, and `WRITTEN_OFFER.txt` covers them: `iptables` and the kernel's
+  modules are GPL-2.0.
+
+A bundle from before v1.3.1 has none of this, and an install from it behaves as before. Packages installed from the bundle
+stay after `uninstall`, as the online install's do.
+
+### Tests
+- `tests/unit/host-packages.bats`: what `save` bundles, both outcomes for `br_netfilter`, `iptables` before R11's check,
+  online and present cases, and the licence notice and offer.
+
 ## v1.3.0 — 2026-11-08 — image_pull_push.sh comes from a release
 
 ### Changed

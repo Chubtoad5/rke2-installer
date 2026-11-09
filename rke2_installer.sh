@@ -5,7 +5,7 @@ set -o errexit
 set -o nounset
 set -o pipefail
 
-SCRIPT_VERSION="1.3.0"
+SCRIPT_VERSION="1.3.1"
 
 # --- USER DEFINED VARIABLES ---#
 RKE2_VERSION=${RKE2_VERSION:-"v1.34.5+rke2r1"}
@@ -31,6 +31,9 @@ RKE2_FORCE_ONLINE=${RKE2_FORCE_ONLINE:-"false"}                               # 
 IMAGE_PULL_PUSH_REF=${IMAGE_PULL_PUSH_REF:-"v1.1.1"}                          # images-pull-push release (tag, branch or commit) whose image_pull_push.sh is fetched
 IMAGE_PULL_PUSH_URL=${IMAGE_PULL_PUSH_URL:-"https://raw.githubusercontent.com/Chubtoad5/images-pull-push/${IMAGE_PULL_PUSH_REF}/image_pull_push.sh"}  # full URL of image_pull_push.sh; wins over IMAGE_PULL_PUSH_REF
 IMAGE_PULL_PUSH_SHA256=${IMAGE_PULL_PUSH_SHA256:-}                            # optional sha256 of image_pull_push.sh; a mismatch stops the run
+INSTALL_PACKAGES_REF=${INSTALL_PACKAGES_REF:-"v1.1.3"}                        # install-packages release (tag, branch or commit) whose install_packages.sh save bundles host packages (iptables, kernel-modules-extra)
+INSTALL_PACKAGES_URL=${INSTALL_PACKAGES_URL:-"https://raw.githubusercontent.com/Chubtoad5/install-packages/${INSTALL_PACKAGES_REF}/install_packages.sh"}  # full URL of install_packages.sh; wins over INSTALL_PACKAGES_REF
+INSTALL_PACKAGES_SHA256=${INSTALL_PACKAGES_SHA256:-}                          # optional sha256 of install_packages.sh; a mismatch stops the save
 UPGRADE_WAIT=${UPGRADE_WAIT:-"false"}                                         # upgrade: true = wait until every targeted node runs the new version, and exit 1 if it doesn't in time
 UPGRADE_WAIT_TIMEOUT=${UPGRADE_WAIT_TIMEOUT:-"1800"}                          # upgrade: seconds UPGRADE_WAIT waits
 POD_WAIT_TIMEOUT=${POD_WAIT_TIMEOUT:-"300"}                                   # seconds install, join and the add-ons wait for their pods to be ready; raise it for a slow host or network
@@ -1063,7 +1066,7 @@ record_install_state () {
 # has left the repo, stop and say to update and reboot. Air-gapped, name the package. Spec 11, U4.
 ensure_el_required_modules () {
     case "$OS_ID" in rhel|centos|rocky|almalinux|fedora) ;; *) return 0 ;; esac
-    local mod missing="" kver pm=dnf
+    local mod missing="" kver pm=dnf bundled
     for mod in overlay br_netfilter; do
         modprobe -n "$mod" >/dev/null 2>&1 || missing="$missing $mod"
     done
@@ -1072,6 +1075,14 @@ ensure_el_required_modules () {
     command -v dnf >/dev/null 2>&1 || pm=yum
     echo "  The running kernel ($kver) has no$missing: it's in kernel-modules-extra, which this image leaves out."
     if [[ $AIR_GAPPED_MODE -eq 1 ]]; then
+        # A bundle built on a host running this same kernel carries its kernel-modules-extra (spec 15, F1)
+        bundled=$(bundled_modules_extra)
+        if [[ "$bundled" == "kernel-modules-extra-$kver" ]] && install_bundled_packages "$bundled"; then
+            return 0
+        fi
+        if [[ -n "$bundled" && "$bundled" != "kernel-modules-extra-$kver" ]]; then
+            echo "  The bundle carries $bundled, which is for another kernel: it was built on a host running ${bundled#kernel-modules-extra-}."
+        fi
         echo "Error: install kernel-modules-extra for the running kernel from local media"
         echo "  ($pm install kernel-modules-extra-$kver), then re-run this script."
         exit 1
@@ -2318,6 +2329,7 @@ run_save () {
     download_upgrade_artifacts
     download_rke2_utilities
     download_selinux_policy_rpms
+    download_host_packages
     create_save_archive
     echo "--- Finished save workflow"
     echo "  Copy the archive to an air-gapped host runing the same version of $OS_ID"
@@ -2493,7 +2505,7 @@ download_monitoring_charts () {
 # monitoring stack is bundled) an AGPLv3 written offer for Grafana, which kube-prometheus-stack
 # deploys. Satisfies the AGPL "corresponding source or written offer" requirement.
 generate_bundle_licenses () {
-    local dir="$base_dir/LICENSES"
+    local dir="$base_dir/LICENSES" host_pkgs="$WORKING_DIR/rke2-packages/offline-packages.tar.gz"
     rm -rf "$dir"; mkdir -p "$dir"
     {
         echo "Third-party components redistributed in this RKE2 air-gap bundle"
@@ -2506,6 +2518,14 @@ generate_bundle_licenses () {
         if [[ ${PUSH_SAVE_MONITORING,,} == "true" ]]; then
             echo "kube-prometheus-stack ${KUBE_PROMETHEUS_STACK_VERSION} (chart) .. Apache-2.0  https://github.com/prometheus-community/helm-charts"
             echo "  -> deploys Grafana ............................. AGPL-3.0   https://github.com/grafana/grafana  (see WRITTEN_OFFER.txt)"
+        fi
+        if [[ -f "$host_pkgs" ]]; then
+            echo ""
+            echo "OS packages in rke2-install/rke2-packages/offline-packages.tar.gz, for an air-gapped install: iptables,"
+            echo "  and on RHEL-family hosts the running kernel's kernel-modules-extra, with what they need on this OS."
+            echo "  Each carries its own license (rpm -q --licensefiles, or /usr/share/doc/<package>/copyright). Some are"
+            echo "  copyleft: iptables and the Linux kernel's modules are GPL-2.0. See WRITTEN_OFFER.txt. The packages:"
+            tar -tzf "$host_pkgs" 2>/dev/null | sed -n 's#^.*/\([^/]*\.\(deb\|rpm\)\)$#    \1#p' | sort || true
         fi
         echo ""
         echo "The installer scripts are Apache-2.0 (Chubtoad5). Permissive components retain"
@@ -2538,6 +2558,30 @@ EOF
         echo "  Wrote LICENSES/ (manifest + AGPL written offer for Grafana)."
     else
         echo "  Wrote LICENSES/ (third-party manifest; monitoring not bundled)."
+    fi
+    if [[ -f "$host_pkgs" ]]; then
+        if [[ -s "$dir/WRITTEN_OFFER.txt" ]]; then echo "" >> "$dir/WRITTEN_OFFER.txt"; fi
+        cat >> "$dir/WRITTEN_OFFER.txt" <<EOF
+WRITTEN OFFER FOR CORRESPONDING SOURCE CODE (GPL, LGPL)
+
+This air-gap bundle redistributes operating system packages in binary form, in
+rke2-install/rke2-packages/offline-packages.tar.gz. THIRD_PARTY_NOTICES.txt lists them. Some
+are licensed under the GNU General Public License or the GNU Lesser General Public License.
+
+The distributor of this bundle hereby makes a written offer, valid for three (3) years from
+the date this bundle was created ($(date +%Y-%m-%d)), to give any third party who possesses
+this bundle a complete machine-readable copy of the corresponding source code for those
+packages, for a charge no more than the cost of physically performing the source
+distribution.
+
+The source is also publicly available from the operating system distribution that each
+package came from (for example, apt-get source <package> on Debian and Ubuntu).
+
+To request the source on a physical medium, contact: ${LICENSE_OFFER_CONTACT}
+
+This offer is independent of the Apache-2.0 license covering the installer scripts.
+EOF
+        echo "  Wrote the written offer for the bundled OS packages (GPL, LGPL)."
     fi
 }
 
@@ -2895,6 +2939,10 @@ preflight_checks () {
     # Without it the controller stays in ContainerCreating and the install times out. An agent can't tell whether its
     # cluster runs the ingress, so it only warns.
     if [[ ( $INSTALL_MODE -eq 1 && $INSTALL_TYPE == "rke2" ) || $JOIN_MODE -eq 1 ]]; then
+        # Air-gapped, the bundle carries iptables: install it before the check (spec 15, F6)
+        if [[ $AIR_GAPPED_MODE -eq 1 ]] && ! command -v iptables >/dev/null 2>&1; then
+            install_bundled_packages iptables || true
+        fi
         if [[ ${INSTALL_INGRESS,,} == "true" && $JOIN_TYPE != "agent" ]]; then
             cmds="$cmds iptables"
         elif ! command -v iptables >/dev/null 2>&1; then
@@ -2905,11 +2953,11 @@ preflight_checks () {
     require_cmds $cmds
 }
 
-# fetch_helper <dest> <url> <ref> [sha256]: a helper script at a given ref (spec 12, as Harbor does). A copy is reused
+# fetch_helper <dest> <url> <ref> [sha256] [name of the sha256 setting, for the error]: a helper script at a given ref (spec 12, as Harbor does). A copy is reused
 # only when the .ref file beside it names the same ref; any other copy is fetched again. A failed download or a
 # checksum mismatch leaves no file behind.
 fetch_helper () {
-    local dest=$1 url=$2 ref=$3 sha=${4:-} ref_file
+    local dest=$1 url=$2 ref=$3 sha=${4:-} sha_var=${5:-IMAGE_PULL_PUSH_SHA256} ref_file
     ref_file="$(dirname "$dest")/.$(basename "$dest").ref"
     if [[ -s "$dest" && "$(cat "$ref_file" 2>/dev/null)" == "$ref" ]]; then
         return 0
@@ -2922,12 +2970,66 @@ fetch_helper () {
     fi
     if [[ -n "$sha" ]] && ! echo "$sha  $dest.tmp" | sha256sum -c --status; then
         rm -f "$dest.tmp"
-        echo "Error: $(basename "$dest") from $url doesn't match IMAGE_PULL_PUSH_SHA256."
+        echo "Error: $(basename "$dest") from $url doesn't match $sha_var."
         return 1
     fi
     mv "$dest.tmp" "$dest"
     chmod +x "$dest"
     printf '%s\n' "$ref" > "$ref_file"
+}
+
+# --- Host packages for an air-gapped install (spec 15: F6, and F1 for br_netfilter) --- #
+# save bundles them in rke2-install/rke2-packages through install-packages, which takes each with what it needs on this
+# OS and installs only what is asked for. A bundle from before v1.3.1 has none, and an install then says what to bring.
+
+# install_packages_check: install_packages.sh at the pinned ref, for save
+install_packages_check () {
+    mkdir -p "$WORKING_DIR/rke2-packages"
+    fetch_helper "$WORKING_DIR/rke2-packages/install_packages.sh" "$INSTALL_PACKAGES_URL" "$INSTALL_PACKAGES_REF" \
+        "$INSTALL_PACKAGES_SHA256" INSTALL_PACKAGES_SHA256 || exit 1
+}
+
+# el_modules_extra_pkg: on an EL host, the running kernel's kernel-modules-extra when this host's repos still have it. A
+# target built from the same image then gets br_netfilter from the bundle. Nothing elsewhere, and a note on stderr when the
+# repos no longer have it.
+el_modules_extra_pkg () {
+    case "$OS_ID" in rhel|centos|rocky|almalinux|fedora) ;; *) return 0 ;; esac
+    local pkg
+    pkg="kernel-modules-extra-$(uname -r)"
+    if [[ -n "$(dnf -q repoquery --available "$pkg" 2>/dev/null)" ]]; then
+        echo "$pkg"
+    else
+        echo "  Note: $pkg isn't in this host's repos, so the bundle won't carry it. A target that lacks br_netfilter will need it from local media." >&2
+    fi
+}
+
+download_host_packages () {
+    local dir="$WORKING_DIR/rke2-packages" pkgs=(iptables) extra
+    extra=$(el_modules_extra_pkg)
+    if [[ -n "$extra" ]]; then pkgs+=("$extra"); fi
+    install_packages_check
+    echo "  Bundling host packages for an air-gapped install: ${pkgs[*]}"
+    if ! (cd "$dir" && ./install_packages.sh save "${pkgs[@]}"); then
+        echo "Error: install_packages.sh couldn't save ${pkgs[*]} into the bundle."
+        exit 1
+    fi
+}
+
+# bundled_modules_extra: the kernel-modules-extra package the bundle carries, as kernel-modules-extra-<kernel>, or nothing
+bundled_modules_extra () {
+    local archive="$WORKING_DIR/rke2-packages/offline-packages.tar.gz" listing
+    [[ -f "$archive" ]] || return 0
+    listing=$(tar -tzf "$archive" 2>/dev/null) || return 0
+    sed -n 's#^.*/\(kernel-modules-extra-[0-9][^/]*\)\.rpm$#\1#p' <<< "$listing" | tail -n 1
+}
+
+# install_bundled_packages <package>...: from the bundle's rke2-packages. Returns 1 with no install when the bundle
+# doesn't carry them (one from before v1.3.1).
+install_bundled_packages () {
+    local dir="$WORKING_DIR/rke2-packages"
+    [[ -x "$dir/install_packages.sh" && -f "$dir/offline-packages.tar.gz" ]] || return 1
+    echo "  Installing $* from the bundle..."
+    (cd "$dir" && ./install_packages.sh offline "$@")
 }
 
 image_pull_push_check () {

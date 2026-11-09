@@ -57,7 +57,7 @@ A flexible RKE2 installer for Linux systems that supports online and air-gapped 
 - RHEL / CentOS / Rocky Linux / AlmaLinux / Fedora
 - SLES / OpenSUSE Leap
 
-With the built-in ingress (`INSTALL_INGRESS=true`, the default), a server needs `iptables` installed, because the ingress controller's host ports are set up with it. `install` and `join server` refuse without it, naming the package. Leap 16 and Ubuntu minimal don't ship it. An agent only warns, because it can't tell whether its cluster runs the ingress.
+With the built-in ingress (`INSTALL_INGRESS=true`, the default), a server needs `iptables` installed, because the ingress controller's host ports are set up with it. `install` and `join server` refuse without it, naming the package. Leap 16 and Ubuntu minimal don't ship it. An agent only warns, because it can't tell whether its cluster runs the ingress. A `save` bundle carries `iptables`, and an air-gapped install or join that finds it missing installs it from the bundle first. On Rocky, Alma or RHEL 10, whose images leave out the `kernel-modules-extra` that holds `br_netfilter`, the bundle also carries the build host's running kernel's package, and an air-gapped install uses it when the target runs that same kernel.
 
 ---
 
@@ -124,6 +124,9 @@ All configuration is done by editing the `USER DEFINED VARIABLES` section at the
 | `IMAGE_PULL_PUSH_REF` | `v1.1.1` | The `images-pull-push` release (a tag, branch or commit) whose `image_pull_push.sh` is fetched for image work. A copy already here is reused only if it came from the same ref. Air-gapped, the copy in the bundle is used and nothing is downloaded |
 | `IMAGE_PULL_PUSH_URL` | the ref's file on `raw.githubusercontent.com` | Full URL of `image_pull_push.sh`, for a mirror. Wins over `IMAGE_PULL_PUSH_REF` |
 | `IMAGE_PULL_PUSH_SHA256` | empty | Optional checksum of `image_pull_push.sh`. A mismatch stops the run, and leaves no file behind |
+| `INSTALL_PACKAGES_REF` | `v1.1.3` | The `install-packages` release whose `install_packages.sh` `save` uses to bundle host packages for an air-gapped install (`iptables`, and `kernel-modules-extra` on EL). The bundle carries that copy |
+| `INSTALL_PACKAGES_URL` | the ref's file on `raw.githubusercontent.com` | Full URL of `install_packages.sh`, for a mirror. Wins over `INSTALL_PACKAGES_REF` |
+| `INSTALL_PACKAGES_SHA256` | empty | Optional checksum of `install_packages.sh`. A mismatch stops the save, and leaves no file behind |
 | `UPGRADE_WAIT` | `false` | `upgrade`: set `true` to wait until every targeted node runs the new version and is schedulable again, and exit 1 if that doesn't happen within `UPGRADE_WAIT_TIMEOUT`. By default `upgrade` exits once the plans are applied, and the nodes upgrade in the background |
 | `UPGRADE_WAIT_TIMEOUT` | `1800` | Seconds `UPGRADE_WAIT` waits |
 | `POD_WAIT_TIMEOUT` | `300` | Seconds `install`, `join` and the add-ons wait for their pods to be ready. If they aren't ready in time, the error names each pod and its state. Raise it for a slow host or network. Through `ap-tools`, give it on the command line, `sudo POD_WAIT_TIMEOUT=600 ./ap-tools install rke2`: `ap-tools` doesn't pass it on from `inputs.env` |
