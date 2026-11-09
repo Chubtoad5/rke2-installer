@@ -17,7 +17,7 @@ tar -xzf "$CI_HANDOFF/rke2-save.tar.gz" && ok "unpack the bundle" || { bad "unpa
 DEBUG=0 ./rke2_installer.sh install > "$W/o" 2>&1 && ok "install with no route out" || { bad "install with no route out"; tail -10 "$W/o" | cut -c1-170; echo "  (the checks after it would only fail too)"; echo "=== exit 1"; exit 1; }
 ready() { $K get nodes --no-headers 2>/dev/null | grep -qw Ready; }
 within 300 ready && ok "the node is Ready" || bad "the node isn't Ready"
-notready() { local out; out=$($K get pods -A --no-headers 2>/dev/null | grep -vE 'Running|Completed'); [ -z "$out" ]; }
+notready() { local all out; all=$($K get pods -A --no-headers 2>/dev/null) || return 1; [ -n "$all" ] || return 1; out=$(grep -vE 'Running|Completed' <<< "$all"); [ -z "$out" ]; }
 within 300 notready && ok "every pod is running or done" || { bad "pods not running: $($K get pods -A --no-headers 2>/dev/null | grep -vE 'Running|Completed' | head -4)"; }
 $K get storageclass local-path >/dev/null 2>&1 && ok "the local-path StorageClass is there" || bad "no local-path StorageClass"
 DEBUG=0 ./rke2_installer.sh uninstall > "$W/o" 2>&1 && ok "uninstall" || { bad "uninstall"; tail -6 "$W/o" | cut -c1-170; }
