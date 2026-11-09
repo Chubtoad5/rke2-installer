@@ -2560,8 +2560,8 @@ EOF
         echo "  Wrote LICENSES/ (third-party manifest; monitoring not bundled)."
     fi
     if [[ -f "$host_pkgs" ]]; then
+        if [[ -s "$dir/WRITTEN_OFFER.txt" ]]; then echo "" >> "$dir/WRITTEN_OFFER.txt"; fi
         cat >> "$dir/WRITTEN_OFFER.txt" <<EOF
-
 WRITTEN OFFER FOR CORRESPONDING SOURCE CODE (GPL, LGPL)
 
 This air-gap bundle redistributes operating system packages in binary form, in
@@ -2953,7 +2953,7 @@ preflight_checks () {
     require_cmds $cmds
 }
 
-# fetch_helper <dest> <url> <ref> [sha256]: a helper script at a given ref (spec 12, as Harbor does). A copy is reused
+# fetch_helper <dest> <url> <ref> [sha256] [name of the sha256 setting, for the error]: a helper script at a given ref (spec 12, as Harbor does). A copy is reused
 # only when the .ref file beside it names the same ref; any other copy is fetched again. A failed download or a
 # checksum mismatch leaves no file behind.
 fetch_helper () {
@@ -2996,7 +2996,7 @@ el_modules_extra_pkg () {
     case "$OS_ID" in rhel|centos|rocky|almalinux|fedora) ;; *) return 0 ;; esac
     local pkg
     pkg="kernel-modules-extra-$(uname -r)"
-    if [[ -n "$(dnf -q repoquery "$pkg" 2>/dev/null)" ]]; then
+    if [[ -n "$(dnf -q repoquery --available "$pkg" 2>/dev/null)" ]]; then
         echo "$pkg"
     else
         echo "  Note: $pkg isn't in this host's repos, so the bundle won't carry it. A target that lacks br_netfilter will need it from local media." >&2
