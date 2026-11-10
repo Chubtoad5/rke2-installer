@@ -1,0 +1,4 @@
+# Spec 09's A5 for rke2: the last release installed and given a workload with a volume, then the commit under test run
+# over it with the same settings, which its README says reconciles without a restart. Run by automation-ci's
+# ci/scenario.sh. Named a5-rke2, not a5, so that only its own line (Ubuntu 24.04, for Docker Hub's pull limit) runs it.
+role host 4 6144 tests/scenarios/a5-upgrade.sh
