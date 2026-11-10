@@ -1,0 +1,9 @@
+# Spec 09's A4 for rke2: a three-node cluster, one server, a second server and an agent joined to it. Then the cluster is
+# checked from the first server, traffic crosses every node, the second server's API answers, and the agent leaves.
+# Run by automation-ci's ci/scenario.sh, one line after another; a step runs another script on a role's clone.
+role server  4 6144 tests/scenarios/a4-server.sh
+role server2 4 6144 tests/scenarios/a4-join.sh
+role agent   2 4096 tests/scenarios/a4-join.sh
+step server  tests/scenarios/a4-server.sh
+step agent   tests/scenarios/a4-join.sh
+step server  tests/scenarios/a4-server.sh
