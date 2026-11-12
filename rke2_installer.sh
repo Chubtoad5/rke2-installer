@@ -1647,29 +1647,39 @@ download_upgrade_artifacts () {
 
 # -- Velero Install Definitions -- #
 
-# check_velero_keys: R15 (spec 21). Velero and its AWS plugin read the keys from an AWS credentials file, whose parser
-# cuts a value at " #" or " ;", trims both ends, and strips quotes and backslash escapes. So the keys are limited to what
-# it carries exactly: an access key of letters and digits, a secret key of letters, digits and + / = . _ -. Generated
-# keys, such as SeaweedFS's hex ones, always fit.
-check_velero_keys () {
-    if [[ ! "$VELERO_S3_ACCESS_KEY" =~ ^[A-Za-z0-9]+$ ]]; then
-        echo "Error: VELERO_S3_ACCESS_KEY can only have letters and digits. Velero reads it from an AWS credentials file,"
-        echo "  which can't carry other characters exactly. Nothing has been changed."
-        return 1
-    fi
-    if [[ ! "$VELERO_S3_SECRET_KEY" =~ ^[A-Za-z0-9+/=._-]+$ ]]; then
-        echo "Error: VELERO_S3_SECRET_KEY can only have letters, digits and + / = . _ -. Velero reads it from an AWS"
-        echo "  credentials file, which can't carry other characters exactly. Nothing has been changed."
-        return 1
+# velero_ini_changes <value>: what the AWS SDK's INI parser, which Velero and its AWS plugin use for their credentials
+# file, would change in this value written unquoted (R15, spec 21). Prints the reason and returns 0, or returns 1 when it
+# reads the value back exactly. It cuts a value at a # or ; after a space, trims spaces at either end, strips one pair
+# of surrounding quotes, and turns \" \' and \n into a quote or a newline. Everything else, generated keys included,
+# arrives as written, so only these are refused.
+velero_ini_changes () {
+    local v=$1 bs='\\'
+    if [[ "$v" == *[[:cntrl:]]* ]]; then echo "a control character"
+    elif [[ "$v" == [[:space:]]* || "$v" == *[[:space:]] ]]; then echo "a space at the start or the end"
+    elif [[ "$v" == *[[:space:]][#\;]* ]]; then echo "a # or ; after a space"
+    elif [[ "$v" == \"*\" || "$v" == \'*\' || "$v" == \" || "$v" == \' ]]; then echo "quotes around it"
+    elif [[ "$v" == *${bs}[\"\'n]* ]]; then echo "a backslash before a quote or an n"
+    else return 1
     fi
 }
 
-# write_velero_credentials <file>: Velero's AWS credentials file, mode 0600 (R15). Each key in double quotes, with " and '
-# escaped, so the AWS SDK's parser reads it back exactly.
+# check_velero_keys: each key, before anything changes, refused only when Velero would read it changed (R15)
+check_velero_keys () {
+    local name why rc=0
+    for name in VELERO_S3_ACCESS_KEY VELERO_S3_SECRET_KEY; do
+        if why=$(velero_ini_changes "${!name}"); then
+            echo "Error: $name has $why, which Velero's AWS credentials file can't carry exactly, so Velero would get a"
+            echo "  different key and every backup would fail. Nothing has been changed."
+            rc=1
+        fi
+    done
+    return $rc
+}
+
+# write_velero_credentials <file>: Velero's AWS credentials file, mode 0600, the keys written as they are (R15). The
+# parser reads back exactly every key check_velero_keys lets through.
 write_velero_credentials () {
-    local a=${VELERO_S3_ACCESS_KEY//\"/\\\"} k=${VELERO_S3_SECRET_KEY//\"/\\\"}
-    a=${a//\'/\\\'}; k=${k//\'/\\\'}
-    ( umask 077; printf '[default]\naws_access_key_id="%s"\naws_secret_access_key="%s"\n' "$a" "$k" > "$1" )
+    ( umask 077; printf '[default]\naws_access_key_id=%s\naws_secret_access_key=%s\n' "$VELERO_S3_ACCESS_KEY" "$VELERO_S3_SECRET_KEY" > "$1" )
 }
 
 run_install_velero () {

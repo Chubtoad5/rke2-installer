@@ -5,13 +5,13 @@
 Spec 21 (chubtoad-automation).
 
 ### Fixed
-- **Velero gets its S3 keys exactly, or `install velero` refuses them up front** (R15). The keys were written unquoted
-  into Velero's AWS credentials file, whose parser cuts a value at ` #` or ` ;`, trims spaces at either end, and strips
-  quotes and backslash escapes. So `install velero` said "VELERO INSTALL COMPLETED" while Velero held a different key,
-  the backup location showed Unavailable, and every scheduled backup failed. Now each key is written in double quotes
-  with `"` and `'` escaped, and a key outside what the format carries is refused before anything changes: the access
-  key must be letters and digits, and the secret key letters, digits and `+ / = . _ -`. Generated keys, such as
-  SeaweedFS's hex ones, always fit.
+- **A Velero S3 key that Velero would read changed is refused up front** (R15). Velero and its AWS plugin read the
+  keys from an AWS credentials file, whose parser cuts a value at a `#` or `;` after a space, trims spaces at either
+  end, strips one pair of surrounding quotes, and turns `\"`, `\'` and `\n` into a quote or a newline. With such a
+  key, `install velero` said "VELERO INSTALL COMPLETED" while Velero held a different key, the backup location showed
+  Unavailable, and every scheduled backup failed. Now exactly those keys are refused before anything changes, with a
+  message that names the format and not the key. Every other key, `velero-backup` and `MySecret@123` included, is
+  written as before and reaches Velero exactly.
 - **`IMAGE_PULL_PUSH_REF` defaults to images-pull-push v1.2.0** (R16), which takes the registry user and password by
   position, so a registry password such as `--help` or `push` is a password. With v1.1.1, a password of `--help` made
   every push exit 0 having pushed nothing. ap-tools passes its own pin down. A save bundle carries its own copy of the
@@ -22,9 +22,9 @@ Spec 21 (chubtoad-automation).
   existing Secret. The README says to delete `secret/cloud-credentials` in `velero` and run `install velero` again.
 
 ### Tests
-- `tests/unit/velero-keys.bats`: every allowed key shape and every spec 21 test password through the credentials file,
-  read back with a port of the AWS SDK's parser; the shapes that changed before are refused, with a message that names
-  the format and not the key; `install velero` refuses before it calls anything.
+- `tests/unit/velero-keys.bats`: key shapes and every spec 21 test password through the credentials file, read back with
+  a port of the AWS SDK's parser: each is refused exactly when the parser would change it; the file is written as
+  before; `install velero` refuses before it calls anything.
 - `tests/unit/helper-pins.bats`: the pin is v1.2.0.
 - `tests/integration/30-functional.sh`: the support Harbor account's password is now spec 21's full test password (every
   symbol and a space) for `install push -registry`, registries.yaml's read-back and the node's pulls.

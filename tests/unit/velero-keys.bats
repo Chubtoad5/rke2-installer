@@ -49,10 +49,11 @@ PY
 # reads <key name>: what Velero would read from the credentials file
 reads() { python3 -I "$AWSINI" "$CREDS" "$1"; }
 
-@test "R15: keys of every allowed shape reach Velero exactly, in a private file" {
+@test "R15: keys of every shape Velero carries reach it exactly, written as before, in a private file" {
   local a k
-  for a in AKIAIOSFODNN7EXAMPLE aaaa1111bbbb2222 0123456789abcdef0123456789abcdef; do
-    for k in 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY' 'cccc3333dddd4444eeee5555ffff6666' 'a+b/c=d.e_f-g' '==' '-x'; do
+  for a in AKIAIOSFODNN7EXAMPLE aaaa1111bbbb2222 velero-backup; do
+    for k in 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY' 'cccc3333dddd4444eeee5555ffff6666' 'a+b/c=d.e_f-g' '==' '-x' \
+             'MySecret@123' 'ab"c' 'a b' '!@#$%^&*()' 'ab\c' 'x#y;z'; do
       VELERO_S3_ACCESS_KEY=$a VELERO_S3_SECRET_KEY=$k
       check_velero_keys
       rm -f "$CREDS"; write_velero_credentials "$CREDS"
@@ -61,47 +62,45 @@ reads() { python3 -I "$AWSINI" "$CREDS" "$1"; }
       [ "$(stat -c %a "$CREDS")" = 600 ]
     done
   done
+  # A plain key is written exactly as main wrote it, so nothing that worked changes
+  VELERO_S3_ACCESS_KEY=aaaa1111bbbb2222 VELERO_S3_SECRET_KEY=cccc3333dddd4444eeee5555ffff6666
+  rm -f "$CREDS"; write_velero_credentials "$CREDS"
+  [ "$(cat "$CREDS")" = $'[default]\naws_access_key_id=aaaa1111bbbb2222\naws_secret_access_key=cccc3333dddd4444eeee5555ffff6666' ]
 }
-@test "R15: every test password as a key is refused, or reaches Velero exactly" {
-  local n v refused=0 kept=0
+@test "R15: every test password as a key is refused exactly when Velero would read it changed" {
+  local n v kept=0 refused=0
   for n in "${VEC_NAMES[@]}"; do
     v=${VEC[$n]}
     VELERO_S3_ACCESS_KEY=AKIAEXAMPLE VELERO_S3_SECRET_KEY=$v
+    rm -f "$CREDS"; write_velero_credentials "$CREDS"
     if check_velero_keys >/dev/null; then
-      rm -f "$CREDS"; write_velero_credentials "$CREDS"
-      [ "$(reads aws_secret_access_key)" = "$v" ]
-      kept=$((kept + 1))
+      [ "$(reads aws_secret_access_key)" = "$v" ]; kept=$((kept + 1))
     else
-      refused=$((refused + 1))
-    fi
-    VELERO_S3_ACCESS_KEY=$v VELERO_S3_SECRET_KEY=abc
-    if check_velero_keys >/dev/null; then
-      rm -f "$CREDS"; write_velero_credentials "$CREDS"
-      [ "$(reads aws_access_key_id)" = "$v" ]
+      [ "$(reads aws_secret_access_key 2>/dev/null)" != "$v" ]; refused=$((refused + 1))
     fi
   done
-  [ "$refused" -gt 0 ]
-  [ "$kept" -gt 0 ]
+  [ "$refused" -gt 0 ] && [ "$kept" -gt 0 ]
 }
-@test "R15: the shapes that reached Velero changed before are refused, and the message names the format, not the key" {
+@test "R15: the shapes Velero reads changed are refused, and the message names the format, not the key" {
   local k
-  for k in 'abc #def' 'abc ;def' ' abc' 'abc ' '"abc"' "'abc'" 'ab\"c' "'"; do
+  for k in 'abc #def' 'abc ;def' ' abc' 'abc ' '"abc"' "'abc'" '"' "'" 'ab\"c' "ab\\'c" 'ab\nc'; do
     VELERO_S3_ACCESS_KEY=AKIAEXAMPLE VELERO_S3_SECRET_KEY=$k
     run check_velero_keys
     [ "$status" -eq 1 ]
-    [[ "$output" == *"VELERO_S3_SECRET_KEY can only have"* && "$output" == *"credentials file"* ]]
+    [[ "$output" == *"VELERO_S3_SECRET_KEY has"* && "$output" == *"credentials file can't carry exactly"* ]]
     [[ "$output" == *"Nothing has been changed"* ]]
+    [[ "$output" != *"$k"* || ${#k} -le 1 ]]
   done
-  VELERO_S3_ACCESS_KEY='AKIA EXAMPLE' VELERO_S3_SECRET_KEY=abc
+  VELERO_S3_ACCESS_KEY=' AKIA' VELERO_S3_SECRET_KEY=abc
   run check_velero_keys
   [ "$status" -eq 1 ]
-  [[ "$output" == *"VELERO_S3_ACCESS_KEY can only have letters and digits"* ]]
+  [[ "$output" == *"VELERO_S3_ACCESS_KEY has a space at the start or the end"* ]]
 }
 @test "R15: install velero refuses such a key before anything else" {
   run env VELERO_S3_URL=https://s3.example:8333 VELERO_S3_ACCESS_KEY=AKIAEXAMPLE VELERO_S3_SECRET_KEY='abc #def' \
     bash "$BATS_TEST_DIRNAME/../../rke2_installer.sh" install velero
   [ "$status" -ne 0 ]
-  [[ "$output" == *"VELERO_S3_SECRET_KEY can only have"* ]]
+  [[ "$output" == *"VELERO_S3_SECRET_KEY has a # or ; after a space"* ]]
   ! called kubectl || false
   ! called velero || false
 }

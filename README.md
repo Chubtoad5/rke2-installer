@@ -152,8 +152,8 @@ All configuration is done by editing the `USER DEFINED VARIABLES` section at the
 | `VELERO_AWS_PLUGIN_VERSION` | `v1.13.0` | Velero AWS plugin version (used for S3 backend) |
 | `VELERO_BUCKET` | `velero` | S3 bucket name for backup storage. In a multi-cluster environment set this per cluster (e.g. `VELERO_BUCKET=$CLUSTER_NAME`) to avoid backup collision. The installer prints a warning if `VELERO_BUCKET` is left at the default `velero` while `CLUSTER_NAME` has been customised. |
 | `VELERO_S3_URL` | *(required)* | S3 endpoint URL, e.g. `https://s3.example.com:8333` |
-| `VELERO_S3_ACCESS_KEY` | *(required)* | S3 access key: letters and digits only. Velero reads it from an AWS credentials file, which can't carry other characters exactly |
-| `VELERO_S3_SECRET_KEY` | *(required)* | S3 secret key: letters, digits and `+ / = . _ -` only, for the same reason. Generated keys, such as SeaweedFS's, always fit |
+| `VELERO_S3_ACCESS_KEY` | *(required)* | S3 access key. Velero reads it from an AWS credentials file, so a key that file would change is refused: see below |
+| `VELERO_S3_SECRET_KEY` | *(required)* | S3 secret key, with the same rule. Generated keys, such as SeaweedFS's, always fit |
 | `VELERO_BACKUP_NAMESPACES` | `default` | Comma-separated list of namespaces to include in scheduled backups |
 | `VELERO_BACKUP_TTL` | `720h` | Backup retention period (30 days) |
 | `VELERO_BACKUP_SCHEDULE` | `0 2 * * *` | Cron schedule for the daily backup (default: 2 AM) |
@@ -321,9 +321,9 @@ VELERO_BUCKET="velero"
 VELERO_BACKUP_NAMESPACES="default,my-app"  # namespaces to back up
 ```
 
-The keys go into Velero's AWS credentials file, whose parser cuts a value at ` #` or ` ;`, trims spaces and strips
-quotes and backslashes. So the access key must be letters and digits, and the secret key letters, digits and
-`+ / = . _ -`, or `install velero` stops before it changes anything (spec 21).
+The keys go into Velero's AWS credentials file, whose parser cuts a value at a `#` or `;` after a space, trims spaces
+at either end, strips one pair of surrounding quotes, and turns `\"`, `\'` and `\n` into a quote or a newline. A key
+with any of those is refused before anything changes (spec 21); every other key reaches Velero exactly.
 
 **A key changed by a release before v1.4.0:** Velero never updates its `cloud-credentials` Secret on a re-run, so a
 cluster that got a mangled key keeps it, and `velero backup-location get` shows the location Unavailable. Delete the
