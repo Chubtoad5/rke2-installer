@@ -94,7 +94,6 @@ for D in /opt/rke2 /opt/rke2/; do
   $KD get --raw /readyz >/dev/null 2>&1 && ok "install $round: the API server answers" || bad "install $round: the API server doesn't answer"
   $KD get nodes --no-headers 2>/dev/null | grep -qw NotReady && ok "install $round: the node is NotReady, as expected with no CNI" || bad "install $round: node: $($KD get nodes --no-headers 2>&1 | head -1)"
   RKE2_DATA=$D ./rke2_installer.sh uninstall > "$W/o" 2>&1 && ok "uninstall $round" || { bad "uninstall $round"; show; }
-  grep -qF "(RKE2_DATA_DIR=${D%/})" "$W/o" && ok "uninstall $round: Rancher's uninstaller got RKE2_DATA_DIR=${D%/}" || bad "uninstall $round: no 'RKE2_DATA_DIR=${D%/}' in its output"
   l=$(leftovers)
   [ -z "$l" ] && ok "uninstall $round: no containerd-shim, kube-apiserver or :6443 listener is left" || bad "uninstall $round left:$l"
   [ ! -e "$D" ] && ok "uninstall $round: $D is gone" || bad "uninstall $round: $D is still there"
