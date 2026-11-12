@@ -21,11 +21,13 @@ Spec 20 (chubtoad-automation), asked for by dap-blueprints Plan 01's Q50, from b
   `/var/lib/rancher/rke2/bin/kubectl`. It uses `$RKE2_DATA/bin/kubectl` now, and so does `upgrade`'s `PATH`.
 
 ### Upgrading
-- A node whose stored registry password has `"` or `\` has a wrong `registries.yaml`. A re-run with `-registry` now
+- A node whose stored registry user or password has `"` or `\` has a wrong `registries.yaml`. A re-run with `-registry` now
   writes it correctly, which differs from the running node's file, so the run stops, as for any registry change,
   until you add `RKE2_RECONFIGURE=true`. That rewrites the file and restarts the service. Every other password writes
   the same file as before.
 - Pass `uninstall` the same `RKE2_DATA` as `install`; it doesn't read the path back from the node.
+- A relative `RKE2_DATA` (or `/`) isn't passed to Rancher's uninstaller, which would `rm -rf` it: it gets its default
+  path, with a warning, as the installer's own cleanup already refused such a path.
 
 ## v1.3.1 — 2026-11-09 — Air-gapped installs on hosts without iptables or br_netfilter
 

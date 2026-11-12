@@ -97,6 +97,21 @@ EOF
   [ ! -e "$T/rke2" ]
 }
 
+@test "R13: a relative RKE2_DATA isn't handed to the uninstaller's rm -rf; it gets its default, with a warning" {
+  in_container
+  printf '#!/bin/sh\necho "rke2-uninstall.sh RKE2_DATA_DIR=${RKE2_DATA_DIR-unset}" >> "%s"\n' "$STUB_LOG" > /usr/local/bin/rke2-uninstall.sh
+  chmod +x /usr/local/bin/rke2-uninstall.sh
+  stub systemctl '[ "$1" = is-active ] && exit 3; exit 0'
+  stub findmnt
+  STATE_FILE=$T/state RKE2_DATA=None KUBELET_DATA=$T/kubelet PVC_DATA=$T/pvc WORKING_DIR=$T/wd user_name=root
+  cd "$T" && mkdir None
+  run uninstall_rke2
+  rm -f /usr/local/bin/rke2-uninstall.sh
+  called "rke2-uninstall.sh RKE2_DATA_DIR=unset"
+  [[ "$output" == *"RKE2_DATA=None isn't an absolute path"* ]]
+  [ -d "$T/None" ]
+}
+
 @test "R14: wait_for_api_server asks RKE2's kubectl under a custom RKE2_DATA" {
   RKE2_DATA=$T/rke2
   mkdir -p "$RKE2_DATA/bin"
