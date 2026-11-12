@@ -2174,13 +2174,16 @@ uninstall_rke2() {
         # Rancher's rke2-killall.sh finds the pods' containerd shims under RKE2_DATA_DIR, and rke2-uninstall.sh removes it.
         # Both assume /var/lib/rancher/rke2 when it isn't set, so with a custom RKE2_DATA every pod kept running, the
         # API server on :6443 among them, and the next install on the host failed (R13). RKE2_DATA is resolved by now.
-        # A path the cleanup below would refuse (relative, or /) isn't handed to Rancher's rm -rf either.
-        local data_dir_env=()
-        if [[ "$RKE2_DATA" == /* && "$RKE2_DATA" != "/" ]]; then
-            data_dir_env=("RKE2_DATA_DIR=$RKE2_DATA")
-            echo "  Running upstream uninstaller $uninstaller (RKE2_DATA_DIR=$RKE2_DATA)..."
+        # A path the cleanup below would refuse (relative, or /) isn't handed to Rancher's rm -rf either. Trailing
+        # slashes go first: rke2-killall.sh matches "${RKE2_DATA_DIR}/data/..." in the process list, and the pods run
+        # from /opt/rke2/data/..., never /opt/rke2//data/... (spec 20's Q11).
+        local data_dir_env=() data_dir=$RKE2_DATA
+        while [[ "$data_dir" == */ && "$data_dir" != "/" ]]; do data_dir=${data_dir%/}; done
+        if [[ "$data_dir" == /* && "$data_dir" != "/" ]]; then
+            data_dir_env=("RKE2_DATA_DIR=$data_dir")
+            echo "  Running upstream uninstaller $uninstaller (RKE2_DATA_DIR=$data_dir)..."
         else
-            echo "  WARNING: RKE2_DATA=$RKE2_DATA isn't an absolute path, so the upstream uninstaller gets its default data path."
+            echo "  WARNING: RKE2_DATA=$RKE2_DATA isn't an absolute path other than /, so the upstream uninstaller gets its default data path."
             echo "  Running upstream uninstaller $uninstaller..."
         fi
         env "${data_dir_env[@]}" "$uninstaller" || echo "  WARNING: $uninstaller exited non-zero; continuing local cleanup."

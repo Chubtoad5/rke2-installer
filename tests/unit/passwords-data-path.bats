@@ -112,6 +112,33 @@ EOF
   [ -d "$T/None" ]
 }
 
+@test "R13 (Q11): trailing slashes on RKE2_DATA are dropped before the uninstaller gets it" {
+  in_container
+  printf '#!/bin/sh\necho "rke2-uninstall.sh RKE2_DATA_DIR=[$RKE2_DATA_DIR]" >> "%s"\n' "$STUB_LOG" > /usr/local/bin/rke2-uninstall.sh
+  chmod +x /usr/local/bin/rke2-uninstall.sh
+  stub systemctl '[ "$1" = is-active ] && exit 3; exit 0'
+  stub findmnt
+  STATE_FILE=$T/state RKE2_DATA=$T/rke2// KUBELET_DATA=$T/kubelet PVC_DATA=$T/pvc WORKING_DIR=$T/wd user_name=root
+  mkdir -p "$T/rke2" "$KUBELET_DATA" "$PVC_DATA"
+  run uninstall_rke2
+  rm -f /usr/local/bin/rke2-uninstall.sh
+  [ "$status" -eq 0 ]
+  called "rke2-uninstall.sh RKE2_DATA_DIR=[$T/rke2]"
+}
+
+@test "R13 (Q11): RKE2_DATA=// is still refused, not trimmed to /" {
+  in_container
+  printf '#!/bin/sh\necho "rke2-uninstall.sh RKE2_DATA_DIR=${RKE2_DATA_DIR-unset}" >> "%s"\n' "$STUB_LOG" > /usr/local/bin/rke2-uninstall.sh
+  chmod +x /usr/local/bin/rke2-uninstall.sh
+  stub systemctl '[ "$1" = is-active ] && exit 3; exit 0'
+  stub findmnt
+  STATE_FILE=$T/state RKE2_DATA=// KUBELET_DATA=$T/kubelet PVC_DATA=$T/pvc WORKING_DIR=$T/wd user_name=root
+  run uninstall_rke2
+  rm -f /usr/local/bin/rke2-uninstall.sh
+  called "rke2-uninstall.sh RKE2_DATA_DIR=unset"
+  [[ "$output" == *"RKE2_DATA=// isn't an absolute path other than /"* ]]
+}
+
 @test "R14: wait_for_api_server asks RKE2's kubectl under a custom RKE2_DATA" {
   RKE2_DATA=$T/rke2
   mkdir -p "$RKE2_DATA/bin"

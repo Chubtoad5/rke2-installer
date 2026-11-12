@@ -16,7 +16,8 @@ Spec 20 (chubtoad-automation), asked for by dap-blueprints Plan 01's Q50, from b
   `rke2-killall.sh` read only `RKE2_DATA_DIR`, defaulting to `/var/lib/rancher/rke2`. So with `RKE2_DATA=/opt/rke2`
   they killed no pod: the containerd shims, `kube-proxy` and `kube-apiserver` (on `:6443`) kept running from a
   deleted directory, and the next install on the host failed. `uninstall` now runs the uninstaller with
-  `RKE2_DATA_DIR` set to `RKE2_DATA`.
+  `RKE2_DATA_DIR` set to `RKE2_DATA`, without trailing slashes: Rancher's killall would look for `/opt/rke2//data/…`
+  and still find no pod.
 - **`CNI_TYPE=none` with a custom `RKE2_DATA` no longer fails after 120 s** (R14). `wait_for_api_server` called
   `/var/lib/rancher/rke2/bin/kubectl`. It uses `$RKE2_DATA/bin/kubectl` now, and so does `upgrade`'s `PATH`.
 
