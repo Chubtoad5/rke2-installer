@@ -2143,8 +2143,20 @@ unmount_containerd_tmpmounts () {
     done || true
 }
 
+# trim_slashes <path>: the path without trailing slashes, so /opt/rke2/ and /opt/rke2 are one spelling to every check
+# and match in uninstall. // and /// become /, which every guard refuses.
+trim_slashes () {
+    local p=$1
+    while [[ "$p" == */ && "$p" != "/" ]]; do p=${p%/}; done
+    printf '%s' "$p"
+}
+
 uninstall_rke2() {
     echo "--- Uninstalling RKE2"
+    # One spelling of each data path for every step below (spec 20's Q11). With a trailing slash, Rancher's killall
+    # looked for /opt/rke2//data/... and killed no pod, the tmpmount unmount matched nothing, and // got past the
+    # removal guards as if it weren't /.
+    RKE2_DATA=$(trim_slashes "$RKE2_DATA"); KUBELET_DATA=$(trim_slashes "$KUBELET_DATA"); PVC_DATA=$(trim_slashes "$PVC_DATA")
     # Load recorded install state (written at install time; RK-13).
     local have_state=0
     if [[ -f "$STATE_FILE" ]]; then
@@ -2174,14 +2186,12 @@ uninstall_rke2() {
         # Rancher's rke2-killall.sh finds the pods' containerd shims under RKE2_DATA_DIR, and rke2-uninstall.sh removes it.
         # Both assume /var/lib/rancher/rke2 when it isn't set, so with a custom RKE2_DATA every pod kept running, the
         # API server on :6443 among them, and the next install on the host failed (R13). RKE2_DATA is resolved by now.
-        # A path the cleanup below would refuse (relative, or /) isn't handed to Rancher's rm -rf either. Trailing
-        # slashes go first: rke2-killall.sh matches "${RKE2_DATA_DIR}/data/..." in the process list, and the pods run
-        # from /opt/rke2/data/..., never /opt/rke2//data/... (spec 20's Q11).
-        local data_dir_env=() data_dir=$RKE2_DATA
-        while [[ "$data_dir" == */ && "$data_dir" != "/" ]]; do data_dir=${data_dir%/}; done
-        if [[ "$data_dir" == /* && "$data_dir" != "/" ]]; then
-            data_dir_env=("RKE2_DATA_DIR=$data_dir")
-            echo "  Running upstream uninstaller $uninstaller (RKE2_DATA_DIR=$data_dir)..."
+        # A path the cleanup below would refuse (relative, or /) isn't handed to Rancher's rm -rf either, and nor is a
+        # RKE2_DATA_DIR the caller exported (rke2-tech-ops' stop does): the uninstaller then really gets its default.
+        local data_dir_env=(-u RKE2_DATA_DIR)
+        if [[ "$RKE2_DATA" == /* && "$RKE2_DATA" != "/" ]]; then
+            data_dir_env=("RKE2_DATA_DIR=$RKE2_DATA")
+            echo "  Running upstream uninstaller $uninstaller (RKE2_DATA_DIR=$RKE2_DATA)..."
         else
             echo "  WARNING: RKE2_DATA=$RKE2_DATA isn't an absolute path other than /, so the upstream uninstaller gets its default data path."
             echo "  Running upstream uninstaller $uninstaller..."

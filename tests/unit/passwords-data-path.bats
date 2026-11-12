@@ -126,17 +126,51 @@ EOF
   called "rke2-uninstall.sh RKE2_DATA_DIR=[$T/rke2]"
 }
 
-@test "R13 (Q11): RKE2_DATA=// is still refused, not trimmed to /" {
+@test "R13 (Q11): RKE2_DATA=// counts as /: refused by the hand-off and the removal, and an exported RKE2_DATA_DIR is dropped" {
   in_container
   printf '#!/bin/sh\necho "rke2-uninstall.sh RKE2_DATA_DIR=${RKE2_DATA_DIR-unset}" >> "%s"\n' "$STUB_LOG" > /usr/local/bin/rke2-uninstall.sh
   chmod +x /usr/local/bin/rke2-uninstall.sh
   stub systemctl '[ "$1" = is-active ] && exit 3; exit 0'
   stub findmnt
+  # A guard of its own, so a regression here can't reach the real rm with /: any rm of a root spelling is refused and
+  # logged, and every other rm runs as usual.
+  stub rm 'for a; do case "$a" in /|//|///) echo "rm-guard refused $a" >> "$STUB_LOG"; exit 1 ;; esac; done; exec /usr/bin/rm "$@"'
   STATE_FILE=$T/state RKE2_DATA=// KUBELET_DATA=$T/kubelet PVC_DATA=$T/pvc WORKING_DIR=$T/wd user_name=root
+  mkdir -p "$KUBELET_DATA" "$PVC_DATA"
+  export RKE2_DATA_DIR=//
   run uninstall_rke2
-  rm -f /usr/local/bin/rke2-uninstall.sh
+  unset RKE2_DATA_DIR
+  /usr/bin/rm -f /usr/local/bin/rke2-uninstall.sh
+  [ "$status" -eq 0 ]
   called "rke2-uninstall.sh RKE2_DATA_DIR=unset"
-  [[ "$output" == *"RKE2_DATA=// isn't an absolute path other than /"* ]]
+  [[ "$output" == *"RKE2_DATA=/ isn't an absolute path other than /"* ]]
+  [[ "$output" == *"Refusing removal of dir RKE2_DATA=/"* ]]
+  ! called "rm-guard refused" || false
+}
+
+@test "R13 (Q11): with a trailing slash, the containerd tmpmounts under the data path are still unmounted" {
+  stub findmnt "echo $T/rke2/agent/containerd/tmpmounts/containerd-mount444"
+  stub umount 'exit 0'
+  RKE2_DATA=$(trim_slashes "$T/rke2//")
+  run unmount_containerd_tmpmounts
+  [ "$status" -eq 0 ]
+  called "umount -- $T/rke2/agent/containerd/tmpmounts/containerd-mount444"
+}
+
+@test "R13 (Q11): uninstall trims all three data paths before anything uses them" {
+  body=$(sed -n '/^uninstall_rke2() {/,/^}/p' "$BATS_TEST_DIRNAME/../../rke2_installer.sh")
+  first=$(grep -n 'trim_slashes "\$RKE2_DATA"' <<< "$body" | head -1 | cut -d: -f1)
+  [ -n "$first" ]
+  grep -q 'KUBELET_DATA=$(trim_slashes "$KUBELET_DATA")' <<< "$body"
+  grep -q 'PVC_DATA=$(trim_slashes "$PVC_DATA")' <<< "$body"
+  # nothing reads a data path before the trim
+  before=$(head -n "$((first - 1))" <<< "$body")
+  [[ "$before" != *'$RKE2_DATA'* && "$before" != *'$KUBELET_DATA'* && "$before" != *'$PVC_DATA'* ]]
+  [ "$(trim_slashes /opt/rke2///)" = /opt/rke2 ]
+  [ "$(trim_slashes //)" = / ]
+  [ "$(trim_slashes /)" = / ]
+  [ "$(trim_slashes default)" = default ]
+  [ "$(trim_slashes '')" = '' ]
 }
 
 @test "R14: wait_for_api_server asks RKE2's kubectl under a custom RKE2_DATA" {
