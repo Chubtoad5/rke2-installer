@@ -17,13 +17,13 @@ printf "#!/bin/bash\necho helper\n" > "$out"'
 }
 helper_sha() { printf '#!/bin/bash\necho helper\n' | sha256sum | cut -d' ' -f1; }
 
-@test "the default fetches image_pull_push.sh from images-pull-push v1.1.1, by tag" {
-  [ "$IMAGE_PULL_PUSH_REF" = v1.1.1 ]
+@test "the default fetches image_pull_push.sh from images-pull-push v1.2.0, by tag" {
+  [ "$IMAGE_PULL_PUSH_REF" = v1.2.0 ]
   run image_pull_push_check
   [ "$status" -eq 0 ]
-  called "curl -fsSL https://raw.githubusercontent.com/Chubtoad5/images-pull-push/v1.1.1/image_pull_push.sh"
+  called "curl -fsSL https://raw.githubusercontent.com/Chubtoad5/images-pull-push/v1.2.0/image_pull_push.sh"
   [ -x "$DEST" ]
-  [ "$(cat "$REF_FILE")" = v1.1.1 ]
+  [ "$(cat "$REF_FILE")" = v1.2.0 ]
 }
 @test "IMAGE_PULL_PUSH_REF sets the URL" {
   export IMAGE_PULL_PUSH_REF=v9.9.9
@@ -51,7 +51,7 @@ helper_sha() { printf '#!/bin/bash\necho helper\n' | sha256sum | cut -d' ' -f1; 
   run image_pull_push_check
   [ "$status" -eq 0 ]
   called "curl"
-  [ "$(cat "$REF_FILE")" = v1.1.1 ]
+  [ "$(cat "$REF_FILE")" = v1.2.0 ]
   grep -q "echo helper" "$DEST"
 }
 @test "a copy with no record, as main used to leave, is fetched again" {
@@ -80,7 +80,7 @@ helper_sha() { printf '#!/bin/bash\necho helper\n' | sha256sum | cut -d' ' -f1; 
   stub curl 'exit 22'
   run image_pull_push_check
   [ "$status" -eq 1 ]
-  [[ "$output" == *"failed to download https://raw.githubusercontent.com/Chubtoad5/images-pull-push/v1.1.1/image_pull_push.sh"* ]]
+  [[ "$output" == *"failed to download https://raw.githubusercontent.com/Chubtoad5/images-pull-push/v1.2.0/image_pull_push.sh"* ]]
   [ ! -e "$DEST" ]
   [ ! -e "$DEST.tmp" ]
 }
@@ -111,8 +111,8 @@ helper_sha() { printf '#!/bin/bash\necho helper\n' | sha256sum | cut -d' ' -f1; 
   echo old > "$DEST"
   run image_pull_push_check
   [ "$status" -eq 0 ]
-  called "curl -fsSL https://raw.githubusercontent.com/Chubtoad5/images-pull-push/v1.1.1/image_pull_push.sh"
-  [ "$(cat "$REF_FILE")" = v1.1.1 ]
+  called "curl -fsSL https://raw.githubusercontent.com/Chubtoad5/images-pull-push/v1.2.0/image_pull_push.sh"
+  [ "$(cat "$REF_FILE")" = v1.2.0 ]
 }
 @test "nothing fetches image_pull_push.sh from main any more" {
   ! grep -n 'images-pull-push/raw/refs/heads/main' "$BATS_TEST_DIRNAME/../../rke2_installer.sh" || false
