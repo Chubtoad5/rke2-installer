@@ -2,7 +2,7 @@
 # What a cluster is for, on a throwaway host, as root, from the repo root (spec 09's C2, in the chubtoad-automation project):
 # the default install with local-path and the DNS utility, a pod with a volume, a Service by name, a request through the
 # ingress, a changed config refused without RKE2_RECONFIGURE, -tls-san for a DNS name with certificate checks on, Calico as
-# well as Canal, then an install push to a registry whose password has ", \, a space and * (spec 20's R12), and an install
+# well as Canal, then an install push to a registry whose password is spec 21's full test password (every symbol and a space), and an install
 # from it. Runs after 20-day2.sh, which leaves the host uninstalled.
 # The DNS name and the registry come from CI's lab run (CI_SUPPORT_DNS_NAME, CI_SUPPORT_REGISTRY and an account of this
 # job's own); without them those parts are skipped. Test pods use busybox, so nothing here installs a tool on the host.
@@ -144,22 +144,26 @@ svc_ok b && ok "a pod reaches the Service by name on Calico" || bad "a pod can't
 within 180 web_ok && ok "the ingress works on Calico" || bad "the ingress on Calico"
 ./rke2_installer.sh uninstall > "$W/o" 2>&1 && ok "uninstall" || { bad "uninstall"; show; }
 
-echo "=== install push to a registry, with a password holding \", \\, a space and * (R12)"
+echo "=== install push to a registry, with spec 21's full test password: every symbol and a space (R12, spec 21)"
 if [ -z "${CI_SUPPORT_REGISTRY:-}" ]; then
   skip "the registry checks: no CI_SUPPORT_REGISTRY (CI's lab runs give one)"
 else
   R=$CI_SUPPORT_REGISTRY RU=$CI_SUPPORT_REGISTRY_USER RP=$CI_SUPPORT_REGISTRY_PASSWORD
   h() { curl -sk -m 20 -u "$RU:$RP" -H 'Content-Type: application/json' "$@"; }
   # This job's Harbor account is its own, so it takes a password the installer used to mangle: " and \ broke
-  # registries.yaml, and a space or * split or globbed the push's login. Harbor wants upper, lower and a digit.
-  NP='Ci 9"pw\x*Z'
+  # registries.yaml, and a space or * split or globbed the push's login (spec 20). Spec 21's full test password has
+  # every symbol and a space, and Harbor's upper, lower and digit.
+  # shellcheck source=../vectors.bash
+  source "$REPO/tests/vectors.bash"
+  load_vectors "$REPO/tests/password-vectors.txt"
+  NP=${VEC[full]}
   uid=$(h "https://$R/api/v2.0/users/current" | python3 -I -c 'import json, sys; print(json.load(sys.stdin)["user_id"])' 2>/dev/null)
   body=$(python3 -I -c 'import json, sys; print(json.dumps({"old_password": sys.argv[1], "new_password": sys.argv[2]}))' "$RP" "$NP")
   c=$(h -o /dev/null -w '%{http_code}' -X PUT "https://$R/api/v2.0/users/${uid:-none}/password" -d "$body")
-  if [ "$c" = 200 ]; then RP=$NP; ok "this job's Harbor account now has a password with \", \\, a space and *"
+  if [ "$c" = 200 ]; then RP=$NP; ok "this job's Harbor account now has spec 21's full test password"
   else bad "change this job's Harbor password (user ${uid:-not found}): $c"; fi
   # Files the password's * could glob to, in the folder the installer runs from
-  touch "$W/Ci-glob-bait" "$W/9xZ"
+  touch "$W/Aa1-glob-bait" "$W/Aa1 x" "$W/~"
   # images-pull-push keeps each image's path, so Harbor needs a project per namespace: rke2's push also carries the
   # monitoring and Velero images. library comes with Harbor. A namespace added to push's lists shows up below as a
   # failed push that names the image.

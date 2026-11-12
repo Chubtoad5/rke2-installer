@@ -1,5 +1,36 @@
 # Changelog — rke2-installer
 
+## v1.4.0 — 2026-11-12 — Velero's S3 keys arrive exactly; images-pull-push v1.2.0
+
+Spec 21 (chubtoad-automation).
+
+### Fixed
+- **A Velero S3 key that Velero would read changed is refused up front** (R15). Velero and its AWS plugin read the
+  keys from an AWS credentials file, whose parser cuts a value at a `#` or `;` after a space, trims spaces at either
+  end, strips one pair of surrounding quotes, and turns `\"`, `\'` and `\n` into a quote or a newline. With such a
+  key, `install velero` said "VELERO INSTALL COMPLETED" while Velero held a different key, the backup location showed
+  Unavailable, and every scheduled backup failed. Now exactly those keys are refused before anything changes, with a
+  message that names the format and not the key. Every other key, `velero-backup` and `MySecret@123` included, is
+  written as before and reaches Velero exactly.
+- **`IMAGE_PULL_PUSH_REF` defaults to images-pull-push v1.2.0** (R16), which takes the registry user and password by
+  position, so a registry password such as `--help` or `push` is a password. With v1.1.1, a password of `--help` made
+  every push exit 0 having pushed nothing. ap-tools passes its own pin down. A save bundle carries its own copy of the
+  helper, so an air-gapped host needs a bundle built with v1.4.0.
+
+### Changed
+- **A cluster whose Velero key was mangled by an earlier release keeps it,** because `velero install` never updates an
+  existing Secret. The README says to delete `secret/cloud-credentials` in `velero` and run `install velero` again.
+
+### Tests
+- `tests/unit/velero-keys.bats`: key shapes and every spec 21 test password through the credentials file, read back with
+  a port of the AWS SDK's parser: each is refused exactly when the parser would change it; the file is written as
+  before; `install velero` refuses before it calls anything.
+- `tests/unit/helper-pins.bats`: the pin is v1.2.0.
+- `tests/integration/30-functional.sh`: the support Harbor account's password is now spec 21's full test password (every
+  symbol and a space) for `install push -registry`, registries.yaml's read-back and the node's pulls.
+- `tests/password-vectors.txt`, `tests/vectors.bash`, `tests/secret-lint.py`, `tests/unit/secret-lint.bats`: spec 21's
+  shared test passwords and static check.
+
 ## v1.3.2 — 2026-11-12 — The registry password passes whole; a custom data path uninstalls cleanly
 
 Spec 20 (chubtoad-automation), asked for by dap-blueprints Plan 01's Q50, from building and testing rke2-tech-ops

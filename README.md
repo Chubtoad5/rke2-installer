@@ -121,7 +121,7 @@ All configuration is done by editing the `USER DEFINED VARIABLES` section at the
 | `COREDNS_HOSTS` | *(empty)* | Optional in-cluster DNS pins, `<fqdn>=<ipv4>` (comma or space separated), applied on `install` (and kept on re-runs). Pods resolve these names to the given IP regardless of what the host's DNS says. Use it for split-horizon setups where LAN DNS sends browsers to a TLS-terminating reverse proxy, but workloads must keep reaching the cluster's own ingress — e.g. Dell Automation Platform, whose services call their own portal FQDN and trust only DAP's CA. Empty = no pins |
 | `DEBUG` | `1` | Set to `1` for verbose output, `0` to suppress (failures still print the failed step's captured output) |
 | `RKE2_FORCE_ONLINE` | `false` | Set `true` to ignore an `rke2-save-version.txt` in the working directory and run online. Without it, that file makes the run air-gapped, and an `install`, `join` or `push` with no extracted bundle next to it stops with an error |
-| `IMAGE_PULL_PUSH_REF` | `v1.1.1` | The `images-pull-push` release (a tag, branch or commit) whose `image_pull_push.sh` is fetched for image work. A copy already here is reused only if it came from the same ref. Air-gapped, the copy in the bundle is used and nothing is downloaded |
+| `IMAGE_PULL_PUSH_REF` | `v1.2.0` | The `images-pull-push` release (a tag, branch or commit) whose `image_pull_push.sh` is fetched for image work. A copy already here is reused only if it came from the same ref. Air-gapped, the copy in the bundle is used and nothing is downloaded |
 | `IMAGE_PULL_PUSH_URL` | the ref's file on `raw.githubusercontent.com` | Full URL of `image_pull_push.sh`, for a mirror. Wins over `IMAGE_PULL_PUSH_REF` |
 | `IMAGE_PULL_PUSH_SHA256` | empty | Optional checksum of `image_pull_push.sh`. A mismatch stops the run, and leaves no file behind |
 | `INSTALL_PACKAGES_REF` | `v1.1.3` | The `install-packages` release whose `install_packages.sh` `save` uses to bundle host packages for an air-gapped install (`iptables`, and `kernel-modules-extra` on EL). The bundle carries that copy |
@@ -152,8 +152,8 @@ All configuration is done by editing the `USER DEFINED VARIABLES` section at the
 | `VELERO_AWS_PLUGIN_VERSION` | `v1.13.0` | Velero AWS plugin version (used for S3 backend) |
 | `VELERO_BUCKET` | `velero` | S3 bucket name for backup storage. In a multi-cluster environment set this per cluster (e.g. `VELERO_BUCKET=$CLUSTER_NAME`) to avoid backup collision. The installer prints a warning if `VELERO_BUCKET` is left at the default `velero` while `CLUSTER_NAME` has been customised. |
 | `VELERO_S3_URL` | *(required)* | S3 endpoint URL, e.g. `https://s3.example.com:8333` |
-| `VELERO_S3_ACCESS_KEY` | *(required)* | S3 access key |
-| `VELERO_S3_SECRET_KEY` | *(required)* | S3 secret key |
+| `VELERO_S3_ACCESS_KEY` | *(required)* | S3 access key. Velero reads it from an AWS credentials file, so a key that file would change is refused: see below |
+| `VELERO_S3_SECRET_KEY` | *(required)* | S3 secret key, with the same rule. Generated keys, such as SeaweedFS's, always fit |
 | `VELERO_BACKUP_NAMESPACES` | `default` | Comma-separated list of namespaces to include in scheduled backups |
 | `VELERO_BACKUP_TTL` | `720h` | Backup retention period (30 days) |
 | `VELERO_BACKUP_SCHEDULE` | `0 2 * * *` | Cron schedule for the daily backup (default: 2 AM) |
@@ -320,6 +320,14 @@ VELERO_S3_SECRET_KEY="your-secret-key"
 VELERO_BUCKET="velero"
 VELERO_BACKUP_NAMESPACES="default,my-app"  # namespaces to back up
 ```
+
+The keys go into Velero's AWS credentials file, whose parser cuts a value at a `#` or `;` after a space, trims spaces
+at either end, strips one pair of surrounding quotes, and turns `\"`, `\'` and `\n` into a quote or a newline. A key
+with any of those is refused before anything changes (spec 21); every other key reaches Velero exactly.
+
+**A key changed by a release before v1.4.0:** Velero never updates its `cloud-credentials` Secret on a re-run, so a
+cluster that got a mangled key keeps it, and `velero backup-location get` shows the location Unavailable. Delete the
+Secret, then run `install velero` again: `kubectl -n velero delete secret cloud-credentials`.
 
 #### Install
 

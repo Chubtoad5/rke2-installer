@@ -5,7 +5,7 @@ set -o errexit
 set -o nounset
 set -o pipefail
 
-SCRIPT_VERSION="1.3.2"
+SCRIPT_VERSION="1.4.0"
 
 # --- USER DEFINED VARIABLES ---#
 RKE2_VERSION=${RKE2_VERSION:-"v1.34.5+rke2r1"}
@@ -28,7 +28,7 @@ RKE2_RECONFIGURE=${RKE2_RECONFIGURE:-"false"}                                 # 
 NTP_SERVERS=${NTP_SERVERS:-}                                                  # Optional space/comma-separated NTP server list applied during 'install'/'join'; empty = leave the OS default time source unchanged
 COREDNS_HOSTS=${COREDNS_HOSTS:-}                                              # Optional in-cluster DNS pins '<fqdn>=<ipv4>[,...]' (split-horizon: pods resolve these names to the given IP regardless of the host's DNS); empty = chart defaults
 RKE2_FORCE_ONLINE=${RKE2_FORCE_ONLINE:-"false"}                               # true = ignore an rke2-save-version.txt in the working directory and stay online
-IMAGE_PULL_PUSH_REF=${IMAGE_PULL_PUSH_REF:-"v1.1.1"}                          # images-pull-push release (tag, branch or commit) whose image_pull_push.sh is fetched
+IMAGE_PULL_PUSH_REF=${IMAGE_PULL_PUSH_REF:-"v1.2.0"}                          # images-pull-push release (tag, branch or commit) whose image_pull_push.sh is fetched
 IMAGE_PULL_PUSH_URL=${IMAGE_PULL_PUSH_URL:-"https://raw.githubusercontent.com/Chubtoad5/images-pull-push/${IMAGE_PULL_PUSH_REF}/image_pull_push.sh"}  # full URL of image_pull_push.sh; wins over IMAGE_PULL_PUSH_REF
 IMAGE_PULL_PUSH_SHA256=${IMAGE_PULL_PUSH_SHA256:-}                            # optional sha256 of image_pull_push.sh; a mismatch stops the run
 INSTALL_PACKAGES_REF=${INSTALL_PACKAGES_REF:-"v1.1.3"}                        # install-packages release (tag, branch or commit) whose install_packages.sh save bundles host packages (iptables, kernel-modules-extra)
@@ -1647,6 +1647,41 @@ download_upgrade_artifacts () {
 
 # -- Velero Install Definitions -- #
 
+# velero_ini_changes <value>: what the AWS SDK's INI parser, which Velero and its AWS plugin use for their credentials
+# file, would change in this value written unquoted (R15, spec 21). Prints the reason and returns 0, or returns 1 when it
+# reads the value back exactly. It cuts a value at a # or ; after a space, trims spaces at either end, strips one pair
+# of surrounding quotes, and turns \" \' and \n into a quote or a newline. Everything else, generated keys included,
+# arrives as written, so only these are refused.
+velero_ini_changes () {
+    local v=$1 bs='\\'
+    if [[ "$v" == *[[:cntrl:]]* ]]; then echo "a control character"
+    elif [[ "$v" == [[:space:]]* || "$v" == *[[:space:]] ]]; then echo "a space at the start or the end"
+    elif [[ "$v" == *[[:space:]][#\;]* ]]; then echo "a # or ; after a space"
+    elif [[ "$v" == \"*\" || "$v" == \'*\' || "$v" == \" || "$v" == \' ]]; then echo "quotes around it"
+    elif [[ "$v" == *${bs}[\"\'n]* ]]; then echo "a backslash before a quote or an n"
+    else return 1
+    fi
+}
+
+# check_velero_keys: each key, before anything changes, refused only when Velero would read it changed (R15)
+check_velero_keys () {
+    local name why rc=0
+    for name in VELERO_S3_ACCESS_KEY VELERO_S3_SECRET_KEY; do
+        if why=$(velero_ini_changes "${!name}"); then
+            echo "Error: $name has $why, which Velero's AWS credentials file can't carry exactly, so Velero would get a"
+            echo "  different key and every backup would fail. Nothing has been changed."
+            rc=1
+        fi
+    done
+    return $rc
+}
+
+# write_velero_credentials <file>: Velero's AWS credentials file, mode 0600, the keys written as they are (R15). The
+# parser reads back exactly every key check_velero_keys lets through.
+write_velero_credentials () {
+    ( umask 077; printf '[default]\naws_access_key_id=%s\naws_secret_access_key=%s\n' "$VELERO_S3_ACCESS_KEY" "$VELERO_S3_SECRET_KEY" > "$1" )
+}
+
 run_install_velero () {
   export KUBECONFIG=/root/.kube/config
   export PATH=$PATH:$RKE2_DATA/bin
@@ -1699,12 +1734,7 @@ SNAPEOF
   # instead of a fixed world-guessable /tmp path (RK-8). Removed on any exit via the trap.
   echo "  Creating Velero S3 credentials..."
   local velero_creds="$TMP_DIR/credentials-velero"
-  ( umask 077; cat > "$velero_creds" <<CREDEOF
-[default]
-aws_access_key_id=${VELERO_S3_ACCESS_KEY}
-aws_secret_access_key=${VELERO_S3_SECRET_KEY}
-CREDEOF
-  )
+  write_velero_credentials "$velero_creds"
 
   # Install Velero into the cluster
   echo "  Installing Velero server into the cluster..."
@@ -3377,6 +3407,7 @@ if [[ "$INSTALL_MODE" == "1" && "$INSTALL_TYPE" == "velero" ]]; then
         echo "Type './$SCRIPT_NAME -h' for help."
         exit 1
     fi
+    check_velero_keys || exit 1
     if [[ -z "$VELERO_S3_URL" ]]; then
         echo "Error: 'install velero' requires VELERO_S3_URL to be set (e.g. https://s3.example.com:8333)."
         echo "Type './$SCRIPT_NAME -h' for help."
