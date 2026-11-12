@@ -2,7 +2,8 @@
 # What a cluster is for, on a throwaway host, as root, from the repo root (spec 09's C2, in the chubtoad-automation project):
 # the default install with local-path and the DNS utility, a pod with a volume, a Service by name, a request through the
 # ingress, a changed config refused without RKE2_RECONFIGURE, -tls-san for a DNS name with certificate checks on, Calico as
-# well as Canal, then a push to a registry and an install from it. Runs after 20-day2.sh, which leaves the host uninstalled.
+# well as Canal, then an install push to a registry whose password has ", \, a space and * (spec 20's R12), and an install
+# from it. Runs after 20-day2.sh, which leaves the host uninstalled.
 # The DNS name and the registry come from CI's lab run (CI_SUPPORT_DNS_NAME, CI_SUPPORT_REGISTRY and an account of this
 # job's own); without them those parts are skipped. Test pods use busybox, so nothing here installs a tool on the host.
 set -uo pipefail
@@ -143,12 +144,22 @@ svc_ok b && ok "a pod reaches the Service by name on Calico" || bad "a pod can't
 within 180 web_ok && ok "the ingress works on Calico" || bad "the ingress on Calico"
 ./rke2_installer.sh uninstall > "$W/o" 2>&1 && ok "uninstall" || { bad "uninstall"; show; }
 
-echo "=== Push to a registry, then install from it"
+echo "=== install push to a registry, with a password holding \", \\, a space and * (R12)"
 if [ -z "${CI_SUPPORT_REGISTRY:-}" ]; then
   skip "the registry checks: no CI_SUPPORT_REGISTRY (CI's lab runs give one)"
 else
   R=$CI_SUPPORT_REGISTRY RU=$CI_SUPPORT_REGISTRY_USER RP=$CI_SUPPORT_REGISTRY_PASSWORD
   h() { curl -sk -m 20 -u "$RU:$RP" -H 'Content-Type: application/json' "$@"; }
+  # This job's Harbor account is its own, so it takes a password the installer used to mangle: " and \ broke
+  # registries.yaml, and a space or * split or globbed the push's login. Harbor wants upper, lower and a digit.
+  NP='Ci 9"pw\x*Z'
+  uid=$(h "https://$R/api/v2.0/users/current" | python3 -I -c 'import json, sys; print(json.load(sys.stdin)["user_id"])' 2>/dev/null)
+  body=$(python3 -I -c 'import json, sys; print(json.dumps({"old_password": sys.argv[1], "new_password": sys.argv[2]}))' "$RP" "$NP")
+  c=$(h -o /dev/null -w '%{http_code}' -X PUT "https://$R/api/v2.0/users/${uid:-none}/password" -d "$body")
+  if [ "$c" = 200 ]; then RP=$NP; ok "this job's Harbor account now has a password with \", \\, a space and *"
+  else bad "change this job's Harbor password (user ${uid:-not found}): $c"; fi
+  # Files the password's * could glob to, in the folder the installer runs from
+  touch "$W/Ci-glob-bait" "$W/9xZ"
   # images-pull-push keeps each image's path, so Harbor needs a project per namespace: rke2's push also carries the
   # monitoring and Velero images. library comes with Harbor. A namespace added to push's lists shows up below as a
   # failed push that names the image.
@@ -156,19 +167,28 @@ else
     c=$(h -o /dev/null -w '%{http_code}' -X POST "https://$R/api/v2.0/projects" -d "{\"project_name\":\"$p\",\"metadata\":{\"public\":\"false\"}}")
     [[ "$c" == 201 || "$c" == 409 ]] || bad "create Harbor project $p: $c"
   done
-  ./rke2_installer.sh push -registry "$R" "$RU" "$RP" > "$W/o" 2>&1 && ok "push to the registry" || { bad "push to the registry"; show; }
+  # Each line of the installer's output gets the time it was printed, so the pulls below are counted from the moment
+  # the install began, after the push: the push's own requests can't pass for the node's pulls.
+  ./rke2_installer.sh install push -registry "$R" "$RU" "$RP" 2>&1 | while IFS= read -r l; do printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$l"; done > "$W/o"
+  [ "${PIPESTATUS[0]}" = 0 ] && ok "install push to the registry" || { bad "install push to the registry"; show; }
   n=$(h "https://$R/api/v2.0/projects/rancher" | grep -o '"repo_count":[0-9]*' | cut -d: -f2)
-  [ "${n:-0}" -ge 10 ] && ok "the registry has $n rancher repositories" || bad "the registry has ${n:-no} rancher repositories"
-  since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-  ./rke2_installer.sh install -registry "$R" "$RU" "$RP" > "$W/o" 2>&1 && ok "install from the registry" || { bad "install from the registry"; show; }
+  [ "${n:-0}" -ge 10 ] && ok "the push logged in: the registry has $n rancher repositories" || bad "the registry has ${n:-no} rancher repositories"
   ready && ok "the node is Ready" || bad "the node isn't Ready"
   grep -q "https://$R" /etc/rancher/rke2/registries.yaml && ok "registries.yaml points docker.io at the registry" || bad "registries.yaml doesn't name the registry"
-  # Harbor's own log: this job's account pulled the cluster's images. The account is this job's alone, so other distros'
-  # pulls don't count, and containerd's fallback to the public registries can't pass for it.
+  got=$(python3 -I -c 'import sys, yaml
+a = yaml.safe_load(open("/etc/rancher/rke2/registries.yaml"))["configs"][sys.argv[1]]["auth"]
+sys.stdout.write(a["username"] + "\n" + a["password"])' "$R" 2>&1)
+  [ "$got" = "$RU"$'\n'"$RP" ] && ok "registries.yaml reads back (YAML) as exactly this account's user and password" \
+    || bad "registries.yaml doesn't read back as this account's user and password"
+  since=$(sed -n 's/^\([^ ]*\) --- Installing RKE2 ---$/\1/p' "$W/o" | head -1)
+  [ -n "$since" ] || { bad "no '--- Installing RKE2 ---' line to count pulls from"; since=$(date -u +%Y-%m-%dT%H:%M:%SZ); }
+  # Harbor's own log: this job's account pulled the cluster's images, with the password registries.yaml holds. The
+  # account is this job's alone, so other distros' pulls don't count, and containerd's fallback to the public
+  # registries (what a wrong password would cause) can't pass for it.
   pulls() { h "https://$R/api/v2.0/auditlog-exts?page_size=100&q=operation%3Dpull%2Cusername%3D$RU%2Cop_time%3D%5B$since~$(date -u +%Y-%m-%dT%H:%M:%SZ)%5D" \
     | grep -o '"resource":"rancher/[^"@:]*' | sort -u | wc -l; }
   n=$(pulls)
-  [ "$n" -ge 5 ] && ok "Harbor's audit log has pulls of $n rancher images by this job's account" || bad "Harbor's audit log has pulls of $n rancher images by this job's account"
+  [ "$n" -ge 5 ] && ok "the node pulled $n rancher images through the registry, as this job's account" || bad "Harbor's audit log has pulls of $n rancher images by this job's account since the install began"
   ./rke2_installer.sh uninstall > "$W/o" 2>&1 && ok "uninstall" || { bad "uninstall"; show; }
 fi
 systemctl is-active --quiet rke2-server && bad "rke2-server is still running" || ok "rke2-server is gone"

@@ -5,7 +5,7 @@ set -o errexit
 set -o nounset
 set -o pipefail
 
-SCRIPT_VERSION="1.3.1"
+SCRIPT_VERSION="1.3.2"
 
 # --- USER DEFINED VARIABLES ---#
 RKE2_VERSION=${RKE2_VERSION:-"v1.34.5+rke2r1"}
@@ -640,11 +640,12 @@ start_rke2_service () {
     fi
 }
 
-# wait_for_api_server: up to 120 s for the API server to answer, for CNI_TYPE=none, where pods can't be ready yet.
+# wait_for_api_server: up to 120 s for the API server to answer, for CNI_TYPE=none, where pods can't be ready yet. kubectl
+# is RKE2's own, under the data path run_install resolved: a custom RKE2_DATA has no /var/lib/rancher/rke2 (R14).
 wait_for_api_server () {
     local _
     for _ in $(seq 1 24); do
-        if /var/lib/rancher/rke2/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml get --raw /readyz >/dev/null 2>&1; then
+        if "$RKE2_DATA/bin/kubectl" --kubeconfig /etc/rancher/rke2/rke2.yaml get --raw /readyz >/dev/null 2>&1; then
             echo "  The API server is up."
             return 0
         fi
@@ -695,6 +696,14 @@ install_rke2_binaries () {
     fi
 }
 
+# dq_escape <value>: the value, for the inside of a double-quoted YAML scalar or curl config string, which read
+# \\ and \" as escapes: \ is doubled and " escaped. Without it, a registry password with " broke registries.yaml, and
+# one with \ reached containerd changed (R12).
+dq_escape () {
+    local v=${1//\\/\\\\}
+    printf '%s' "${v//\"/\\\"}"
+}
+
 create_registry_config () {
     if [[ "$REGISTRY_MODE" -eq 1 ]]; then
         echo "  Configuring private registry for RKE2..."
@@ -712,13 +721,16 @@ create_registry_config () {
         fi
         install -m 0644 "$tmp_ca" "$CERTS_DIR/ca.crt"
         echo "  Certificate saved to $CERTS_DIR."
-        # registries.yaml carries the registry credentials - write it 0600 (RK-8).
+        # registries.yaml carries the registry credentials - write it 0600 (RK-8). Both are escaped for YAML's
+        # double quotes (R12).
+        local user_esc pass_esc
+        user_esc=$(dq_escape "$REG_USER"); pass_esc=$(dq_escape "$REG_PASS")
         ( umask 077; cat > /etc/rancher/rke2/registries.yaml <<EOF
 configs:
   ${REG_FQDN}:${REG_PORT}:
     auth:
-      username: "${REG_USER}"
-      password: "${REG_PASS}"
+      username: "${user_esc}"
+      password: "${pass_esc}"
     tls:
       ca_file: "${CERTS_DIR}/ca.crt"
 mirrors:
@@ -1311,7 +1323,7 @@ run_upgrade () {
         exit 1
     fi
     export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
-    export PATH=$PATH:/var/lib/rancher/rke2/bin
+    export PATH=$PATH:$RKE2_DATA/bin
 
     # Kubectl precheck - upgrade requires an existing cluster
     if ! kubectl get nodes &>/dev/null; then
@@ -1363,7 +1375,7 @@ run_upgrade () {
 # check_upgrade_image_in_registry: refuse an air-gapped upgrade whose rke2-upgrade tag isn't in the registry. Any
 # answer other than a tag list (no curl, an auth scheme curl can't use, a network error) is a warning, not a refusal.
 check_upgrade_image_in_registry () {
-    local tag="${UPGRADE_VERSION//+/-}" resp code body pass_esc
+    local tag="${UPGRADE_VERSION//+/-}" resp code body user_esc pass_esc
     if ! command -v curl >/dev/null 2>&1; then
         echo "  WARNING: curl isn't installed, so the registry can't be checked for rancher/rke2-upgrade:$tag."
         return 0
@@ -1371,8 +1383,8 @@ check_upgrade_image_in_registry () {
     local ca="/etc/rancher/rke2/certs.d/${REG_FQDN}:${REG_PORT}/ca.crt" tls=(-k)
     [[ -s "$ca" ]] && tls=(--cacert "$ca")
     # The credentials go through curl's config on stdin, not its arguments.
-    pass_esc=${REG_PASS//\\/\\\\}; pass_esc=${pass_esc//\"/\\\"}
-    resp=$(printf 'user = "%s:%s"\n' "$REG_USER" "$pass_esc" \
+    user_esc=$(dq_escape "$REG_USER"); pass_esc=$(dq_escape "$REG_PASS")
+    resp=$(printf 'user = "%s:%s"\n' "$user_esc" "$pass_esc" \
            | curl -s -m 20 "${tls[@]}" -K - -w '\n%{http_code}' "https://${REGISTRY_INFO}/v2/rancher/rke2-upgrade/tags/list") || resp=""
     code=${resp##*$'\n'}; body=${resp%$'\n'*}
     if [[ "$code" == "200" ]] && grep -q "\"$tag\"" <<< "$body"; then
@@ -1577,7 +1589,7 @@ push_upgrade_images () {
     echo "---"
 
     # Push upgrade images
-    $WORKING_DIR/rke2-utilities/image_pull_push.sh -f "$upgrade_images_file" push $REGISTRY_INFO $REG_USER $REG_PASS
+    $WORKING_DIR/rke2-utilities/image_pull_push.sh -f "$upgrade_images_file" push "$REGISTRY_INFO" "$REG_USER" "$REG_PASS"
 
     # Push RKE2 core+CNI images for the target version (same method as push_rke2_images online path)
     local upgrade_translated_version
@@ -1590,12 +1602,12 @@ push_upgrade_images () {
 
     echo "  Downloading and pushing rke2 core images for upgrade version..."
     curl -sfL https://github.com/rancher/rke2/releases/download/$upgrade_translated_version/rke2-images-core.linux-amd64.txt -o $WORKING_DIR/rke2-core-images/rke2-images-core-upgrade.linux-amd64.txt
-    $WORKING_DIR/rke2-utilities/image_pull_push.sh -f $WORKING_DIR/rke2-core-images/rke2-images-core-upgrade.linux-amd64.txt push $REGISTRY_INFO $REG_USER $REG_PASS
+    $WORKING_DIR/rke2-utilities/image_pull_push.sh -f $WORKING_DIR/rke2-core-images/rke2-images-core-upgrade.linux-amd64.txt push "$REGISTRY_INFO" "$REG_USER" "$REG_PASS"
 
     if [[ $CNI_NONE == "false" ]]; then
         echo "  Downloading and pushing rke2 cni images for upgrade version..."
         curl -sfL https://github.com/rancher/rke2/releases/download/$upgrade_translated_version/rke2-images-$CNI_TYPE.linux-amd64.txt -o $WORKING_DIR/rke2-cni-images/rke2-images-$CNI_TYPE-upgrade.linux-amd64.txt
-        $WORKING_DIR/rke2-utilities/image_pull_push.sh -f $WORKING_DIR/rke2-cni-images/rke2-images-$CNI_TYPE-upgrade.linux-amd64.txt push $REGISTRY_INFO $REG_USER $REG_PASS
+        $WORKING_DIR/rke2-utilities/image_pull_push.sh -f $WORKING_DIR/rke2-cni-images/rke2-images-$CNI_TYPE-upgrade.linux-amd64.txt push "$REGISTRY_INFO" "$REG_USER" "$REG_PASS"
     fi
 }
 
@@ -2131,8 +2143,20 @@ unmount_containerd_tmpmounts () {
     done || true
 }
 
+# trim_slashes <path>: the path without trailing slashes, so /opt/rke2/ and /opt/rke2 are one spelling to every check
+# and match in uninstall. // and /// become /, which every guard refuses.
+trim_slashes () {
+    local p=$1
+    while [[ "$p" == */ && "$p" != "/" ]]; do p=${p%/}; done
+    printf '%s' "$p"
+}
+
 uninstall_rke2() {
     echo "--- Uninstalling RKE2"
+    # One spelling of each data path for every step below (spec 20's Q11). With a trailing slash, Rancher's killall
+    # looked for /opt/rke2//data/... and killed no pod, the tmpmount unmount matched nothing, and // got past the
+    # removal guards as if it weren't /.
+    RKE2_DATA=$(trim_slashes "$RKE2_DATA"); KUBELET_DATA=$(trim_slashes "$KUBELET_DATA"); PVC_DATA=$(trim_slashes "$PVC_DATA")
     # Load recorded install state (written at install time; RK-13).
     local have_state=0
     if [[ -f "$STATE_FILE" ]]; then
@@ -2159,8 +2183,20 @@ uninstall_rke2() {
     done
     unmount_containerd_tmpmounts
     if [[ -n "$uninstaller" ]]; then
-        echo "  Running upstream uninstaller $uninstaller..."
-        "$uninstaller" || echo "  WARNING: $uninstaller exited non-zero; continuing local cleanup."
+        # Rancher's rke2-killall.sh finds the pods' containerd shims under RKE2_DATA_DIR, and rke2-uninstall.sh removes it.
+        # Both assume /var/lib/rancher/rke2 when it isn't set, so with a custom RKE2_DATA every pod kept running, the
+        # API server on :6443 among them, and the next install on the host failed (R13). RKE2_DATA is resolved by now.
+        # A path the cleanup below would refuse (relative, or /) isn't handed to Rancher's rm -rf either, and nor is a
+        # RKE2_DATA_DIR the caller exported (rke2-tech-ops' stop does): the uninstaller then really gets its default.
+        local data_dir_env=(-u RKE2_DATA_DIR)
+        if [[ "$RKE2_DATA" == /* && "$RKE2_DATA" != "/" ]]; then
+            data_dir_env=("RKE2_DATA_DIR=$RKE2_DATA")
+            echo "  Running upstream uninstaller $uninstaller (RKE2_DATA_DIR=$RKE2_DATA)..."
+        else
+            echo "  WARNING: RKE2_DATA=$RKE2_DATA isn't an absolute path other than /, so the upstream uninstaller gets its default data path."
+            echo "  Running upstream uninstaller $uninstaller..."
+        fi
+        env "${data_dir_env[@]}" "$uninstaller" || echo "  WARNING: $uninstaller exited non-zero; continuing local cleanup."
     else
         echo "  WARNING: rke2-uninstall.sh not found in /usr/local/bin or /usr/bin; performing local cleanup only."
     fi
@@ -2641,7 +2677,7 @@ push_utility_images () {
             echo "  Re-run 'save' on a connected host to build a complete archive."
             exit 1
         fi
-        $WORKING_DIR/rke2-utilities/image_pull_push.sh -f "$container_images_tar" push $REGISTRY_INFO $REG_USER $REG_PASS
+        $WORKING_DIR/rke2-utilities/image_pull_push.sh -f "$container_images_tar" push "$REGISTRY_INFO" "$REG_USER" "$REG_PASS"
     elif [[ $AIR_GAPPED_MODE -eq 0 ]]; then
         # RK-14: regenerate the image list from scratch each run instead of appending
         # to whatever a previous run left behind ('>>' growth).
@@ -2678,7 +2714,7 @@ push_utility_images () {
         echo "--- Printing utility-images.txt"
         cat $WORKING_DIR/rke2-utilities/images/utility-images.txt
         echo "---"
-        $WORKING_DIR/rke2-utilities/image_pull_push.sh -f $WORKING_DIR/rke2-utilities/images/utility-images.txt push $REGISTRY_INFO $REG_USER $REG_PASS
+        $WORKING_DIR/rke2-utilities/image_pull_push.sh -f $WORKING_DIR/rke2-utilities/images/utility-images.txt push "$REGISTRY_INFO" "$REG_USER" "$REG_PASS"
     else
         echo "  No utility images to push"
     fi
@@ -2694,7 +2730,7 @@ push_rke2_images () {
             echo "Error: $core_images_tar not found. Re-run 'save' to build a complete archive."
             exit 1
         fi
-        $WORKING_DIR/rke2-utilities/image_pull_push.sh -f "$core_images_tar" push $REGISTRY_INFO $REG_USER $REG_PASS
+        $WORKING_DIR/rke2-utilities/image_pull_push.sh -f "$core_images_tar" push "$REGISTRY_INFO" "$REG_USER" "$REG_PASS"
         if [[ $CNI_NONE == "false" ]]; then
             echo "  Pushing rke2 cni images"
             local cni_images_tar="$WORKING_DIR/rke2-cni-images/rke2-$CNI_TYPE-images.tar.gz"
@@ -2702,17 +2738,17 @@ push_rke2_images () {
                 echo "Error: $cni_images_tar not found (CNI_TYPE=$CNI_TYPE). Re-run 'save' with the same CNI_TYPE."
                 exit 1
             fi
-            $WORKING_DIR/rke2-utilities/image_pull_push.sh -f "$cni_images_tar" push $REGISTRY_INFO $REG_USER $REG_PASS
+            $WORKING_DIR/rke2-utilities/image_pull_push.sh -f "$cni_images_tar" push "$REGISTRY_INFO" "$REG_USER" "$REG_PASS"
         fi
     else
         echo "  Downloading and pushing rke2 core images"
         curl -sfL https://github.com/rancher/rke2/releases/download/$TRANSLATED_VERSION/rke2-images-core.linux-amd64.txt -o $WORKING_DIR/rke2-core-images/rke2-images-core.linux-amd64.txt
         image_pull_push_check
-        $WORKING_DIR/rke2-utilities/image_pull_push.sh -f $WORKING_DIR/rke2-core-images/rke2-images-core.linux-amd64.txt push $REGISTRY_INFO $REG_USER $REG_PASS
+        $WORKING_DIR/rke2-utilities/image_pull_push.sh -f $WORKING_DIR/rke2-core-images/rke2-images-core.linux-amd64.txt push "$REGISTRY_INFO" "$REG_USER" "$REG_PASS"
         if [[ $CNI_NONE == "false" ]]; then
             echo "  Downloading and pushing rke2 cni images"
             curl -sfL https://github.com/rancher/rke2/releases/download/$TRANSLATED_VERSION/rke2-images-$CNI_TYPE.linux-amd64.txt -o $WORKING_DIR/rke2-cni-images/rke2-images-$CNI_TYPE.linux-amd64.txt
-            $WORKING_DIR/rke2-utilities/image_pull_push.sh -f $WORKING_DIR/rke2-cni-images/rke2-images-$CNI_TYPE.linux-amd64.txt push $REGISTRY_INFO $REG_USER $REG_PASS
+            $WORKING_DIR/rke2-utilities/image_pull_push.sh -f $WORKING_DIR/rke2-cni-images/rke2-images-$CNI_TYPE.linux-amd64.txt push "$REGISTRY_INFO" "$REG_USER" "$REG_PASS"
         fi
     fi
 }

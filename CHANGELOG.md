@@ -1,5 +1,40 @@
 # Changelog — rke2-installer
 
+## v1.3.2 — 2026-11-12 — The registry password passes whole; a custom data path uninstalls cleanly
+
+Spec 20 (chubtoad-automation), asked for by dap-blueprints Plan 01's Q50, from building and testing rke2-tech-ops
+1.2.1.0.
+
+### Fixed
+- **A registry password with `"`, `\`, a space, `*`, `?` or `[` passes whole** (R12).
+  - `registries.yaml` held the user and password inside YAML double quotes, unescaped, at `install` and `join`. A `"`
+    broke the file, and a `\` reached containerd changed (`a\b` became `a`, a backspace and `b`). Both are now
+    escaped by one helper, `dq_escape`, which the upgrade's registry check already used inline.
+  - The nine `image_pull_push.sh … push` calls passed the registry, user and password unquoted, so whitespace split
+    the password and `*`, `?` and `[` globbed before the helper logged in. They're quoted now.
+- **`uninstall` with a custom `RKE2_DATA` stops every pod** (R13). Rancher's `rke2-uninstall.sh` and
+  `rke2-killall.sh` read only `RKE2_DATA_DIR`, defaulting to `/var/lib/rancher/rke2`. So with `RKE2_DATA=/opt/rke2`
+  they killed no pod: the containerd shims, `kube-proxy` and `kube-apiserver` (on `:6443`) kept running from a
+  deleted directory, and the next install on the host failed. `uninstall` now runs the uninstaller with
+  `RKE2_DATA_DIR` set to `RKE2_DATA`.
+- **`uninstall` with a trailing slash on a data path works the same as without** (spec 20's Q11). It trims trailing
+  slashes from `RKE2_DATA`, `KUBELET_DATA` and `PVC_DATA` before any step uses them. With `RKE2_DATA=/opt/rke2/`,
+  Rancher's killall would have looked for `/opt/rke2//data/…` and killed no pod, and the containerd tmpmount unmount
+  (v1.2.0) would have missed its mounts, so the removal failed with "Device or resource busy". `//` now counts as `/`
+  and is refused everywhere.
+- **`CNI_TYPE=none` with a custom `RKE2_DATA` no longer fails after 120 s** (R14). `wait_for_api_server` called
+  `/var/lib/rancher/rke2/bin/kubectl`. It uses `$RKE2_DATA/bin/kubectl` now, and so does `upgrade`'s `PATH`.
+
+### Upgrading
+- A node whose stored registry user or password has `"` or `\` has a wrong `registries.yaml`. A re-run with `-registry` now
+  writes it correctly, which differs from the running node's file, so the run stops, as for any registry change,
+  until you add `RKE2_RECONFIGURE=true`. That rewrites the file and restarts the service. Every other password writes
+  the same file as before.
+- Pass `uninstall` the same `RKE2_DATA` as `install`; it doesn't read the path back from the node.
+- A relative `RKE2_DATA` (or `/`) isn't passed to Rancher's uninstaller, which would `rm -rf` it, and neither is a
+  `RKE2_DATA_DIR` you exported yourself: it gets its default path, with a warning, as the installer's own cleanup
+  already refused such a path.
+
 ## v1.3.1 — 2026-11-09 — Air-gapped installs on hosts without iptables or br_netfilter
 
 ### Fixed

@@ -74,10 +74,29 @@ line=$($K get nodes --no-headers 2>/dev/null)
 [[ "$line" != *SchedulingDisabled* ]] && ok "and is schedulable again" || bad "the node is still cordoned"
 ./rke2_installer.sh uninstall > "$W/o" 2>&1 && ok "uninstall" || { bad "uninstall"; show; }
 
-echo "=== CNI_TYPE=none (R3's second failure)"
-CNI_TYPE=none ./rke2_installer.sh install > "$W/o" 2>&1 && ok "a CNI_TYPE=none install exits 0" || { bad "a CNI_TYPE=none install"; show; }
-grep -q "NOTE: CNI_TYPE=none" "$W/o" && ok "it says the node waits for a CNI" || bad "no note about installing a CNI"
-$K get --raw /readyz >/dev/null 2>&1 && ok "the API server answers" || bad "the API server doesn't answer"
-./rke2_installer.sh uninstall > "$W/o" 2>&1 && ok "uninstall" || { bad "uninstall"; show; }
+echo "=== CNI_TYPE=none with RKE2_DATA=/opt/rke2, then /opt/rke2/ (R3's second failure; spec 20's R13, R14 and Q11)"
+# leftovers: what an uninstall must not leave running. With a custom data path, Rancher's killall used to look for the
+# pods under /var/lib/rancher/rke2 and kill none, so the API server kept :6443 and the next install failed.
+leftovers() {
+  local l=""
+  pgrep -f 'containerd-shim' >/dev/null && l="$l containerd-shim"
+  pgrep -x kube-apiserver >/dev/null && l="$l kube-apiserver"
+  ss -Hltn 'sport = :6443' 2>/dev/null | grep -q . && l="$l :6443"
+  echo "$l"
+}
+# The second round's trailing slash: Rancher's killall used to look for /opt/rke2//data/... and kill no pod (Q11)
+round=0
+for D in /opt/rke2 /opt/rke2/; do
+  round=$((round + 1))
+  KD="$D/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml"
+  RKE2_DATA=$D CNI_TYPE=none ./rke2_installer.sh install > "$W/o" 2>&1 && ok "install $round: CNI_TYPE=none in $D exits 0" || { bad "install $round: CNI_TYPE=none in $D"; show; }
+  if [ "$round" = 1 ]; then grep -q "NOTE: CNI_TYPE=none" "$W/o" && ok "it says the node waits for a CNI" || bad "no note about installing a CNI"; fi
+  $KD get --raw /readyz >/dev/null 2>&1 && ok "install $round: the API server answers" || bad "install $round: the API server doesn't answer"
+  $KD get nodes --no-headers 2>/dev/null | grep -qw NotReady && ok "install $round: the node is NotReady, as expected with no CNI" || bad "install $round: node: $($KD get nodes --no-headers 2>&1 | head -1)"
+  RKE2_DATA=$D ./rke2_installer.sh uninstall > "$W/o" 2>&1 && ok "uninstall $round" || { bad "uninstall $round"; show; }
+  l=$(leftovers)
+  [ -z "$l" ] && ok "uninstall $round: no containerd-shim, kube-apiserver or :6443 listener is left" || bad "uninstall $round left:$l"
+  [ ! -e "$D" ] && ok "uninstall $round: $D is gone" || bad "uninstall $round: $D is still there"
+done
 systemctl is-active --quiet rke2-server && bad "rke2-server is still running" || ok "rke2-server is gone"
 echo "=== exit $fail"; exit $fail

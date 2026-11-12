@@ -238,6 +238,9 @@ multipathd, UFW/firewalld, the NetworkManager CNI conf, and the CIS `etcd` user.
 - stops the rke2 services **before** removing anything, and finds the upstream uninstaller for both
   tar-method (`/usr/local/bin`) and rpm-method (`/usr/bin`, Rocky/RHEL online) installs — removing the
   RKE2 rpm packages on rpm-method hosts
+- runs the upstream uninstaller with `RKE2_DATA_DIR` set to `RKE2_DATA` (since 1.3.2; trailing slashes on the data
+  paths are trimmed first), so with a custom data path its killall finds and stops every pod, the API server on `:6443` among them, and removes that path. **Pass the same
+  `RKE2_DATA` to `uninstall` as to `install`:** the uninstaller doesn't read it back from the node
 - removes `/etc/rancher/rke2` (including `registries.yaml`, which holds registry credentials)
 - removes only the kubeconfig **files** it wrote (`/root/.kube/config`, `~user/.kube/config`) — never
   the whole `.kube` directory
@@ -254,7 +257,7 @@ multipathd, UFW/firewalld, the NetworkManager CNI conf, and the CIS `etcd` user.
 | Option | Description |
 |---|---|
 | `-tls-san <fqdn-or-ip>` | Add an extra TLS SAN to the API server certificate. Use with `install` or `join server`. |
-| `-registry <registry:port> <username> <password>` | Configure a private registry as a pull-through mirror. Use with `install`, `install velero`, `join`, `push`, or `upgrade`. |
+| `-registry <registry:port> <username> <password>` | Configure a private registry as a pull-through mirror. Use with `install`, `install velero`, `join`, `push`, or `upgrade`. Quote the password for your shell; from there it reaches `registries.yaml` and `docker login` whole, `"`, `\`, spaces and `*` included (since 1.3.2). |
 
 ---
 
