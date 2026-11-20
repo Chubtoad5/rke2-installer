@@ -5,16 +5,18 @@ set -o errexit
 set -o nounset
 set -o pipefail
 
-SCRIPT_VERSION="1.4.0"
+SCRIPT_VERSION="2.0.0"
 
 # --- USER DEFINED VARIABLES ---#
-RKE2_VERSION=${RKE2_VERSION:-"v1.34.5+rke2r1"}
+RKE2_VERSION_GIVEN=${RKE2_VERSION:-}                                          # what the caller set, before the default (spec 29, R23)
+RKE2_VERSION=${RKE2_VERSION:-"v1.36.6+rke2r1"}                                # v2.0.0: v1.36.6, which installs Traefik as its ingress. v1.4.0 and earlier: v1.34.5
 CNI_TYPE=${CNI_TYPE:-"canal"}                                                 # Valid values: calico, canal, cilium, none
 ENABLE_CIS=${ENABLE_CIS:-"false"}                                             # Enables Kubernetes specific CIS hardening
 CLUSTER_CIDR=${CLUSTER_CIDR:-"10.42.0.0/16"}
 SERVICE_CIDR=${SERVICE_CIDR:-"10.43.0.0/16"}
 MAX_PODS=${MAX_PODS:-"110"}
-INSTALL_INGRESS=${INSTALL_INGRESS:-"true"}                                    # Install default NGINX ingress controller
+INSTALL_INGRESS=${INSTALL_INGRESS:-"true"}                                    # Install RKE2's built-in ingress controller: ingress-nginx up to 1.35, Traefik from 1.36. false turns off both
+INGRESS_CONTROLLER=${INGRESS_CONTROLLER:-}                                    # From RKE2 1.36, with INSTALL_INGRESS=true: traefik or ingress-nginx (deprecated, gone in 1.37). Empty = RKE2's default for the version
 INSTALL_SERVICELB=${INSTALL_SERVICELB:-"true"}                                # Install Klipper LoadBalancer
 INSTALL_LOCAL_PATH_PROVISIONER=${INSTALL_LOCAL_PATH_PROVISIONER:-"true"}      # Install Rancher's local path storage-class
 LOCAL_PATH_PROVISIONER_VERSION=${LOCAL_PATH_PROVISIONER_VERSION:-"v0.0.32"}
@@ -154,6 +156,9 @@ Description:
 - [-registry] option with [install], [join], or [upgrade], configures rke2 uses registry as a mirror.
 - [-tls-san] option with [install] or [join server] configures the fqdn/ip as an extra tls-san.
 - Edit $SCRIPT_NAME 'USER DEFINED VARIABLES' before running. See README.md for details.
+- RKE2_VERSION defaults to v1.36.6+rke2r1 (Kubernetes 1.36, Traefik ingress); v1.4.0 and earlier used v1.34.5+rke2r1.
+  From 1.36, INGRESS_CONTROLLER=traefik|ingress-nginx picks the built-in ingress. 'join' uses the cluster's version
+  when RKE2_VERSION isn't set.
 
 Commands:
   [install]        : Installs the specified component. Defaults to rke2 if no type is given.
@@ -169,7 +174,8 @@ Commands:
   [join]           : Joins the host to an existing cluster as a [server] or [agent]. [join-token-string] must be specified.
   [upgrade]        : Upgrades the RKE2 cluster using the system-upgrade-controller.
     [server|agent|both] Specifies which nodes to upgrade.
-    [stable|version]    Use 'stable' for latest stable channel, or specify a version (e.g. v1.33.4+rke2r1).
+    [stable|version]    Use 'stable' for the stable channel's current version, or specify a version (e.g. v1.36.6+rke2r1).
+                        One Kubernetes minor version at a time: 1.34 goes to 1.35 before 1.36.
 
 Options:
   [agent|server <server-fqdn/ip> <join-token-string>]  : Only use with [join]
@@ -205,7 +211,7 @@ Examples:
   sudo ./$SCRIPT_NAME upgrade both stable
 
   Upgrade only server nodes to a specific version:
-  sudo ./$SCRIPT_NAME upgrade server v1.33.4+rke2r1
+  sudo ./$SCRIPT_NAME upgrade server v1.36.6+rke2r1
 
   Upgrade agent nodes using a private registry:
   sudo ./$SCRIPT_NAME upgrade agent stable -registry my.registry.com:443 myusername mypassword
@@ -221,6 +227,7 @@ EOF
 display_args() {
     echo "### RKE2 Installer Started at $(date) ###"
     echo "  SCRIPT_VERSION: $SCRIPT_VERSION"
+    echo "  RKE2_VERSION: $RKE2_VERSION${RKE2_VERSION_GIVEN:+ (set)}"
     echo "  AIR_GAPPED_MODE: $AIR_GAPPED_MODE"
     echo "  INSTALL_MODE: $INSTALL_MODE"
     echo "  INSTALL_TYPE: $INSTALL_TYPE"
@@ -252,6 +259,216 @@ display_args() {
     fi
 }
 
+# -- RKE2 versions and the ingress (spec 29) -- #
+
+# The RKE2 versions this release has verified, one per Kubernetes minor, newest first. The README's "Supported RKE2
+# versions" table and tests/rke2-versions.conf list the same. Any other version still installs. The step an upgrade
+# must take is named from this list (R18).
+RKE2_VERIFIED_VERSIONS="v1.36.6+rke2r1 v1.35.10+rke2r1 v1.34.5+rke2r1"
+
+# rke2_minor <version>: the Kubernetes minor of an RKE2 or Kubernetes version (36 for v1.36.6+rke2r1). Returns 1, printing
+# nothing, for anything that isn't v1.<minor>.<patch>[+rke2r<n>].
+rke2_minor () {
+    [[ "${1:-}" =~ ^v1\.([0-9]+)\.[0-9]+(\+rke2r[0-9]+)?$ ]] || return 1
+    echo "$((10#${BASH_REMATCH[1]}))"
+}
+
+# rke2_at_least <version> <minor>: true when the version's minor is at least <minor>. An unreadable version is false, so it
+# renders as before 1.36.
+rke2_at_least () {
+    local m
+    m=$(rke2_minor "$1") || return 1
+    [[ $m -ge $2 ]]
+}
+
+# ingress_nginx_tarball_version <version>: true for the minors whose release ships ingress-nginx as its own image tarball,
+# rke2-images-ingress-nginx (1.36: it left the core tarball when Traefik became the default, and 1.37 drops it) (R20).
+ingress_nginx_tarball_version () {
+    local m
+    m=$(rke2_minor "$1") || return 1
+    [[ $m -eq 36 ]]
+}
+
+# verified_version_for_minor <minor>: this release's verified version of that minor, or nothing.
+verified_version_for_minor () {
+    local v
+    for v in $RKE2_VERIFIED_VERSIONS; do
+        if [[ "$(rke2_minor "$v")" == "$1" ]]; then
+            echo "$v"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# minor_step_name <minor>: what to call the step through that minor in a message: the verified version, or the newest
+# release of the line.
+minor_step_name () {
+    verified_version_for_minor "$1" || echo "the newest v1.$1 release (https://update.rke2.io/v1-release/channels/v1.$1)"
+}
+
+# minor_step_refusal <running lowest> <running highest> <target>: why a cluster whose nodes run versions from <lowest>
+# to <highest> can't go to <target>, printed as the lines of an error, and return 0; return 1 when it can. Kubernetes
+# supports going up one minor version at a time, and never down (R18). A version it can't read isn't refused here.
+minor_step_refusal () {
+    local low=$1 high=$2 target=$3 lm hm tm m steps=""
+    lm=$(rke2_minor "$low") || return 1
+    hm=$(rke2_minor "$high") || return 1
+    tm=$(rke2_minor "$target") || return 1
+    if [[ $tm -lt $hm ]]; then
+        echo "$target is an older Kubernetes minor version than the $high this cluster runs."
+        echo "  Kubernetes doesn't support going down a minor version, and 'upgrade' never does it."
+        return 0
+    fi
+    if [[ $tm -gt $((lm + 1)) ]]; then
+        for ((m = lm + 1; m < tm; m++)); do
+            steps="$steps$(minor_step_name "$m"), then "
+        done
+        echo "$target is more than one Kubernetes minor version ahead of the $low this cluster runs."
+        echo "  Kubernetes upgrades one minor version at a time, and skipping one can leave the cluster unable to start."
+        echo "  Upgrade to ${steps}$target, waiting for each to finish (UPGRADE_WAIT=true)."
+        return 0
+    fi
+    return 1
+}
+
+# token_password <join token>: the password part of a join token. A secure token is K10<hash>::<user>:<password>; a
+# short token is the password.
+token_password () {
+    if [[ "$1" =~ ^K10[0-9a-f]+::[^:]+:(.+)$ ]]; then
+        printf '%s' "${BASH_REMATCH[1]}"
+    else
+        printf '%s' "$1"
+    fi
+}
+
+# server_version <server> <join token>: the cluster's version (e.g. v1.34.5+rke2r1), read the way a joining node's own
+# agent reaches the cluster. RKE2 turns anonymous access to the API's /version off, so the token gets the kube-proxy
+# client certificate from the supervisor on :9345, which may read /version on :6443. When the token carries the hash of
+# the cluster's CA, the CA the server sends must match it before the token is sent (R23). When it can't be read, prints
+# why and returns 1: the caller reads it from a command substitution, so a variable set here wouldn't reach it.
+server_version () {
+    local server=$1 token=$2 d="$TMP_DIR/server-version" pw got want ver
+    if ! command -v curl >/dev/null 2>&1; then
+        echo "curl isn't installed"
+        return 1
+    fi
+    mkdir -p "$d" && chmod 700 "$d"
+    if ! curl -sk -m 15 -o "$d/ca.pem" "https://$server:9345/cacerts" || ! grep -q 'BEGIN CERTIFICATE' "$d/ca.pem"; then
+        echo "https://$server:9345/cacerts didn't answer with the cluster's CA"
+        rm -rf "$d"
+        return 1
+    fi
+    if [[ "$token" =~ ^K10([0-9a-f]{64}):: ]]; then
+        want=${BASH_REMATCH[1]}
+        got=$(sha256sum < "$d/ca.pem" | awk '{print $1}')
+        if [[ "$got" != "$want" ]]; then
+            echo "the CA $server sends doesn't match the join token's hash"
+            rm -rf "$d"
+            return 1
+        fi
+    fi
+    pw=$(dq_escape "$(token_password "$token")")
+    # The password goes through curl's config on stdin, not its arguments.
+    if ! printf 'user = "node:%s"\n' "$pw" | curl -s -m 15 --cacert "$d/ca.pem" -K - -o "$d/client.pem" \
+            "https://$server:9345/v1-rke2/client-kube-proxy.crt" \
+       || ! grep -q 'PRIVATE KEY' "$d/client.pem"; then
+        echo "the supervisor on $server:9345 didn't accept the join token, or isn't RKE2's"
+        rm -rf "$d"
+        return 1
+    fi
+    ver=$(curl -s -m 15 --cacert "$d/ca.pem" --cert "$d/client.pem" --key "$d/client.pem" "https://$server:6443/version" 2>/dev/null \
+          | sed -n 's/^ *"gitVersion": *"\([^"]*\)".*$/\1/p' | head -1) || ver=""
+    rm -rf "$d"
+    if ! rke2_minor "$ver" >/dev/null; then
+        echo "the API on $server:6443 didn't give its version"
+        return 1
+    fi
+    echo "$ver"
+}
+
+# resolve_join_version: before a join, take the cluster's version when RKE2_VERSION wasn't set, and refuse one that is a
+# newer minor version than the cluster's: a node newer than its control plane isn't supported, and a new server would
+# run a newer API server and etcd member in an older cluster (R23).
+resolve_join_version () {
+    local sv sm vm
+    if ! sv=$(server_version "$JOIN_SERVER_FQDN" "$JOIN_TOKEN"); then
+        echo "  WARNING: couldn't read the cluster's version: $sv."
+        if [[ -z "$RKE2_VERSION_GIVEN" ]]; then
+            echo "  Joining with the installer's default, $RKE2_VERSION. If the cluster runs another version, uninstall"
+            echo "  and join again with RKE2_VERSION set to the cluster's version."
+        else
+            echo "  Joining with RKE2_VERSION=$RKE2_VERSION, which should match the cluster's version."
+        fi
+        return 0
+    fi
+    if [[ -z "$RKE2_VERSION_GIVEN" ]]; then
+        RKE2_VERSION=$sv
+        TRANSLATED_VERSION=${RKE2_VERSION//+/%2B}
+        echo "  RKE2_VERSION isn't set: joining with the cluster's version, $sv."
+        return 0
+    fi
+    sm=$(rke2_minor "$sv") || return 0
+    vm=$(rke2_minor "$RKE2_VERSION") || return 0
+    if [[ $vm -gt $sm ]]; then
+        echo "Error: RKE2_VERSION=$RKE2_VERSION is a newer Kubernetes minor version than the $sv the cluster runs."
+        echo "  A node newer than its control plane isn't supported, and a new server would run a newer API server and"
+        echo "  etcd member in the cluster. Join with RKE2_VERSION=$sv, or upgrade the cluster first."
+        exit 1
+    fi
+    if [[ "$RKE2_VERSION" != "$sv" ]]; then
+        echo "  NOTE: joining with RKE2_VERSION=$RKE2_VERSION; the cluster runs $sv."
+    fi
+}
+
+# check_ingress_controller: INGRESS_CONTROLLER against RKE2_VERSION, for an install or a server join (R24). Before 1.36
+# only that version's default, ingress-nginx, is accepted, and nothing is written, so 1.34 and 1.35 render as before.
+check_ingress_controller () {
+    [[ -z "$INGRESS_CONTROLLER" ]] && return 0
+    if [[ ! "$INGRESS_CONTROLLER" =~ ^(traefik|ingress-nginx)$ ]]; then
+        echo "Error: INGRESS_CONTROLLER must be 'traefik', 'ingress-nginx', or empty for RKE2's default, not '$INGRESS_CONTROLLER'."
+        exit 1
+    fi
+    if [[ ${INSTALL_INGRESS,,} != "true" ]]; then
+        echo "  NOTE: INSTALL_INGRESS=$INSTALL_INGRESS, so INGRESS_CONTROLLER=$INGRESS_CONTROLLER is ignored: no built-in ingress is installed."
+        return 0
+    fi
+    if ! rke2_at_least "$RKE2_VERSION" 36; then
+        if [[ "$INGRESS_CONTROLLER" == "traefik" ]]; then
+            echo "Error: INGRESS_CONTROLLER=traefik needs RKE2 1.36 or later. RKE2_VERSION=$RKE2_VERSION installs ingress-nginx,"
+            echo "  its default. Leave INGRESS_CONTROLLER empty, or use a 1.36 version."
+            exit 1
+        fi
+        return 0
+    fi
+    if [[ "$INGRESS_CONTROLLER" == "ingress-nginx" ]]; then
+        if rke2_at_least "$RKE2_VERSION" 37; then
+            echo "Error: RKE2 1.37 removed ingress-nginx, so INGRESS_CONTROLLER=ingress-nginx can't be used with $RKE2_VERSION."
+            exit 1
+        fi
+        echo "  WARNING: INGRESS_CONTROLLER=ingress-nginx: ingress-nginx is deprecated and retired upstream, and RKE2 1.37"
+        echo "  removes it. Plan the move to Traefik before upgrading to 1.37."
+    fi
+}
+
+# bundle_version_check: in air-gapped mode, the bundle's version is the only one that can be installed. Take it when
+# RKE2_VERSION wasn't set, and refuse a different one: the config is rendered for the version (Traefik from 1.36), and a
+# re-run compares it with the running one.
+bundle_version_check () {
+    local bv
+    bv=$(sed -n 's/^# RKE2 Version: //p' "$base_dir/rke2-save-version.txt" 2>/dev/null | head -1) || bv=""
+    [[ -z "$bv" ]] && return 0
+    if [[ -z "$RKE2_VERSION_GIVEN" ]]; then
+        RKE2_VERSION=$bv
+        RKE2_VERSION_GIVEN=$bv
+    elif [[ "$RKE2_VERSION" != "$bv" ]]; then
+        echo "Error: RKE2_VERSION=$RKE2_VERSION, but the bundle in $base_dir is for $bv, the only version it can install."
+        echo "  Unset RKE2_VERSION to install $bv, or build a bundle for $RKE2_VERSION with 'save'."
+        exit 1
+    fi
+    TRANSLATED_VERSION=${RKE2_VERSION//+/%2B}
+}
+
 # -- Install & Join Definitions -- #
 
 run_install () {
@@ -266,6 +483,12 @@ run_install () {
     if [[ $RKE2_DATA == "default" ]]; then RKE2_DATA="/var/lib/rancher/rke2"; else mkdir -p "$RKE2_DATA"; fi
     if [[ $KUBELET_DATA == "default" ]]; then KUBELET_DATA="/var/lib/kubelet"; else mkdir -p "$KUBELET_DATA"; fi
     if [[ $PVC_DATA == "default" ]]; then PVC_DATA="/opt/local-path-provisioner"; else mkdir -p "$PVC_DATA"; fi
+    if [[ $JOIN_MODE -eq 1 ]]; then
+        resolve_join_version
+    fi
+    if [[ $INSTALL_MODE -eq 1 || $JOIN_TYPE == "server" ]]; then
+        check_ingress_controller
+    fi
     reconcile_existing_install
     warn_registry_not_passed
     run_debug create_registry_config
@@ -346,8 +569,17 @@ reconcile_existing_install () {
     done
     if [[ -n "$running_version" && "$running_version" != "$RKE2_VERSION" ]]; then
         echo "Error: RKE2 $running_version is already running, but RKE2_VERSION=$RKE2_VERSION was requested."
-        echo "  'install' does not change the version of a running node."
-        echo "  Use: sudo ./$SCRIPT_NAME upgrade [server|agent|both] $RKE2_VERSION"
+        if [[ -z "$RKE2_VERSION_GIVEN" ]]; then
+            echo "  RKE2_VERSION isn't set, so that's this installer's default. Before v2.0.0 the default was v1.34.5+rke2r1."
+        fi
+        echo "  'install' and 'join' don't change the version of a running node. To re-run them on this node as it is,"
+        echo "  set RKE2_VERSION=$running_version."
+        local why
+        if why=$(minor_step_refusal "$running_version" "$running_version" "$RKE2_VERSION"); then
+            echo "  $why"
+        else
+            echo "  To move the cluster to $RKE2_VERSION: sudo ./$SCRIPT_NAME upgrade [server|agent|both] $RKE2_VERSION"
+        fi
         exit 1
     fi
     # Foreign-cluster guard: joining a different cluster requires uninstall, always. A new address for the SAME
@@ -678,6 +910,7 @@ install_rke2_binaries () {
             cp $WORKING_DIR/rke2-binaries/rke2-images-$CNI_TYPE.linux-amd64.tar.gz $RKE2_DATA/agent/images
             rm -rf $WORKING_DIR/rke2-cni-images/images
         fi
+        install_ingress_nginx_images
         if [[ $REGISTRY_MODE -eq 0 ]]; then
             echo "  extracting rke2-utilities archive..."
             local utilities_tar
@@ -694,6 +927,29 @@ install_rke2_binaries () {
     else
         curl -sfL https://get.rke2.io | INSTALL_RKE2_VERSION="$RKE2_VERSION" INSTALL_RKE2_TYPE="$JOIN_TYPE" sh -
     fi
+}
+
+# install_ingress_nginx_images: air-gapped, from 1.36, ingress-nginx's images go into agent/images for
+# INGRESS_CONTROLLER=ingress-nginx, which needs them, and for any join, since the cluster joined may have kept ingress-nginx
+# through its upgrade (R20). A bundle without them (one saved by v1.4.0 or earlier) can't serve the first.
+install_ingress_nginx_images () {
+    ingress_nginx_tarball_version "$RKE2_VERSION" || return 0
+    local want=0 tarball="$WORKING_DIR/rke2-ingress-images/rke2-ingress-nginx-images.tar.gz"
+    [[ ${INSTALL_INGRESS,,} == "true" && "$INGRESS_CONTROLLER" == "ingress-nginx" && $JOIN_TYPE != "agent" ]] && want=1
+    if [[ ! -f "$tarball" ]]; then
+        if [[ $want -eq 1 ]]; then
+            echo "Error: INGRESS_CONTROLLER=ingress-nginx, but this bundle has no ingress-nginx images ($tarball)."
+            echo "  Run 'save' again with this installer (v2.0.0 or later), which bundles them for 1.36."
+            exit 1
+        fi
+        return 0
+    fi
+    [[ $want -eq 1 || $JOIN_MODE -eq 1 ]] || return 0
+    echo "  extracting rke2-ingress-images archive..."
+    tar -xzf "$tarball" -C $WORKING_DIR/rke2-ingress-images
+    mv $WORKING_DIR/rke2-ingress-images/images/rke2-images-ingress-nginx.linux-amd64.tar.gz $WORKING_DIR/rke2-binaries
+    cp $WORKING_DIR/rke2-binaries/rke2-images-ingress-nginx.linux-amd64.tar.gz $RKE2_DATA/agent/images
+    rm -rf $WORKING_DIR/rke2-ingress-images/images
 }
 
 # dq_escape <value>: the value, for the inside of a double-quoted YAML scalar or curl config string, which read
@@ -865,10 +1121,21 @@ node-taint:
   - "node-role.kubernetes.io/control-plane:NoSchedule"
 EOF
     fi
+    # The built-in ingress (R17, R24). Up to 1.35 it is ingress-nginx, and this renders as it always has. From 1.36 it is
+    # Traefik, so turning the ingress off disables both charts, and INGRESS_CONTROLLER picks one. Left empty, nothing is
+    # written, so RKE2 chooses: an upgraded cluster keeps the ingress-nginx it runs.
     if [[ ${INSTALL_INGRESS,,} == "false" ]]; then
         cat >> "$dest" <<EOF
 disable:
   - rke2-ingress-nginx
+EOF
+        if rke2_at_least "$RKE2_VERSION" 36; then
+            echo "  - rke2-traefik" >> "$dest"
+        fi
+    elif [[ -n "$INGRESS_CONTROLLER" ]] && rke2_at_least "$RKE2_VERSION" 36; then
+        cat >> "$dest" <<EOF
+ingress-controller:
+  - $INGRESS_CONTROLLER
 EOF
     fi
     if [[ ${INSTALL_SERVICELB,,} == "true" ]]; then
@@ -1319,7 +1586,7 @@ run_upgrade () {
     if [[ $AIR_GAPPED_MODE -eq 1 && "$UPGRADE_VERSION" == "stable" ]]; then
         echo "Error: air-gapped upgrades cannot use the 'stable' channel (it requires internet access"
         echo "  to update.rke2.io). Specify an explicit version instead, e.g.:"
-        echo "  sudo ./$SCRIPT_NAME upgrade $UPGRADE_TYPE v1.34.5+rke2r1"
+        echo "  sudo ./$SCRIPT_NAME upgrade $UPGRADE_TYPE v1.36.6+rke2r1"
         exit 1
     fi
     export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
@@ -1329,6 +1596,11 @@ run_upgrade () {
     if ! kubectl get nodes &>/dev/null; then
         echo "Error: kubectl cannot reach the cluster. Ensure RKE2 is installed and running before upgrading."
         exit 1
+    fi
+    resolve_upgrade_version
+    check_upgrade_minor_step
+    if [[ "$UPGRADE_TYPE" != "agent" ]]; then
+        keep_ingress_off_for_traefik
     fi
 
     if [[ $AIR_GAPPED_MODE -eq 1 ]]; then
@@ -1370,6 +1642,94 @@ run_upgrade () {
     fi
 
     echo "--- Finished upgrade workflow"
+}
+
+# resolve_upgrade_version: 'stable' becomes the version the channel names now, so the minor-version check below is made
+# against what is really installed, and the plan pins that version: a channel the cluster resolved later could name a
+# newer minor (R18). Air-gapped, 'stable' was refused above.
+resolve_upgrade_version () {
+    [[ "$UPGRADE_VERSION" == "stable" ]] || return 0
+    local v
+    v=$(resolve_rke2_stable_version)
+    if [[ -z "$v" ]]; then
+        echo "Error: couldn't resolve RKE2's stable channel from update.rke2.io, so the step it would take can't be checked."
+        echo "  Pass an explicit version instead, e.g.: sudo ./$SCRIPT_NAME upgrade $UPGRADE_TYPE $(verified_version_for_minor 36)"
+        exit 1
+    fi
+    echo "  The stable channel names $v: upgrading to that version."
+    UPGRADE_VERSION=$v
+}
+
+# check_upgrade_minor_step: refuse a target more than one minor version ahead of the cluster's lowest node, or below its
+# highest, and name the steps between (R18). An agent-only upgrade also can't take agents past the servers' minor. The
+# upgrade never steps through versions by itself.
+check_upgrade_minor_step () {
+    local all servers low high slow why m
+    all=$(kubectl get nodes -o jsonpath='{range .items[*]}{.status.nodeInfo.kubeletVersion}{"\n"}{end}' 2>/dev/null) || all=""
+    servers=$(kubectl get nodes -l node-role.kubernetes.io/control-plane=true -o jsonpath='{range .items[*]}{.status.nodeInfo.kubeletVersion}{"\n"}{end}' 2>/dev/null) || servers=""
+    low=$(version_extreme min <<< "$all"); high=$(version_extreme max <<< "$all"); slow=$(version_extreme min <<< "$servers")
+    if [[ -z "$low" ]]; then
+        echo "  WARNING: couldn't read the nodes' versions, so the minor-version step isn't checked."
+        return 0
+    fi
+    if why=$(minor_step_refusal "$low" "$high" "$UPGRADE_VERSION"); then
+        echo "Error: $why"
+        exit 1
+    fi
+    if [[ "$UPGRADE_TYPE" == "agent" && -n "$slow" ]]; then
+        m=$(rke2_minor "$slow") || m=""
+        if [[ -n "$m" && "$(rke2_minor "$UPGRADE_VERSION")" -gt $m ]]; then
+            echo "Error: $UPGRADE_VERSION is a newer Kubernetes minor version than the $slow the servers run. An agent can't be"
+            echo "  newer than its control plane. Upgrade the servers first: sudo ./$SCRIPT_NAME upgrade server $UPGRADE_VERSION"
+            exit 1
+        fi
+    fi
+}
+
+# version_extreme <min|max>: the lowest or highest RKE2 version among the lines on stdin, by minor then patch.
+version_extreme () {
+    local line best="" bk k
+    while IFS= read -r line; do
+        [[ "$line" =~ ^v1\.([0-9]+)\.([0-9]+) ]] || continue
+        k=$(( 10#${BASH_REMATCH[1]} * 100000 + 10#${BASH_REMATCH[2]} ))
+        if [[ -z "$best" ]] || { [[ $1 == min ]] && [[ $k -lt $bk ]]; } || { [[ $1 == max ]] && [[ $k -gt $bk ]]; }; then
+            best=$line; bk=$k
+        fi
+    done
+    echo "$best"
+}
+
+# keep_ingress_off_for_traefik: before a server goes to 1.36 or later from an earlier minor, a config.yaml that turns off
+# ingress-nginx but not Traefik would gain Traefik on 80 and 443: RKE2 keeps ingress-nginx on an upgrade only when it is
+# installed (R19). A single server's config is fixed here; with more, each needs it first, so this stops and says how.
+keep_ingress_off_for_traefik () {
+    local cfg=/etc/rancher/rke2/config.yaml running="" n tmp="$TMP_DIR/config.yaml.traefik"
+    rke2_at_least "$UPGRADE_VERSION" 36 || return 0
+    [[ -f "$cfg" ]] || return 0
+    grep -qE '^[[:space:]]*-[[:space:]]*rke2-ingress-nginx[[:space:]]*$' "$cfg" || return 0
+    grep -qE '^[[:space:]]*-[[:space:]]*rke2-traefik[[:space:]]*$' "$cfg" && return 0
+    running=$("$RKE2_DATA/bin/rke2" --version 2>/dev/null | awk '/^rke2 version/ {print $3}') || running=""
+    [[ -z "$running" ]] && running=$(rke2 --version 2>/dev/null | awk '/^rke2 version/ {print $3}') || true
+    if rke2_at_least "$running" 36; then
+        return 0
+    fi
+    n=$(kubectl get nodes -l node-role.kubernetes.io/control-plane=true --no-headers 2>/dev/null | wc -l) || n=0
+    if [[ $n -gt 1 ]]; then
+        echo "Error: this cluster turns off the built-in ingress (config.yaml disables rke2-ingress-nginx), and from 1.36 the"
+        echo "  built-in ingress is Traefik. Upgraded as they are, its $n servers would start Traefik on ports 80 and 443."
+        echo "  On each server, add this line under 'disable:' in $cfg (no restart is needed), then run the upgrade again:"
+        echo "    - rke2-traefik"
+        exit 1
+    fi
+    awk '{ print } /^[[:space:]]*-[[:space:]]*rke2-ingress-nginx[[:space:]]*$/ && !done { sub(/-.*/, "- rke2-traefik"); print; done=1 }' "$cfg" > "$tmp"
+    if [[ $(( $(wc -l < "$tmp") - $(wc -l < "$cfg") )) -ne 1 ]]; then
+        echo "Error: couldn't add rke2-traefik to the 'disable:' list in $cfg. Add it by hand, then run the upgrade again."
+        exit 1
+    fi
+    cp -p "$cfg" "$cfg.pre-traefik"
+    cat "$tmp" > "$cfg"
+    echo "  This cluster turns off the built-in ingress. From 1.36 that's Traefik, so rke2-traefik was added to 'disable:'"
+    echo "  in $cfg (the old file is $cfg.pre-traefik). The upgrade's restart applies it."
 }
 
 # check_upgrade_image_in_registry: refuse an air-gapped upgrade whose rke2-upgrade tag isn't in the registry. Any
@@ -1562,7 +1922,7 @@ push_upgrade_images () {
         stable_version=$(resolve_rke2_stable_version)
         if [[ -z "$stable_version" ]]; then
             echo "Error: could not resolve the RKE2 stable channel from update.rke2.io."
-            echo "  Pass an explicit version instead, e.g.: sudo ./$SCRIPT_NAME upgrade $UPGRADE_TYPE v1.34.5+rke2r1"
+            echo "  Pass an explicit version instead, e.g.: sudo ./$SCRIPT_NAME upgrade $UPGRADE_TYPE v1.36.6+rke2r1"
             exit 1
         fi
         upgrade_tag=${stable_version//+/-}
@@ -1608,6 +1968,14 @@ push_upgrade_images () {
         echo "  Downloading and pushing rke2 cni images for upgrade version..."
         curl -sfL https://github.com/rancher/rke2/releases/download/$upgrade_translated_version/rke2-images-$CNI_TYPE.linux-amd64.txt -o $WORKING_DIR/rke2-cni-images/rke2-images-$CNI_TYPE-upgrade.linux-amd64.txt
         $WORKING_DIR/rke2-utilities/image_pull_push.sh -f $WORKING_DIR/rke2-cni-images/rke2-images-$CNI_TYPE-upgrade.linux-amd64.txt push "$REGISTRY_INFO" "$REG_USER" "$REG_PASS"
+    fi
+    # A cluster that keeps ingress-nginx through an upgrade to 1.36 pulls its images from their own list (R20).
+    local target_version=${stable_version:-$UPGRADE_VERSION}
+    if ingress_nginx_tarball_version "$target_version"; then
+        echo "  Downloading and pushing rke2 ingress-nginx images for upgrade version..."
+        mkdir -p $WORKING_DIR/rke2-ingress-images
+        curl -sfL https://github.com/rancher/rke2/releases/download/$upgrade_translated_version/rke2-images-ingress-nginx.linux-amd64.txt -o $WORKING_DIR/rke2-ingress-images/rke2-images-ingress-nginx-upgrade.linux-amd64.txt
+        $WORKING_DIR/rke2-utilities/image_pull_push.sh -f $WORKING_DIR/rke2-ingress-images/rke2-images-ingress-nginx-upgrade.linux-amd64.txt push "$REGISTRY_INFO" "$REG_USER" "$REG_PASS"
     fi
 }
 
@@ -2459,6 +2827,17 @@ download_rke2_binaries () {
         cd $WORKING_DIR/rke2-cni-images
         tar czf rke2-$CNI_TYPE-images.tar.gz --remove-files images
     fi
+    # From 1.36, ingress-nginx's images aren't in the core tarball: Traefik's are. INGRESS_CONTROLLER=ingress-nginx, and a
+    # node joining a cluster that kept ingress-nginx through its upgrade, need them (R20).
+    if ingress_nginx_tarball_version "$RKE2_VERSION"; then
+        echo "  Downloading ingress-nginx rke2 files (optional from 1.36)"
+        mkdir -p $WORKING_DIR/rke2-ingress-images/images
+        curl -sfL https://github.com/rancher/rke2/releases/download/$TRANSLATED_VERSION/rke2-images-ingress-nginx.linux-amd64.tar.gz -o $WORKING_DIR/rke2-ingress-images/images/rke2-images-ingress-nginx.linux-amd64.tar.gz
+        curl -sfL https://github.com/rancher/rke2/releases/download/$TRANSLATED_VERSION/rke2-images-ingress-nginx.linux-amd64.txt -o $WORKING_DIR/rke2-ingress-images/images/rke2-images-ingress-nginx.linux-amd64.txt
+        echo "  creating rke2-ingress-images archive..."
+        cd $WORKING_DIR/rke2-ingress-images
+        tar czf rke2-ingress-nginx-images.tar.gz --remove-files images
+    fi
     cd $base_dir
 }
 
@@ -2579,6 +2958,9 @@ generate_bundle_licenses () {
         echo ""
         echo "Rancher RKE2 ${RKE2_VERSION} (incl. containerd, CoreDNS, Calico/Flannel"
         echo "  'canal', ingress-nginx, metrics-server) ........ Apache-2.0  https://github.com/rancher/rke2"
+        if rke2_at_least "$RKE2_VERSION" 36; then
+            echo "Traefik (RKE2's built-in ingress from 1.36, in its core images) ... MIT  https://github.com/traefik/traefik"
+        fi
         echo "Helm, local-path-provisioner ${LOCAL_PATH_PROVISIONER_VERSION}, system-upgrade-controller,"
         echo "  Velero ${VELERO_VERSION}, Fluent Bit ${FLUENT_BIT_VERSION} ........ Apache-2.0"
         if [[ ${PUSH_SAVE_MONITORING,,} == "true" ]]; then
@@ -2770,6 +3152,11 @@ push_rke2_images () {
             fi
             $WORKING_DIR/rke2-utilities/image_pull_push.sh -f "$cni_images_tar" push "$REGISTRY_INFO" "$REG_USER" "$REG_PASS"
         fi
+        local ingress_images_tar="$WORKING_DIR/rke2-ingress-images/rke2-ingress-nginx-images.tar.gz"
+        if [[ -f "$ingress_images_tar" ]]; then
+            echo "  Pushing rke2 ingress-nginx images"
+            $WORKING_DIR/rke2-utilities/image_pull_push.sh -f "$ingress_images_tar" push "$REGISTRY_INFO" "$REG_USER" "$REG_PASS"
+        fi
     else
         echo "  Downloading and pushing rke2 core images"
         curl -sfL https://github.com/rancher/rke2/releases/download/$TRANSLATED_VERSION/rke2-images-core.linux-amd64.txt -o $WORKING_DIR/rke2-core-images/rke2-images-core.linux-amd64.txt
@@ -2779,6 +3166,11 @@ push_rke2_images () {
             echo "  Downloading and pushing rke2 cni images"
             curl -sfL https://github.com/rancher/rke2/releases/download/$TRANSLATED_VERSION/rke2-images-$CNI_TYPE.linux-amd64.txt -o $WORKING_DIR/rke2-cni-images/rke2-images-$CNI_TYPE.linux-amd64.txt
             $WORKING_DIR/rke2-utilities/image_pull_push.sh -f $WORKING_DIR/rke2-cni-images/rke2-images-$CNI_TYPE.linux-amd64.txt push "$REGISTRY_INFO" "$REG_USER" "$REG_PASS"
+        fi
+        if ingress_nginx_tarball_version "$RKE2_VERSION"; then
+            echo "  Downloading and pushing rke2 ingress-nginx images"
+            curl -sfL https://github.com/rancher/rke2/releases/download/$TRANSLATED_VERSION/rke2-images-ingress-nginx.linux-amd64.txt -o $WORKING_DIR/rke2-ingress-images/rke2-images-ingress-nginx.linux-amd64.txt
+            $WORKING_DIR/rke2-utilities/image_pull_push.sh -f $WORKING_DIR/rke2-ingress-images/rke2-images-ingress-nginx.linux-amd64.txt push "$REGISTRY_INFO" "$REG_USER" "$REG_PASS"
         fi
     fi
 }
@@ -2912,6 +3304,7 @@ create_working_dir () {
     [ -d "$WORKING_DIR" ] || mkdir -p "$WORKING_DIR"
     [ -d "$WORKING_DIR/rke2-core-images/images" ] || mkdir -p "$WORKING_DIR/rke2-core-images/images"
     [ -d "$WORKING_DIR/rke2-cni-images/images" ] || mkdir -p "$WORKING_DIR/rke2-cni-images/images"
+    [ -d "$WORKING_DIR/rke2-ingress-images/images" ] || mkdir -p "$WORKING_DIR/rke2-ingress-images/images"
     [ -d "$WORKING_DIR/rke2-binaries" ] || mkdir -p "$WORKING_DIR/rke2-binaries"
     [ -d "$WORKING_DIR/rke2-utilities/images" ] || mkdir -p "$WORKING_DIR/rke2-utilities/images"
     [ -d "$WORKING_DIR/velero" ] || mkdir -p "$WORKING_DIR/velero"
@@ -3502,12 +3895,14 @@ if [[ -f $base_dir/rke2-save-version.txt ]]; then
         AIR_GAPPED_MODE=1
         # An install, join or push from a bundle needs the bundle's files. Without them, say so now, instead of
         # failing later on a missing archive. uninstall and a rebuilding save don't need them.
-        if [[ ( $INSTALL_MODE -eq 1 && $INSTALL_TYPE == "rke2" ) || $JOIN_MODE -eq 1 || ( $PUSH_MODE -eq 1 && $SAVE_MODE -eq 0 ) ]] \
-           && [[ ! -f $WORKING_DIR/rke2-binaries/rke2.linux-amd64.tar.gz ]]; then
-            echo "Error: $base_dir has rke2-save-version.txt, so this run is air-gapped, but there is no extracted bundle"
-            echo "  in $WORKING_DIR. Extract rke2-save.tar.gz here again, delete the stale rke2-save-version.txt,"
-            echo "  or set RKE2_FORCE_ONLINE=true to install online."
-            exit 1
+        if [[ ( $INSTALL_MODE -eq 1 && $INSTALL_TYPE == "rke2" ) || $JOIN_MODE -eq 1 || ( $PUSH_MODE -eq 1 && $SAVE_MODE -eq 0 ) ]]; then
+            if [[ ! -f $WORKING_DIR/rke2-binaries/rke2.linux-amd64.tar.gz ]]; then
+                echo "Error: $base_dir has rke2-save-version.txt, so this run is air-gapped, but there is no extracted bundle"
+                echo "  in $WORKING_DIR. Extract rke2-save.tar.gz here again, delete the stale rke2-save-version.txt,"
+                echo "  or set RKE2_FORCE_ONLINE=true to install online."
+                exit 1
+            fi
+            bundle_version_check
         fi
     fi
 fi

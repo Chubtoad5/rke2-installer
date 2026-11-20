@@ -1,0 +1,29 @@
+cni: "canal"
+write-kubeconfig-mode: "0600"
+service-node-port-range: "443-40000"
+cluster-cidr: "10.42.0.0/16"
+service-cidr: "10.43.0.0/16"
+advertise-address: "192.0.2.10"
+node-ip: "192.0.2.10"
+etcd-extra-env:
+  - "ETCD_AUTO_COMPACTION_RETENTION=72h"
+  - "ETCD_AUTO_COMPACTION_MODE=periodic"
+kube-apiserver-arg:
+  # Audit log lives under the RKE2 data dir, NOT /var/log: on SELinux-enforcing
+  # hosts the containerized apiserver may only write paths labeled by the
+  # rke2-selinux policy - /var/log/... gets EACCES and the apiserver crashloops
+  - "audit-log-path=/var/lib/rancher/rke2/server/logs/rke2-apiserver-audit.log"
+  - "audit-log-maxage=30"
+  - "audit-log-maxbackup=10"
+  - "audit-log-maxsize=200"
+kubelet-arg:
+  - "max-pods=110"
+  - "resolv-conf=RESOLV"
+node-taint:
+  - "node-role.kubernetes.io/control-plane:NoSchedule"
+disable:
+  - rke2-ingress-nginx
+enable-servicelb: true
+tls-san:
+  - "api.ci.test"
+profile: "cis"

@@ -1,0 +1,6 @@
+server: https://server.ci.test:9345
+token: "K10test::server:pw"
+node-ip: "192.0.2.10"
+kubelet-arg:
+  - "max-pods=110"
+  - "resolv-conf=RESOLV"

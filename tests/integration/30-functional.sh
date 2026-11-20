@@ -34,10 +34,15 @@ if ! command -v iptables >/dev/null 2>&1; then
     *) dnf install -y iptables >/dev/null 2>&1 ;;
   esac
 fi
+# iclass: the IngressClass of the built-in ingress that's running: nginx up to RKE2 1.35, traefik from 1.36, the default
+# (spec 29, R21). The Ingress below names it, so it's served by the controller under test.
+iclass() { $K get ingressclass -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null | grep -xE 'nginx|traefik' | head -1; }
+wait_iclass() { local _; for _ in $(seq 1 60); do IC=$(iclass); [ -n "$IC" ] && return 0; sleep 3; done; return 1; }
+IC=""
 # workload: a pod that writes to a local-path volume, one that reads it back, and a web app behind a Service and an Ingress.
 workload() {
   $K create namespace ci-c2 >/dev/null 2>&1
-  $K apply -n ci-c2 -f - > "$W/k" 2>&1 <<'EOF'
+  $K apply -n ci-c2 -f - > "$W/k" 2>&1 <<EOF
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata: { name: data }
@@ -76,7 +81,7 @@ apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata: { name: web }
 spec:
-  ingressClassName: nginx
+  ingressClassName: ${IC:-none}
   rules:
     - host: web.ci.test
       http: { paths: [{ path: /, pathType: Prefix, backend: { service: { name: web, port: { number: 80 } } } }] }
@@ -100,6 +105,8 @@ echo "=== The default install: Canal, local-path and the DNS utility"
 ready && ok "the node is Ready" || bad "the node isn't Ready"
 $K get storageclass local-path >/dev/null 2>&1 && ok "the local-path StorageClass is there" || bad "no local-path StorageClass"
 $K wait -n default --for=condition=Ready pod/dnsutils --timeout=300s >/dev/null 2>&1 && ok "the DNS utility pod is ready" || bad "the DNS utility pod isn't ready"
+# The default, RKE2 v1.36.6, installs Traefik (spec 29)
+wait_iclass && [ "$IC" = traefik ] && ok "the default install's ingress is Traefik (IngressClass $IC)" || bad "the default install's IngressClass is '${IC:-none}', not traefik"
 workload && ok "apply the test workload" || { bad "apply the test workload"; tail -5 "$W/k"; }
 within 300 pod_done writer && ok "a pod writes to a local-path volume" || { bad "the writer pod: $($K get pod -n ci-c2 writer --no-headers 2>&1)"; events; events local-path-storage; }
 $K run -n ci-c2 reader --restart=Never --image=busybox:1.36 --overrides='{"spec":{"containers":[{"name":"reader","image":"busybox:1.36","command":["cat","/data/f"],"volumeMounts":[{"name":"d","mountPath":"/data"}]}],"volumes":[{"name":"d","persistentVolumeClaim":{"claimName":"data"}}]}}' >/dev/null 2>&1
@@ -137,7 +144,8 @@ echo "=== Calico"
 CNI_TYPE=calico ./rke2_installer.sh install > "$W/o" 2>&1 && ok "install with CNI_TYPE=calico" || { bad "install with CNI_TYPE=calico"; show; }
 ready && ok "the node is Ready" || bad "the node isn't Ready"
 grep -q calico-node <<< "$($K get pods -A --no-headers 2>/dev/null)" && ok "Calico runs" || bad "no calico-node pod"
-# The ingress controller's admission webhook can still be starting: give the apply a minute.
+# The ingress controller (an admission webhook, with ingress-nginx) can still be starting: give the apply a minute.
+wait_iclass && ok "the ingress has an IngressClass on Calico ($IC)" || bad "no IngressClass on Calico"
 within 60 workload && ok "apply the test workload on Calico" || { bad "apply the test workload on Calico"; tail -5 "$W/k"; }
 $K wait -n ci-c2 --for=condition=Available deployment/web --timeout=300s >/dev/null 2>&1 && ok "the web app is up on Calico" || { bad "the web app isn't up on Calico"; events; }
 svc_ok b && ok "a pod reaches the Service by name on Calico" || bad "a pod can't reach the Service on Calico"

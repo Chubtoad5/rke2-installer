@@ -32,6 +32,9 @@ server.2)
   n=$($K get nodes -l node-role.kubernetes.io/etcd=true --no-headers 2>/dev/null | wc -l)
   [ "$n" -eq 2 ] && ok "two nodes run etcd and the control plane" || bad "$n nodes run etcd, not 2"
   [ "$($K get node -l '!node-role.kubernetes.io/control-plane' --no-headers 2>/dev/null | wc -l)" -eq 1 ] && ok "one node is an agent" || bad "not exactly one agent"
+  # INSTALL_INGRESS=false: no built-in ingress on any node, Traefik included from 1.36 (spec 29, R17)
+  ing=$($K get ds,deploy -A --no-headers 2>/dev/null | grep -iE 'traefik|ingress-nginx' | awk '{print $2}' | tr '\n' ' ')
+  [ -z "$ing" ] && ok "no ingress controller runs anywhere in the cluster" || bad "INSTALL_INGRESS=false, but these run: $ing"
   within 300 pods_up && ok "every pod is running or done" || bad "pods not running: $($K get pods -A --no-headers 2>/dev/null | grep -vE 'Running|Completed' | head -4 | tr '\n' ';')"
   # A pod on every node that serves its node's name, and a Service in front of them
   $K apply -f - > /dev/null <<'YAML' && ok "a DaemonSet and a Service" || bad "couldn't create the DaemonSet and Service"
