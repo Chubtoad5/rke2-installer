@@ -459,3 +459,46 @@ server_stub() {
   run bundle_version_check
   [ "$status" -eq 0 ]
 }
+
+# --- R26: a custom RKE2_DATA on an SELinux-enforcing host ---
+
+@test "R26: a custom RKE2_DATA gets /var/lib/rancher/rke2's labels, recorded for uninstall; trailing slashes trimmed" {
+  STATE_FILE=$T/state SELINUX_ENFORCING=true RKE2_DATA=$T/opt-rke2/
+  stub semanage
+  stub restorecon
+  run label_custom_data_dir
+  [ "$status" -eq 0 ]
+  called "semanage fcontext -a -e /var/lib/rancher/rke2 $T/opt-rke2"
+  called "restorecon -R $T/opt-rke2"
+  grep -qx "RKE2I_SELINUX_EQUIV=\"$T/opt-rke2\"" "$T/state"
+}
+
+@test "R26: an equivalence already there isn't added again, or recorded (uninstall leaves it)" {
+  STATE_FILE=$T/state SELINUX_ENFORCING=true RKE2_DATA=$T/opt-rke2
+  stub semanage '[ "$2" = -l ] && echo "'"$T"'/opt-rke2 = /var/lib/rancher/rke2"; exit 0'
+  stub restorecon
+  run label_custom_data_dir
+  [ "$status" -eq 0 ]; [[ "$output" == *"already has"* ]]
+  ! called "fcontext -a" || false
+  [ ! -f "$T/state" ]
+  called "restorecon -R $T/opt-rke2"
+}
+
+@test "R26: nothing is labelled for the default path, or with SELinux not enforcing" {
+  STATE_FILE=$T/state
+  stub semanage; stub restorecon
+  SELINUX_ENFORCING=true RKE2_DATA=/var/lib/rancher/rke2/ label_custom_data_dir
+  SELINUX_ENFORCING=false RKE2_DATA=$T/opt-rke2 label_custom_data_dir
+  [ ! -s "$STUB_LOG" ]
+}
+
+@test "R26: every install path labels after the host settings and before the service starts" {
+  body=$(sed -n '/^run_install () {/,/^}/p' "$BATS_TEST_DIRNAME/../../rke2_installer.sh")
+  [ "$(grep -c 'run_debug label_custom_data_dir' <<< "$body")" -eq 3 ]
+  [ "$(grep -A1 'run_debug config_host_settings' <<< "$body" | grep -c 'label_custom_data_dir')" -eq 3 ]
+  [ "$(grep -A1 'run_debug label_custom_data_dir' <<< "$body" | grep -c 'start_rke2_service')" -eq 3 ]
+}
+
+@test "R26: uninstall removes only the equivalence install recorded" {
+  grep -q 'semanage fcontext -d -e /var/lib/rancher/rke2 "$RKE2I_SELINUX_EQUIV"' "$BATS_TEST_DIRNAME/../../rke2_installer.sh"
+}

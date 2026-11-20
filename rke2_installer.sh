@@ -501,6 +501,7 @@ run_install () {
         fi
         run_debug ensure_selinux_policy
         run_debug config_host_settings
+        run_debug label_custom_data_dir
         run_debug start_rke2_service "$SERVICE_ACTION"
         run_debug apply_utilities
         if [[ $CNI_NONE == "true" ]]; then
@@ -515,6 +516,7 @@ run_install () {
         fi
         run_debug ensure_selinux_policy
         run_debug config_host_settings
+        run_debug label_custom_data_dir
         run_debug start_rke2_service "$SERVICE_ACTION"
     fi
     if [[ $JOIN_MODE -eq 1 && $JOIN_TYPE == "server" ]]; then
@@ -525,6 +527,7 @@ run_install () {
         fi
         run_debug ensure_selinux_policy
         run_debug config_host_settings
+        run_debug label_custom_data_dir
         run_debug start_rke2_service "$SERVICE_ACTION"
     fi
 }
@@ -950,6 +953,34 @@ install_ingress_nginx_images () {
     mv $WORKING_DIR/rke2-ingress-images/images/rke2-images-ingress-nginx.linux-amd64.tar.gz $WORKING_DIR/rke2-binaries
     cp $WORKING_DIR/rke2-binaries/rke2-images-ingress-nginx.linux-amd64.tar.gz $RKE2_DATA/agent/images
     rm -rf $WORKING_DIR/rke2-ingress-images/images
+}
+
+# label_custom_data_dir: on an SELinux-enforcing host, a custom RKE2_DATA gets the labels /var/lib/rancher/rke2 has,
+# through a file-context equivalence, as RKE2's docs say for a custom data-dir. Without it the path is usr_t or
+# var_lib_t: rke2-selinux confines etcd as rke2_service_db_t, which may only write rke2_service_db_file_t, so etcd can't
+# open its data and the server never starts (seen on Rocky 10.3, with rke2-selinux 0.24, on 1.34.5 as well as 1.36.6;
+# spec 29, R26). After ensure_selinux_policy, so the policy's file contexts exist; after config_host_settings, which
+# records the pre-install state first. An equivalence this run adds is recorded, and uninstall removes it.
+label_custom_data_dir () {
+    [[ "$SELINUX_ENFORCING" == "true" ]] || return 0
+    local d
+    d=$(trim_slashes "$RKE2_DATA")
+    [[ "$d" != "/var/lib/rancher/rke2" ]] || return 0
+    if ! command -v semanage >/dev/null 2>&1 || ! command -v restorecon >/dev/null 2>&1; then
+        echo "  WARNING: SELinux is enforcing and RKE2_DATA is $d, but semanage or restorecon isn't installed, so it can't be"
+        echo "  labelled like /var/lib/rancher/rke2. RKE2's etcd can then be denied its data, and the server not start."
+        echo "  Install policycoreutils-python-utils (policycoreutils-python on older hosts), then run this again."
+        return 0
+    fi
+    if semanage fcontext -l -C 2>/dev/null | grep -qxF "$d = /var/lib/rancher/rke2"; then
+        echo "  $d already has /var/lib/rancher/rke2's SELinux labels (a file-context equivalence)."
+    else
+        echo "  Labelling $d like /var/lib/rancher/rke2 for SELinux (semanage fcontext -a -e)."
+        semanage fcontext -a -e /var/lib/rancher/rke2 "$d"
+        state_set RKE2I_SELINUX_EQUIV "$d"
+    fi
+    mkdir -p "$d"
+    restorecon -R "$d"
 }
 
 # dq_escape <value>: the value, for the inside of a double-quoted YAML scalar or curl config string, which read
@@ -2655,6 +2686,11 @@ uninstall_rke2() {
             fi
             setenforce 1 2>/dev/null || true
         fi
+        # R26: remove the SELinux file-context equivalence install added for a custom RKE2_DATA (only one it added)
+        if [[ -n "${RKE2I_SELINUX_EQUIV:-}" ]] && command -v semanage >/dev/null 2>&1; then
+            echo "  Removing the SELinux file-context equivalence for $RKE2I_SELINUX_EQUIV..."
+            semanage fcontext -d -e /var/lib/rancher/rke2 "$RKE2I_SELINUX_EQUIV" 2>/dev/null || true
+        fi
         # Swap: uncomment the fstab lines this installer commented out; re-enable swap
         # only if it was on before install.
         sed -i -E 's|^#(.*) # rke2-installer-swap$|\1|' /etc/fstab
@@ -3525,6 +3561,11 @@ check_namespace_pods_ready() {
     list_error=""
     if pods=$(kubectl get pods -n "$ns" --no-headers 2>/dev/null); then
       not_ready=$(awk 'NF {split($2, r, "/"); if (r[1] != r[2]) print}' <<< "$pods") || true
+      # Soon after a start, kube-system can hold only the static pods (etcd, the API server...), all ready, before
+      # RKE2's charts have created any. CoreDNS, which every install has, isn't there yet then: not ready (spec 29).
+      if [[ "$ns" == "kube-system" ]] && ! grep -q '^rke2-coredns-' <<< "$pods"; then
+        not_ready="${not_ready:+$not_ready$'\n'}rke2-coredns 0/1 NotCreatedYet"
+      fi
     else
       pods=$(kubectl get pods -n "$ns" --no-headers 2>&1 >/dev/null) || true
       list_error="the pods in $ns can't be listed: ${pods//$'\n'/ }"

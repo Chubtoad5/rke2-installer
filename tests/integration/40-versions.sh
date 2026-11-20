@@ -73,24 +73,29 @@ spec:
       http: { paths: [{ path: /, pathType: Prefix, backend: { service: { name: web, port: { number: 80 } } } }] }
 EOF
 }
-# bundle <version>: save a bundle for it, and unpack it in $W/<version>/ag
+# bundle <version>: save a bundle for it, in $W/<version>/save
 bundle() {
-  local d="$W/$1"
-  mkdir -p "$d/save" "$d/ag"; cp "$REPO/rke2_installer.sh" "$d/save/"
+  local d="$W/$1" ver
+  mkdir -p "$d/save"; cp "$REPO/rke2_installer.sh" "$d/save/"
   if (cd "$d/save" && RKE2_VERSION=$1 ./rke2_installer.sh save > o 2>&1) && [ -s "$d/save/rke2-save.tar.gz" ]; then
     ok "save a bundle for $1 ($(du -h "$d/save/rke2-save.tar.gz" | cut -f1))"
   else
     bad "save a bundle for $1"; show "$d/save/o"; return 1
   fi
-  tar -xzf "$d/save/rke2-save.tar.gz" -C "$d/ag" && rm -f "$d/save/rke2-save.tar.gz"
-  grep -qx "# RKE2 Version: $1" "$d/ag/rke2-save-version.txt" && ok "the bundle says it is for $1" || bad "the bundle's version: $(grep 'RKE2 Version' "$d/ag/rke2-save-version.txt")"
+  ver=$(tar -xzOf "$d/save/rke2-save.tar.gz" rke2-save-version.txt 2>/dev/null)
+  grep -qx "# RKE2 Version: $1" <<< "$ver" && ok "the bundle says it is for $1" || bad "the bundle's version: $(grep 'RKE2 Version' <<< "$ver")"
 }
-# from_bundle <version> <label> [settings...]: install from the bundle with no RKE2_VERSION set (it comes from the bundle)
+# from_bundle <version> <label> [settings...]: unpack the bundle in a new folder, $CUR, and install from it with no
+# RKE2_VERSION set (it comes from the bundle). A new folder each time: uninstall, run in the bundle's folder, removes
+# the unpacked rke2-install, as it always has.
+N=0 CUR=""
 from_bundle() {
   local v=$1 label=$2; shift 2
-  if (cd "$W/$v/ag" && env "$@" ./rke2_installer.sh install > o 2>&1); then ok "$v, $label: install from the bundle"
-  else bad "$v, $label: install from the bundle"; show "$W/$v/ag/o"; return 1; fi
-  grep -q "RKE2_VERSION: $v" "$W/$v/ag/o" && ok "$v, $label: it took $v from the bundle" || bad "$v, $label: the run's RKE2_VERSION isn't $v"
+  N=$((N + 1)); CUR="$W/$v/ag.$N"; mkdir -p "$CUR"
+  tar -xzf "$W/$v/save/rke2-save.tar.gz" -C "$CUR" || { bad "$v, $label: unpack the bundle"; return 1; }
+  if (cd "$CUR" && env "$@" ./rke2_installer.sh install > o 2>&1); then ok "$v, $label: install from the bundle"
+  else bad "$v, $label: install from the bundle"; show "$CUR/o"; return 1; fi
+  grep -q "RKE2_VERSION: $v" "$CUR/o" && ok "$v, $label: it took $v from the bundle" || bad "$v, $label: the run's RKE2_VERSION isn't $v"
   within 300 ready && ok "$v, $label: the node is Ready" || bad "$v, $label: the node isn't Ready"
   [ "$($K get nodes -o jsonpath='{.items[0].status.nodeInfo.kubeletVersion}' 2>/dev/null)" = "$v" ] && ok "$v, $label: the node runs $v" \
     || bad "$v, $label: the node runs $($K get nodes -o jsonpath='{.items[0].status.nodeInfo.kubeletVersion}' 2>&1)"
@@ -102,8 +107,8 @@ off_checks() { # off_checks <version>: INSTALL_INGRESS=false
   [ -z "$(ingress_pods)" ] && ok "$v, ingress off: no ingress controller runs" || bad "$v, ingress off: $(ingress_pods | awk '{print $2}' | tr '\n' ' ')"
   port_closed http && port_closed https && ok "$v, ingress off: nothing answers on 80 or 443" || bad "$v, ingress off: something answers on 80 or 443"
 }
-uninstall() { # uninstall <version>
-  (cd "$W/$1/ag" && ./rke2_installer.sh uninstall > o 2>&1) && ok "$1: uninstall" || { bad "$1: uninstall"; show "$W/$1/ag/o"; }
+uninstall() { # uninstall <version>, from the folder the last install ran in
+  (cd "$CUR" && ./rke2_installer.sh uninstall > o2 2>&1) && ok "$1: uninstall" || { bad "$1: uninstall"; show "$CUR/o2"; }
   systemctl is-active --quiet rke2-server && bad "$1: rke2-server is still running" || true
 }
 
@@ -129,7 +134,9 @@ done
 
 echo "=== $default (the default) from a bundle: INSTALL_INGRESS=false (R17), INGRESS_CONTROLLER=ingress-nginx (R20, R24)"
 if bundle "$default"; then
-  tar -tzf "$W/$default/ag/rke2-install/rke2-ingress-images/rke2-ingress-nginx-images.tar.gz" 2>/dev/null | grep -q 'rke2-images-ingress-nginx.linux-amd64.tar.gz' \
+  # Listed first, then searched: with pipefail, grep -q stopping at its match can fail tar with SIGPIPE.
+  inner=$(tar -xzOf "$W/$default/save/rke2-save.tar.gz" rke2-install/rke2-ingress-images/rke2-ingress-nginx-images.tar.gz 2>/dev/null | tar -tz 2>/dev/null)
+  grep -q 'rke2-images-ingress-nginx.linux-amd64.tar.gz' <<< "$inner" \
     && ok "$default: the bundle carries ingress-nginx's images" || bad "$default: the bundle has no ingress-nginx images"
   if from_bundle "$default" "ingress off" INSTALL_INGRESS=false; then
     off_checks "$default"
@@ -137,7 +144,7 @@ if bundle "$default"; then
   fi
   uninstall "$default"
   if from_bundle "$default" "ingress-nginx" INGRESS_CONTROLLER=ingress-nginx; then
-    grep -q 'deprecated' "$W/$default/ag/o" && ok "$default, ingress-nginx: the install warns it's deprecated" || bad "$default, ingress-nginx: no deprecation warning"
+    grep -q 'deprecated' "$CUR/o" && ok "$default, ingress-nginx: the install warns it's deprecated" || bad "$default, ingress-nginx: no deprecation warning"
     [ -f /var/lib/rancher/rke2/agent/images/rke2-images-ingress-nginx.linux-amd64.tar.gz ] && ok "$default, ingress-nginx: its images went into agent/images" || bad "$default, ingress-nginx: its images aren't in agent/images"
     within 300 pods_up && ok "$default, ingress-nginx: every pod is ready" || bad "$default, ingress-nginx: pods not ready: $(not_up)"
     ingress_pods | grep -q ingress-nginx-controller && ok "$default, ingress-nginx: the ingress-nginx controller runs" || bad "$default, ingress-nginx: no ingress-nginx controller"

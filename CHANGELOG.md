@@ -41,6 +41,17 @@ on clusters built by v1.4.0 or earlier need `RKE2_VERSION`. See the README's "Up
 - **A re-run on a node running another version says to set `RKE2_VERSION` to that version** (R23), and names an
   upgrade only one minor at a time. It used to name `upgrade … <requested>`, which for a v1.4.0-built node with the new
   default is the 1.34 → 1.36 jump R18 refuses.
+- **A custom `RKE2_DATA` works again on SELinux-enforcing hosts** (R26). On Rocky 10.3 with rke2-selinux 0.24, etcd runs
+  confined (`rke2_service_db_t`) and may write only `rke2_service_db_file_t`. A custom path such as `/opt/rke2` was
+  labelled `usr_t`, so etcd was denied its data ("open …/server/db/etcd/.touch: permission denied") and `rke2-server`
+  never started: on 1.34.5 as well as 1.36.6, so v1.4.0 has it too, on today's Rocky images (its 2026-11-12 CI passed).
+  The install now gives a custom `RKE2_DATA` `/var/lib/rancher/rke2`'s labels with a SELinux file-context equivalence
+  (`semanage fcontext -a -e`, then `restorecon -R`), as RKE2's docs say for a custom data-dir, and uninstall removes
+  the equivalence it added. Without `semanage` it warns.
+- **The install's pod wait no longer passes before RKE2's charts have created any pods** (R27). Soon after a start,
+  kube-system can list only the static pods, all ready, so the wait could pass with CoreDNS not created yet (and an
+  install with `POD_WAIT_TIMEOUT=1` exited 0 on a warm Ubuntu minimal host). In kube-system, no CoreDNS pod now counts
+  as not ready.
 
 ### Added
 - **`INGRESS_CONTROLLER`** (R24): from 1.36, with `INSTALL_INGRESS=true`, `traefik` or `ingress-nginx` (with a
@@ -50,7 +61,7 @@ on clusters built by v1.4.0 or earlier need `RKE2_VERSION`. See the README's "Up
 - The bundle's `THIRD_PARTY_NOTICES.txt` names Traefik (MIT) for 1.36 bundles (R22).
 
 ### Tests
-- `tests/unit/versions.bats` (new, 37 tests): rendering for 1.34, 1.35 and 1.36 against v1.4.0's own output
+- `tests/unit/versions.bats` (new, 42 tests, R26's included); `pod-wait.bats` (R27): rendering for 1.34, 1.35 and 1.36 against v1.4.0's own output
   (`tests/unit/fixtures/render-v1.4.0`), the ingress choice, the minor-version rule and `stable`, the ingress-off
   upgrade on one and on three servers, which files `save` and both pushes fetch, the re-run message, `join`'s version,
   the CA check, and the bundle's version.
