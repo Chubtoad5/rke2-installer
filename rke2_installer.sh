@@ -463,7 +463,7 @@ bundle_version_check () {
         RKE2_VERSION_GIVEN=$bv
     elif [[ "$RKE2_VERSION" != "$bv" ]]; then
         echo "Error: RKE2_VERSION=$RKE2_VERSION, but the bundle in $base_dir is for $bv, the only version it can install."
-        echo "  Unset RKE2_VERSION to install $bv, or build a bundle for $RKE2_VERSION with 'save'."
+        echo "  Set RKE2_VERSION=$bv (or leave it unset) to install the bundle, or build a bundle for $RKE2_VERSION with 'save'."
         exit 1
     fi
     TRANSLATED_VERSION=${RKE2_VERSION//+/%2B}

@@ -103,7 +103,8 @@ v2.0.0 changes what a plain `install` gives, so check these before using it on c
   the one the plan installs.
 - **`INSTALL_INGRESS=false` turns off Traefik too** on 1.36. Upgrading an ingress-off cluster to 1.36 adds
   `rke2-traefik` to `disable:` in a single server's `config.yaml`. With more servers, `upgrade` stops and asks you to
-  add it on each.
+  add it on each. A node that v1.4.0 or earlier installed on 1.36 with the ingress off runs Traefik, so a v2 re-run
+  sees a changed config and stops; re-run with `RKE2_RECONFIGURE=true` to apply it, which removes Traefik.
 - **An air-gapped install uses the bundle's version** when `RKE2_VERSION` isn't set, and refuses a different one.
   A 1.36 bundle carries ingress-nginx's images, for `INGRESS_CONTROLLER=ingress-nginx` and for nodes joining a cluster
   that kept it.

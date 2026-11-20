@@ -454,6 +454,7 @@ server_stub() {
   RKE2_VERSION=v1.36.6+rke2r1 RKE2_VERSION_GIVEN=v1.36.6+rke2r1
   run bundle_version_check
   [ "$status" -eq 1 ]; [[ "$output" == *"the bundle in $T is for v1.35.10+rke2r1"* ]]
+  [[ "$output" == *"Set RKE2_VERSION=v1.35.10+rke2r1"* ]]
   RKE2_VERSION=v1.35.10+rke2r1 RKE2_VERSION_GIVEN=v1.35.10+rke2r1
   run bundle_version_check
   [ "$status" -eq 0 ]

@@ -12,7 +12,7 @@ render() { # render <file> <ingress> <join mode> <join type> [extra settings...]
     INSTALL_INGRESS=$2 JOIN_MODE=$3 JOIN_TYPE=$4; shift 4
     for kv in "$@"; do eval "$kv"; done
     MGMT_IP=192.0.2.10 JOIN_SERVER_FQDN=server.ci.test JOIN_TOKEN=K10test::server:pw RKE2_DATA=/var/lib/rancher/rke2 KUBELET_DATA=/var/lib/kubelet
-    render_rke2_config /dev/stdout' _ "$src" "$@" | sed 's/^  - "resolv-conf=.*"$/  - "resolv-conf=RESOLV"/' > "$out/$f"
+    render_rke2_config /dev/stdout; rmdir "$TMP_DIR"' _ "$src" "$@" | sed 's/^  - "resolv-conf=.*"$/  - "resolv-conf=RESOLV"/' > "$out/$f"
 }
 render server-ingress.yaml true 0 ""
 render server-noingress.yaml false 0 ""
