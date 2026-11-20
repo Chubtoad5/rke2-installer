@@ -466,6 +466,7 @@ server_stub() {
   STATE_FILE=$T/state SELINUX_ENFORCING=true RKE2_DATA=$T/opt-rke2/
   stub semanage
   stub restorecon
+  stub matchpathcon 'echo "$2 system_u:object_r:var_lib_t:s0"; exit 1'
   run label_custom_data_dir
   [ "$status" -eq 0 ]
   called "semanage fcontext -a -e /var/lib/rancher/rke2 $T/opt-rke2"
@@ -473,15 +474,34 @@ server_stub() {
   grep -qx "RKE2I_SELINUX_EQUIV=\"$T/opt-rke2\"" "$T/state"
 }
 
-@test "R26: an equivalence already there isn't added again, or recorded (uninstall leaves it)" {
+@test "R26: a path already labelled right (its own rule or a parent's) gets no rule, no record, and no relabel" {
   STATE_FILE=$T/state SELINUX_ENFORCING=true RKE2_DATA=$T/opt-rke2
-  stub semanage '[ "$2" = -l ] && echo "'"$T"'/opt-rke2 = /var/lib/rancher/rke2"; exit 0'
+  stub semanage
   stub restorecon
+  stub matchpathcon '[ "$1" = -n ] && echo "system_u:object_r:rke2_service_db_file_t:s0"; exit 0'
   run label_custom_data_dir
   [ "$status" -eq 0 ]; [[ "$output" == *"already has"* ]]
-  ! called "fcontext -a" || false
+  ! called "semanage" || false
+  ! called "restorecon" || false
   [ ! -f "$T/state" ]
-  called "restorecon -R $T/opt-rke2"
+}
+
+@test "R26: semanage refusing the rule is a warning, not a failed install" {
+  STATE_FILE=$T/state SELINUX_ENFORCING=true RKE2_DATA=$T/opt-rke2
+  stub semanage 'exit 1'
+  stub restorecon
+  stub matchpathcon 'echo "x"; exit 1'
+  run label_custom_data_dir
+  [ "$status" -eq 0 ]; [[ "$output" == *"WARNING: semanage couldn't"* ]]
+  [ ! -f "$T/state" ]
+}
+
+@test "R26: install refuses RKE2_DATA=/ and a relative path, before anything" {
+  for d in / // rke2 ./rke2; do
+    run env RKE2_DATA="$d" bash "$BATS_TEST_DIRNAME/../../rke2_installer.sh" install
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"must be 'default' or an absolute path other than /"* || "$output" == *"root privileges"* ]]
+  done
 }
 
 @test "R26: nothing is labelled for the default path, or with SELinux not enforcing" {
@@ -492,11 +512,11 @@ server_stub() {
   [ ! -s "$STUB_LOG" ]
 }
 
-@test "R26: every install path labels after the host settings and before the service starts" {
+@test "R26: every install path labels after the host settings and before the service starts, outside run_debug" {
   body=$(sed -n '/^run_install () {/,/^}/p' "$BATS_TEST_DIRNAME/../../rke2_installer.sh")
-  [ "$(grep -c 'run_debug label_custom_data_dir' <<< "$body")" -eq 3 ]
-  [ "$(grep -A1 'run_debug config_host_settings' <<< "$body" | grep -c 'label_custom_data_dir')" -eq 3 ]
-  [ "$(grep -A1 'run_debug label_custom_data_dir' <<< "$body" | grep -c 'start_rke2_service')" -eq 3 ]
+  [ "$(grep -cx ' *label_custom_data_dir' <<< "$body")" -eq 3 ]
+  [ "$(grep -A1 'run_debug config_host_settings' <<< "$body" | grep -cx ' *label_custom_data_dir')" -eq 3 ]
+  [ "$(grep -A1 -x ' *label_custom_data_dir' <<< "$body" | grep -c 'start_rke2_service')" -eq 3 ]
 }
 
 @test "R26: uninstall removes only the equivalence install recorded" {

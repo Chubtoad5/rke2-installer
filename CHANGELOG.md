@@ -47,7 +47,9 @@ on clusters built by v1.4.0 or earlier need `RKE2_VERSION`. See the README's "Up
   never started: on 1.34.5 as well as 1.36.6, so v1.4.0 has it too, on today's Rocky images (its 2026-11-12 CI passed).
   The install now gives a custom `RKE2_DATA` `/var/lib/rancher/rke2`'s labels with a SELinux file-context equivalence
   (`semanage fcontext -a -e`, then `restorecon -R`), as RKE2's docs say for a custom data-dir, and uninstall removes
-  the equivalence it added. Without `semanage` it warns.
+  the equivalence it added. A path already labelled right (its own rule, or a parent's) gets none, `restorecon` runs
+  only when a label is wrong, and `semanage` refusing is a warning. Without `semanage` it warns. `RKE2_DATA` must now
+  be an absolute path other than `/` at install, as uninstall already required.
 - **The install's pod wait no longer passes before RKE2's charts have created any pods** (R27). Soon after a start,
   kube-system can list only the static pods, all ready, so the wait could pass with CoreDNS not created yet (and an
   install with `POD_WAIT_TIMEOUT=1` exited 0 on a warm Ubuntu minimal host). In kube-system, no CoreDNS pod now counts

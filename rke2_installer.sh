@@ -501,7 +501,7 @@ run_install () {
         fi
         run_debug ensure_selinux_policy
         run_debug config_host_settings
-        run_debug label_custom_data_dir
+        label_custom_data_dir
         run_debug start_rke2_service "$SERVICE_ACTION"
         run_debug apply_utilities
         if [[ $CNI_NONE == "true" ]]; then
@@ -516,7 +516,7 @@ run_install () {
         fi
         run_debug ensure_selinux_policy
         run_debug config_host_settings
-        run_debug label_custom_data_dir
+        label_custom_data_dir
         run_debug start_rke2_service "$SERVICE_ACTION"
     fi
     if [[ $JOIN_MODE -eq 1 && $JOIN_TYPE == "server" ]]; then
@@ -527,7 +527,7 @@ run_install () {
         fi
         run_debug ensure_selinux_policy
         run_debug config_host_settings
-        run_debug label_custom_data_dir
+        label_custom_data_dir
         run_debug start_rke2_service "$SERVICE_ACTION"
     fi
 }
@@ -972,15 +972,22 @@ label_custom_data_dir () {
         echo "  Install policycoreutils-python-utils (policycoreutils-python on older hosts), then run this again."
         return 0
     fi
-    if semanage fcontext -l -C 2>/dev/null | grep -qxF "$d = /var/lib/rancher/rke2"; then
-        echo "  $d already has /var/lib/rancher/rke2's SELinux labels (a file-context equivalence)."
-    else
-        echo "  Labelling $d like /var/lib/rancher/rke2 for SELinux (semanage fcontext -a -e)."
-        semanage fcontext -a -e /var/lib/rancher/rke2 "$d"
+    # Already right, whatever the rule (this path's, or a parent's): nothing to add.
+    if [[ "$(matchpathcon -n "$d/server/db" 2>/dev/null)" == *:rke2_service_db_file_t:* ]]; then
+        echo "  $d already has /var/lib/rancher/rke2's SELinux labels."
+    elif semanage fcontext -a -e /var/lib/rancher/rke2 "$d"; then
+        echo "  Labelled $d like /var/lib/rancher/rke2 for SELinux (semanage fcontext -a -e)."
         state_set RKE2I_SELINUX_EQUIV "$d"
+    else
+        echo "  WARNING: semanage couldn't give $d /var/lib/rancher/rke2's SELinux labels (see its error above), for example"
+        echo "  because another file-context equivalence covers it. RKE2's etcd can then be denied its data."
+        return 0
     fi
     mkdir -p "$d"
-    restorecon -R "$d"
+    # Only when something is wrong: on a re-run, -R would walk all of containerd's files for nothing.
+    if ! matchpathcon -V "$d" >/dev/null 2>&1 || { [[ -d "$d/server/db" ]] && ! matchpathcon -V "$d/server/db" >/dev/null 2>&1; }; then
+        restorecon -R "$d"
+    fi
 }
 
 # dq_escape <value>: the value, for the inside of a double-quoted YAML scalar or curl config string, which read
@@ -3667,6 +3674,11 @@ if [[ -z "$user_name" ]]; then
     user_name="root"
 fi
 
+# RKE2_DATA must be an absolute path other than /: uninstall deletes it, and on SELinux hosts it's relabelled (R26)
+if [[ $RKE2_DATA != "default" && ( "$RKE2_DATA" != /* || -z "${RKE2_DATA//\//}" ) ]]; then
+    echo "Error: RKE2_DATA must be 'default' or an absolute path other than /, not '$RKE2_DATA'."
+    exit 1
+fi
 # Update non-default install paths
 if [[ $RKE2_DATA == "default" ]]; then RKE2_DATA="/var/lib/rancher/rke2"; else mkdir -p "$RKE2_DATA"; fi
 if [[ $KUBELET_DATA == "default" ]]; then KUBELET_DATA="/var/lib/kubelet"; else mkdir -p "$KUBELET_DATA"; fi
