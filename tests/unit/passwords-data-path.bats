@@ -54,7 +54,7 @@ write_registries() { # write_registries <user> <password>
 @test "R12: every image_pull_push.sh push passes the registry, user and password quoted" {
   n=$(grep -c 'image_pull_push.sh .* push ' "$BATS_TEST_DIRNAME/../../rke2_installer.sh")
   q=$(grep -c 'image_pull_push.sh .* push "$REGISTRY_INFO" "$REG_USER" "$REG_PASS"$' "$BATS_TEST_DIRNAME/../../rke2_installer.sh")
-  [ "$n" -eq 9 ]
+  [ "$n" -eq 12 ]
   [ "$q" -eq "$n" ]
 }
 

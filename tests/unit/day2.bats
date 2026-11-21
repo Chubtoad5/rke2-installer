@@ -194,7 +194,7 @@ reg_check() { # reg_check <curl output: body then a code line>
   resolve_rke2_stable_version() { :; }
   run push_upgrade_images
   [ "$status" -eq 1 ]
-  [[ "$output" == *"Pass an explicit version instead"* && "$output" == *"upgrade both v1.34.5+rke2r1"* ]]
+  [[ "$output" == *"Pass an explicit version instead"* && "$output" == *"upgrade both v1.36.6+rke2r1"* ]]
   [[ "$output" != *"Set UPGRADE_VERSION"* ]]
 }
 

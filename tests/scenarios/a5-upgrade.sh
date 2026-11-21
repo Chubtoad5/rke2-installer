@@ -20,6 +20,12 @@ mkdir old new
 curl -sfL -m 180 "https://github.com/Chubtoad5/$R/archive/refs/tags/$old.tar.gz" | tar -xz -C old --strip-components=1 && [ -f old/rke2_installer.sh ] \
   && ok "download $old" || { bad "download $old"; echo "=== exit 1"; exit 1; }
 cp "$REPO/rke2_installer.sh" new/; chmod +x old/rke2_installer.sh new/rke2_installer.sh
+# Both runs pin the version the last release installs by default. v2.0.0 moved the default (v1.34.5 to v1.36.6), and
+# 'install' never changes a running node's version, so without the pin the new run would stop, as a user's would (spec 29).
+RKE2_VERSION=$(sed -n 's/^RKE2_VERSION=${RKE2_VERSION:-"\(v[^"]*\)"}.*$/\1/p' old/rke2_installer.sh | head -1)
+[[ "$RKE2_VERSION" =~ ^v1\.[0-9]+\.[0-9]+\+rke2r[0-9]+$ ]] && ok "$old installs $RKE2_VERSION by default: both runs pin it" \
+  || { bad "couldn't read $old's default RKE2_VERSION: '$RKE2_VERSION'"; echo "=== exit 1"; exit 1; }
+export RKE2_VERSION
 ready() { $K get nodes --no-headers 2>/dev/null | grep -qw Ready; }
 pods_up() { local all; all=$($K get pods -A --no-headers 2>/dev/null) || return 1; [ -n "$all" ] && ! grep -vqE 'Running|Completed' <<< "$all"; }
 data() { $K exec -n a5 deploy/keeper -- cat /data/f 2>/dev/null; }

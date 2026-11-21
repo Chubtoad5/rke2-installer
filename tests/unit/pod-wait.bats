@@ -47,7 +47,7 @@ esac'
 }
 @test "one pod is one pod" {
   POD_WAIT_TIMEOUT=10
-  stub kubectl 'case "$*" in *Succeeded*) exit 0 ;; *"get pods -n"*) echo "rke2-ingress-nginx-controller-r7wxw   0/1   ContainerCreating   0   118s" ;; esac'
+  stub kubectl 'case "$*" in *Succeeded*) exit 0 ;; *"get pods -n"*) echo "rke2-coredns-rke2-coredns-77f5   1/1   Running   0   2m"; echo "rke2-ingress-nginx-controller-r7wxw   0/1   ContainerCreating   0   118s" ;; esac'
   run check_namespace_pods_ready
   [ "$status" -eq 1 ]
   [[ "$output" == *"1 pod in kube-system wasn't ready after 10s"* ]]
@@ -109,4 +109,26 @@ esac'
     [ "$status" -eq 1 ]
     [[ "$output" == *"POD_WAIT_TIMEOUT must be a whole number of seconds"* ]]
   done
+}
+
+# Spec 29: soon after a start, kube-system can list only the static pods, all ready, before RKE2's charts made any
+@test "kube-system with only static pods, all ready, isn't ready until CoreDNS exists" {
+  POD_WAIT_TIMEOUT=20
+  stub kubectl 'case "$*" in
+  *Succeeded*) exit 0 ;;
+  *"get pods -A"*) echo "ALL PODS" ;;
+  *"get pods -n"*) echo "etcd-node1                 1/1   Running   0   20s"; echo "kube-apiserver-node1       1/1   Running   0   20s" ;;
+esac'
+  run check_namespace_pods_ready
+  [ "$status" -eq 1 ]
+  [[ "$NOT_READY_PODS$output" == *"rke2-coredns"* ]]
+}
+@test "the CoreDNS rule is only for kube-system" {
+  POD_WAIT_TIMEOUT=20
+  stub kubectl 'case "$*" in
+  *Succeeded*) exit 0 ;;
+  *"get pods -n"*) echo "web-1   1/1   Running   0   20s" ;;
+esac'
+  run check_namespace_pods_ready default
+  [ "$status" -eq 0 ]
 }

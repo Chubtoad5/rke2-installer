@@ -24,6 +24,10 @@ server2 | agent)
   ./rke2_installer.sh join "$kind" "${CI_ROLE_SERVER_IP:?}" "$(cat "$CI_HANDOFF/token")" > o 2>&1 && ok "join as a$([ $kind = agent ] && echo "n") $kind" \
     || { bad "join as $kind"; tail -10 o | cut -c1-170; echo "=== exit 1"; exit 1; }
   systemctl is-active -q "$svc" && ok "$svc is running" || bad "$svc isn't running"
+  # No RKE2_VERSION here: join reads the cluster's version with the token, and uses it (spec 29, R23)
+  v=$(sed -n "s/^.*joining with the cluster's version, \(v[^ ]*\)\.$/\1/p" o | head -1)
+  [ -n "$v" ] && [ "$($K get node "$me" -o jsonpath='{.status.nodeInfo.kubeletVersion}' 2>/dev/null)" = "$v" ] \
+    && ok "join read the cluster's version ($v) and installed it" || bad "join didn't say it took the cluster's version: $(grep -i 'version' o | head -3 | tr '\n' ';' | cut -c1-200)"
   within 300 ready && ok "this node ($me) is Ready in the cluster" || bad "this node ($me) isn't Ready: $($K get nodes --no-headers 2>&1 | tr '\n' ';' | cut -c1-160)"
   ;;
 agent.2)

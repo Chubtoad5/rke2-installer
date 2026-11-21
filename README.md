@@ -8,13 +8,15 @@ A flexible RKE2 installer for Linux systems that supports online and air-gapped 
 
 - [Key Features](#key-features)
 - [Supported Operating Systems](#supported-operating-systems)
+- [Supported RKE2 Versions](#supported-rke2-versions)
+- [Upgrading the Installer to v2](#upgrading-the-installer-to-v2)
 - [Quick Start](#quick-start)
 - [Configuration Variables](#configuration-variables)
 - [Commands Reference](#commands-reference)
 - [Re-Runs, Reconcile and Uninstall Behavior](#re-runs-reconcile-and-uninstall-behavior)
 - [Options Reference](#options-reference)
 - [Optional Components](#optional-components)
-  - [NGINX Ingress Controller](#nginx-ingress-controller)
+  - [Built-in Ingress Controller](#built-in-ingress-controller)
   - [Klipper LoadBalancer](#klipper-loadbalancer)
   - [Local Path Provisioner](#local-path-provisioner)
   - [CIS Hardening](#cis-hardening)
@@ -35,7 +37,7 @@ A flexible RKE2 installer for Linux systems that supports online and air-gapped 
 - Supports pulling and pushing images to a private OCI registry (mirror)
 - Configurable CNI plugin: `canal` (default), `calico`, `cilium`, or `none`
 - Built-in support for CIS Kubernetes hardening profile
-- Optional NGINX ingress controller (enabled by default)
+- Built-in ingress controller (enabled by default): Traefik from RKE2 1.36, the default version, and ingress-nginx before it. On 1.36, `INGRESS_CONTROLLER` picks either
 - Optional Klipper LoadBalancer (enabled by default)
 - Optional Rancher Local Path Provisioner as default storage class
 - Optional Kubernetes DNS utility deployment
@@ -57,7 +59,58 @@ A flexible RKE2 installer for Linux systems that supports online and air-gapped 
 - RHEL / CentOS / Rocky Linux / AlmaLinux / Fedora
 - SLES / OpenSUSE Leap
 
-With the built-in ingress (`INSTALL_INGRESS=true`, the default), a server needs `iptables` installed, because the ingress controller's host ports are set up with it. `install` and `join server` refuse without it, naming the package. Leap 16 and Ubuntu minimal don't ship it. An agent only warns, because it can't tell whether its cluster runs the ingress. A `save` bundle carries `iptables`, and an air-gapped install or join that finds it missing installs it from the bundle first. On Rocky, Alma or RHEL 10, whose images leave out the `kernel-modules-extra` that holds `br_netfilter`, the bundle also carries the build host's running kernel's package, and an air-gapped install uses it when the target runs that same kernel.
+With the built-in ingress (`INSTALL_INGRESS=true`, the default), a server needs `iptables` installed, because the ingress controller's host ports are set up with it. That's true of Traefik and of ingress-nginx. `install` and `join server` refuse without it, naming the package. Leap 16 and Ubuntu minimal don't ship it. An agent only warns, because it can't tell whether its cluster runs the ingress. A `save` bundle carries `iptables`, and an air-gapped install or join that finds it missing installs it from the bundle first. On Rocky, Alma or RHEL 10, whose images leave out the `kernel-modules-extra` that holds `br_netfilter`, the bundle also carries the build host's running kernel's package, and an air-gapped install uses it when the target runs that same kernel.
+
+---
+
+## Supported RKE2 Versions
+
+`RKE2_VERSION` defaults to **v1.36.6+rke2r1** (since v2.0.0 of this installer). These are the versions this release
+was checked with. Each was checked on Ubuntu 24.04, Ubuntu 24.04 minimal, Rocky 10 and openSUSE Leap 16.
+
+| Version | Status | Built-in ingress | Kubernetes end of life | Notes |
+|---|---|---|---|---|
+| **v1.36.6+rke2r1** | **Default.** Every test runs on it, on every CI run: install, re-run, Day-2, Calico, `-tls-san`, a registry, air-gapped, three nodes, and the upgrade over the last release | Traefik v3.7.16. ingress-nginx v1.14.5 can be chosen, deprecated | 2027-06-28 | Rancher's `stable` channel. [#11349](https://github.com/rancher/rke2/issues/11349) (Calico and SELinux on RHEL 10.2) was checked on Rocky 10 with SELinux enforcing |
+| **v1.35.10+rke2r1** | **Verified.** A fresh install from a `save` bundle on every CI run, with the ingress on and off | ingress-nginx v1.14.5 | 2027-02-28 | The step from 1.34 to 1.36, not a place to stay: its ingress-nginx is retired upstream |
+| **v1.34.5+rke2r1** | **Documented.** The default from v1.0.0 to v1.4.0, and tested on every CI run up to then. `ap-tools` v1.3.0 still installs it | ingress-nginx v1.14.3 | 2026-10-27 (ended) | Eight patches behind its line. Upgrade through v1.35.10 |
+
+Any other version still installs, with no warning, but hasn't been checked. The upgrade from v1.34.5 to v1.35.10 to
+v1.36.6 was tested once, by hand, when 1.36 became the default: with a workload and a volume, with the ingress on and
+off, on all four distros. The Velero and monitoring add-ons haven't been checked on 1.35 or 1.36.
+
+**RKE2 1.37 removes ingress-nginx.** A cluster that still runs it has to move to Traefik first, using Rancher's
+[migration guide](https://docs.rke2.io/reference/ingress_migration); RKE2 says a 1.37 server
+won't start otherwise. This installer
+doesn't support 1.37 yet.
+
+---
+
+## Upgrading the Installer to v2
+
+v2.0.0 changes what a plain `install` gives, so check these before using it on clusters built by v1.4.0 or earlier:
+
+- **The default version is v1.36.6+rke2r1** (Kubernetes 1.36), and so the built-in ingress is **Traefik**. An Ingress
+  that names `ingressClassName: nginx`, or relies on nginx annotations, isn't served by Traefik. Set
+  `INGRESS_CONTROLLER=ingress-nginx` to keep ingress-nginx on 1.36 (it's deprecated, and gone in 1.37), or set
+  `RKE2_VERSION=v1.35.10+rke2r1` or `v1.34.5+rke2r1` to stay on an earlier version.
+- **Re-running `install` or `join` on a node built by v1.4.0 needs `RKE2_VERSION`** set to the version it runs, for
+  example `RKE2_VERSION=v1.34.5+rke2r1`. Without it, the run asks for v1.36.6 and stops, because `install` never changes
+  a running node's version. The error says what to set.
+- **`join` uses the cluster's version** when `RKE2_VERSION` isn't set, read from the server with the join token. It
+  refuses an `RKE2_VERSION` that's a newer minor than the cluster's. If the version can't be read, it warns and goes on.
+- **`upgrade` goes one Kubernetes minor version at a time.** From 1.34, go to v1.35.10 first, then v1.36.6. A jump, or
+  a lower minor, is refused with the steps to take. `stable` is looked up when you run the command, and that version is
+  the one the plan installs.
+- **`INSTALL_INGRESS=false` turns off Traefik too** on 1.36. Upgrading an ingress-off cluster to 1.36 adds
+  `rke2-traefik` to `disable:` in a single server's `config.yaml`. With more servers, `upgrade` stops and asks you to
+  add it on each. A node that v1.4.0 or earlier installed on 1.36 with the ingress off runs Traefik, so a v2 re-run
+  sees a changed config and stops; re-run with `RKE2_RECONFIGURE=true` to apply it, which removes Traefik.
+- **An air-gapped install uses the bundle's version** when `RKE2_VERSION` isn't set, and refuses a different one.
+  A 1.36 bundle carries ingress-nginx's images, for `INGRESS_CONTROLLER=ingress-nginx` and for nodes joining a cluster
+  that kept it.
+
+`automation-platform-tools` passes its own `RKE2_VERSION` and pins this installer's release, so it isn't affected
+until it moves.
 
 ---
 
@@ -81,14 +134,14 @@ chmod +x rke2_installer.sh
 ```
 
 **2. (Optional) adjust settings, then install as root.** The defaults give you a working single-node
-cluster with the NGINX ingress controller, Klipper load balancer, and Local Path storage class:
+RKE2 v1.36.6 cluster with the Traefik ingress controller, Klipper load balancer, and Local Path storage class:
 
 ```bash
 sudo ./rke2_installer.sh install
 ```
 
 You can also override any variable inline, e.g.
-`sudo RKE2_VERSION=v1.34.5+rke2r1 ./rke2_installer.sh install`.
+`sudo RKE2_VERSION=v1.35.10+rke2r1 ./rke2_installer.sh install`. See [Supported RKE2 Versions](#supported-rke2-versions).
 
 **Want more than one node?** Install the first server as above, then on each additional machine run
 `join server <fqdn> <token>` (control-plane) or `join agent <fqdn> <token>` (worker). The token lives at
@@ -105,7 +158,7 @@ All configuration is done by editing the `USER DEFINED VARIABLES` section at the
 
 | Variable | Default | Description |
 |---|---|---|
-| `RKE2_VERSION` | `v1.34.5+rke2r1` | RKE2 version to install |
+| `RKE2_VERSION` | `v1.36.6+rke2r1` | RKE2 version to install. v1.4.0 and earlier defaulted to `v1.34.5+rke2r1`. Unset, `join` uses the cluster's version, and an air-gapped install the bundle's. See [Supported RKE2 Versions](#supported-rke2-versions) |
 | `CNI_TYPE` | `canal` | CNI plugin: `calico`, `canal`, `cilium`, or `none` |
 | `CLUSTER_CIDR` | `10.42.0.0/16` | Pod network CIDR |
 | `SERVICE_CIDR` | `10.43.0.0/16` | Service network CIDR |
@@ -136,7 +189,8 @@ All configuration is done by editing the `USER DEFINED VARIABLES` section at the
 
 | Variable | Default | Description |
 |---|---|---|
-| `INSTALL_INGRESS` | `true` | Install the RKE2 bundled NGINX ingress controller |
+| `INSTALL_INGRESS` | `true` | Install RKE2's built-in ingress controller: Traefik from 1.36, ingress-nginx before. `false` turns off both |
+| `INGRESS_CONTROLLER` | *(empty)* | From RKE2 1.36, with `INSTALL_INGRESS=true`: `traefik`, or `ingress-nginx` (deprecated, removed in 1.37). Empty lets RKE2 choose: Traefik on a new cluster, and an upgraded cluster keeps ingress-nginx. Before 1.36 only `ingress-nginx` (the default there) is accepted |
 | `INSTALL_SERVICELB` | `true` | Enable the Klipper service LoadBalancer |
 | `INSTALL_LOCAL_PATH_PROVISIONER` | `true` | Install Rancher local-path-provisioner as the default storage class |
 | `LOCAL_PATH_PROVISIONER_VERSION` | `v0.0.32` | Version of the local-path-provisioner |
@@ -199,7 +253,7 @@ sudo ./rke2_installer.sh [command ...] [option ...]
 | `push` | Push RKE2 and utility images to a private registry. Requires `-registry`. Can be combined with `save`. |
 | `join agent <server-fqdn> <token>` | Join this host to an existing cluster as a worker agent node. |
 | `join server <server-fqdn> <token>` | Join this host to an existing cluster as an additional control-plane server. |
-| `upgrade server [stable\|version]` | Upgrade server (control-plane) nodes to the specified version. |
+| `upgrade server [stable\|version]` | Upgrade server (control-plane) nodes to the specified version, one Kubernetes minor version at a time. |
 | `upgrade agent [stable\|version]` | Upgrade agent (worker) nodes to the specified version. |
 | `upgrade both [stable\|version]` | Upgrade all nodes — servers first, then agents. |
 
@@ -216,7 +270,8 @@ requested `config.yaml` and compares it with the live `/etc/rancher/rke2/config.
 | Same config, same version | Core install is skipped; the idempotent post-steps re-run (config/manifests, host settings, kubeconfig copies, symlink repair, utilities). Useful to resume an interrupted install |
 | Config differs, `RKE2_RECONFIGURE=false` (default) | Clear error with a diff (install mode); nothing is changed |
 | Config differs, `RKE2_RECONFIGURE=true` | New config is written and the rke2 service is **restarted** |
-| Requested `RKE2_VERSION` differs from the running version | Error directing you to the `upgrade` command |
+| Requested `RKE2_VERSION` differs from the running version | Error. It says to set `RKE2_VERSION` to the running version to re-run, and names the `upgrade` to run (only one minor version at a time) to change it |
+| `join` without `RKE2_VERSION` | The cluster's version, read from the server with the join token. A newer minor than the cluster's is refused |
 | `join` pointed at a different cluster server | Error — a node cannot switch clusters; `uninstall` first |
 | `join` pointed at a new address for the **same** cluster, `RKE2_RECONFIGURE=true` | Allowed, if the join token is a secure one (`K10<hash>::…`) and the CA the new address serves at `https://<address>:9345/cacerts` matches the token's hash. The node's `server:` changes, and the service restarts. Otherwise the error above stands |
 | A run without `-registry` on a node that has a registry configured | The registry config is left in place, with a warning naming it |
@@ -263,11 +318,26 @@ multipathd, UFW/firewalld, the NetworkManager CNI conf, and the CIS `etcd` user.
 
 ## Optional Components
 
-### NGINX Ingress Controller
+### Built-in Ingress Controller
 
 **Enabled by default** (`INSTALL_INGRESS=true`)
 
-The RKE2-bundled NGINX ingress controller is installed during `install` and `join server`. Set `INSTALL_INGRESS=false` to disable it, which removes `rke2-ingress-nginx` from the cluster manifests.
+RKE2's built-in ingress controller is installed with `install` and `join server`, and runs on every node with host
+ports 80 and 443. Which one depends on the version:
+
+| RKE2 | Default | IngressClass | Choice |
+|---|---|---|---|
+| 1.34, 1.35 | ingress-nginx | `nginx` | none |
+| 1.36 (the default) | Traefik, on Rancher's chart defaults | `traefik`, marked as the default class, so it also serves Ingresses that name no class | `INGRESS_CONTROLLER=ingress-nginx` (deprecated) or `traefik` |
+
+- **`INGRESS_CONTROLLER`** writes `ingress-controller:` into `config.yaml`. Left empty, nothing is written and RKE2
+  chooses: Traefik on a new 1.36 cluster, while a cluster upgraded from 1.35 with ingress-nginx keeps it. Air-gapped,
+  ingress-nginx's images come from the bundle, which `save` builds with them for 1.36.
+- **Traefik doesn't read nginx annotations.** Moving an existing app from ingress-nginx means checking its Ingresses;
+  Rancher's [ingress docs](https://docs.rke2.io/networking/networking_services#ingress-controller) and
+  [migration guide](https://docs.rke2.io/reference/ingress_migration) cover it.
+- **`INSTALL_INGRESS=false`** disables `rke2-ingress-nginx`, and from 1.36 `rke2-traefik` as well, so nothing listens
+  on 80 or 443. Before v2.0.0 it disabled only ingress-nginx, so a 1.36 node still got Traefik.
 
 ---
 
@@ -469,21 +539,39 @@ sudo ./rke2_installer.sh upgrade [server|agent|both] [stable|version] [-registry
 | `server` | Upgrade only server (control-plane) nodes |
 | `agent` | Upgrade only agent (worker) nodes |
 | `both` | Upgrade all nodes — servers are upgraded first, then agents |
-| `stable` | Use the latest stable RKE2 release channel |
+| `stable` | The version RKE2's stable channel names when you run the command. The plan installs that version, so the channel moving later doesn't move the upgrade |
 | `v1.x.x+rke2r1` | Upgrade to a specific RKE2 version |
 
 When `both` is specified, the agent upgrade plan waits for the server plan to complete before proceeding.
+
+**One Kubernetes minor version at a time.** Kubernetes doesn't support skipping a minor version, and nothing in RKE2's
+upgrade stops it, so `upgrade` does. A target more than one minor ahead of the cluster's oldest node, or a lower minor
+than its newest, is refused before anything changes, with the steps to take:
+
+```
+Error: v1.36.6+rke2r1 is more than one Kubernetes minor version ahead of the v1.34.5+rke2r1 this cluster runs.
+  Kubernetes upgrades one minor version at a time, and skipping one can leave the cluster unable to start.
+  Upgrade to v1.35.10+rke2r1, then v1.36.6+rke2r1, waiting for each to finish (UPGRADE_WAIT=true).
+```
+
+It never steps through versions by itself. An `agent` upgrade can't take agents past the servers' minor version.
+
+**Upgrading to 1.36 with the ingress off.** RKE2 1.36 keeps ingress-nginx on an upgraded cluster that runs it, but a
+cluster installed with `INSTALL_INGRESS=false` would gain Traefik on 80 and 443. On a single server, `upgrade` adds
+`rke2-traefik` to `disable:` in `/etc/rancher/rke2/config.yaml` first (keeping the old file as `config.yaml.pre-traefik`).
+With more servers, it stops and asks you to add that line on each, then to run it again.
 
 `upgrade` exits once the plans are applied, and the nodes upgrade in the background. Set `UPGRADE_WAIT=true` to wait until they all run the new version and are schedulable again. The server plan tolerates the control-plane taint (`CONTROL_PLANE_TAINT=true`), so a tainted control plane upgrades too.
 
 #### Examples
 
 ```bash
-# Upgrade all nodes to the latest stable release
+# Upgrade all nodes to what the stable channel names now (one minor ahead at most)
 sudo ./rke2_installer.sh upgrade both stable
 
-# Upgrade only server nodes to a specific version
-sudo ./rke2_installer.sh upgrade server v1.33.4+rke2r1
+# From 1.34 to 1.36: through 1.35, waiting for each step
+sudo UPGRADE_WAIT=true ./rke2_installer.sh upgrade both v1.35.10+rke2r1
+sudo UPGRADE_WAIT=true ./rke2_installer.sh upgrade both v1.36.6+rke2r1
 
 # Upgrade with a private registry (pushes upgrade images first)
 sudo ./rke2_installer.sh upgrade both stable -registry my.registry.com:443 myuser mypassword
@@ -505,10 +593,10 @@ The `save` command includes the system-upgrade-controller manifests and the `ran
 
 ```bash
 # Online machine: save and push the target version (includes upgrade artifacts)
-sudo RKE2_VERSION=v1.34.5+rke2r1 ./rke2_installer.sh save push -registry my.registry.com:443 myuser mypassword
+sudo RKE2_VERSION=v1.35.10+rke2r1 ./rke2_installer.sh save push -registry my.registry.com:443 myuser mypassword
 
 # Air-gapped host: upgrade to that same version, using the registry
-sudo ./rke2_installer.sh upgrade both v1.34.5+rke2r1 -registry my.registry.com:443 myuser mypassword
+sudo ./rke2_installer.sh upgrade both v1.35.10+rke2r1 -registry my.registry.com:443 myuser mypassword
 ```
 
 Before it starts, an air-gapped upgrade refuses when the node has no `/etc/rancher/rke2/registries.yaml`, or when the registry's tag list lacks `rancher/rke2-upgrade:<version>`. Without those, the upgrade job would sit in `ImagePullBackOff`. If the registry can't be asked (no `curl`, or an answer it can't read), it warns and goes on.
@@ -528,7 +616,8 @@ sudo ./rke2_installer.sh save
 ```
 
 This creates `rke2-save.tar.gz` containing:
-- RKE2 binaries and images (core + CNI)
+- RKE2 binaries and images (core + CNI, and for 1.36 ingress-nginx's images, which left the core images when Traefik
+  became the default)
 - Velero CLI and images
 - Monitoring Helm charts (kube-prometheus-stack + Fluent Bit) and images
 - System-upgrade-controller manifests and upgrade images
@@ -548,7 +637,8 @@ tar -xzf rke2-save.tar.gz
 sudo ./rke2_installer.sh install
 ```
 
-The script auto-detects `rke2-save.tar.gz` and switches to air-gapped mode.
+The script auto-detects the extracted bundle and switches to air-gapped mode. It installs the RKE2 version the bundle
+was saved for: give `RKE2_VERSION` only to check that, since another version is refused.
 
 #### Optional — Push images to a private registry
 

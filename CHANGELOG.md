@@ -1,5 +1,81 @@
 # Changelog — rke2-installer
 
+## v2.0.0 — 2026-11-20 — RKE2 v1.36.6 by default (Traefik); v1.35.10 verified; one minor version at a time
+
+Spec 29 (chubtoad-automation). A major version: a plain `install` now gives Kubernetes 1.36 with Traefik, and re-runs
+on clusters built by v1.4.0 or earlier need `RKE2_VERSION`. See the README's "Upgrading the Installer to v2".
+
+### Changed
+- **`RKE2_VERSION` defaults to v1.36.6+rke2r1** (was v1.34.5+rke2r1), Rancher's `stable` channel. Its built-in ingress
+  is Traefik v3.7.16, IngressClass `traefik`, marked as the default class. v1.35.10+rke2r1 is verified on every CI run
+  (a fresh install from a bundle), and v1.34.5+rke2r1 is documented. The README's "Supported RKE2 Versions" table says
+  what each was tested with. `ap-tools` passes its own version and pins v1.4.0, so it doesn't move.
+- **`join` uses the cluster's version when `RKE2_VERSION` isn't set** (R23). With the join token it gets the
+  kube-proxy client certificate from the supervisor, as the node's own agent would, and reads the API's `/version`. The
+  server's CA is checked against the token's hash first. An `RKE2_VERSION` that's a newer minor than the cluster's is
+  refused: before, joining a 1.34 cluster with the new default would have installed a 1.36 kubelet, or a 1.36 API
+  server and etcd member. If the version can't be read, it warns and goes on.
+- **An air-gapped install or join uses the bundle's version** when `RKE2_VERSION` isn't set, and refuses a different
+  one. Before, it used the default, so a 1.35 bundle's config would have been written as 1.36's.
+- **`upgrade … stable` installs the version the channel names when the command runs**, pinned in the plan, so a later
+  channel move can't change the target after the check below.
+
+### Fixed
+- **`upgrade` refuses to skip a Kubernetes minor version, or go down one** (R18). `upgrade server stable` on a 1.34.5
+  cluster used to go straight to 1.36.6, which Kubernetes doesn't support: the command exited 0, and the control plane
+  upgraded in the background into an unsupported jump that only an etcd snapshot could undo if it failed. Now it stops
+  before changing anything and names the steps, e.g. "Upgrade to v1.35.10+rke2r1, then v1.36.6+rke2r1". An `agent`
+  upgrade can't take agents past the servers' minor. It never steps through versions by itself.
+- **`INSTALL_INGRESS=false` turns off Traefik on 1.36** (R17). It disabled only `rke2-ingress-nginx`, so a 1.36 node
+  still ran Traefik on host ports 80 and 443, as the default IngressClass, and another controller on those ports
+  couldn't start. 1.34 and 1.35 render byte for byte as before, so existing nodes' re-runs see no change.
+- **Upgrading an ingress-off cluster to 1.36 no longer starts Traefik** (R19). Seen on a 1.34.5 → 1.35.10 → 1.36.6
+  upgrade with v1.4.0: a Traefik DaemonSet on 80 and 443 appeared after the last step. On a single server, `upgrade`
+  now adds `rke2-traefik` to `disable:` first (keeping `config.yaml.pre-traefik`); with more servers it stops and says
+  which line to add on each.
+- **A 1.36 bundle carries ingress-nginx's images** (R20). From 1.36 they left `rke2-images-core` for their own
+  `rke2-images-ingress-nginx` tarball, which `save` didn't fetch, so ingress-nginx on an air-gapped 1.36 node sat in
+  `ImagePullBackOff` (seen: `rancher/kube-webhook-certgen:v1.14.5-hardened2`). `save` bundles it (two images, about
+  100 MB), an air-gapped install with `INGRESS_CONTROLLER=ingress-nginx` and any air-gapped join load it, and `push`
+  and the upgrade push send its list.
+- **A re-run on a node running another version says to set `RKE2_VERSION` to that version** (R23), and names an
+  upgrade only one minor at a time. It used to name `upgrade … <requested>`, which for a v1.4.0-built node with the new
+  default is the 1.34 → 1.36 jump R18 refuses.
+- **A custom `RKE2_DATA` works again on SELinux-enforcing hosts** (R26). On Rocky 10.3 with rke2-selinux 0.24, etcd runs
+  confined (`rke2_service_db_t`) and may write only `rke2_service_db_file_t`. A custom path such as `/opt/rke2` was
+  labelled `usr_t`, so etcd was denied its data ("open …/server/db/etcd/.touch: permission denied") and `rke2-server`
+  never started: on 1.34.5 as well as 1.36.6, so v1.4.0 has it too, on today's Rocky images (its 2026-11-12 CI passed).
+  The install now gives a custom `RKE2_DATA` `/var/lib/rancher/rke2`'s labels with a SELinux file-context equivalence
+  (`semanage fcontext -a -e`, then `restorecon -R`), as RKE2's docs say for a custom data-dir, and uninstall removes
+  the equivalence it added. A path already labelled right (its own rule, or a parent's) gets none, `restorecon` runs
+  only when a label is wrong, and `semanage` refusing is a warning. Without `semanage` it warns. `RKE2_DATA` must now
+  be an absolute path other than `/` at install, as uninstall already required.
+- **The install's pod wait no longer passes before RKE2's charts have created any pods** (R27). Soon after a start,
+  kube-system can list only the static pods, all ready, so the wait could pass with CoreDNS not created yet (and an
+  install with `POD_WAIT_TIMEOUT=1` exited 0 on a warm Ubuntu minimal host). In kube-system, no CoreDNS pod now counts
+  as not ready.
+
+### Added
+- **`INGRESS_CONTROLLER`** (R24): from 1.36, with `INSTALL_INGRESS=true`, `traefik` or `ingress-nginx` (with a
+  warning that it's deprecated and removed in 1.37) writes `ingress-controller:`. Empty lets RKE2 choose, so an
+  upgraded cluster keeps the ingress-nginx it runs. Before 1.36 only `ingress-nginx` is accepted, and nothing is
+  written. Traefik runs on Rancher's chart defaults.
+- The bundle's `THIRD_PARTY_NOTICES.txt` names Traefik (MIT) for 1.36 bundles (R22).
+
+### Tests
+- `tests/unit/versions.bats` (new, 42 tests, R26's included); `pod-wait.bats` (R27): rendering for 1.34, 1.35 and 1.36 against v1.4.0's own output
+  (`tests/unit/fixtures/render-v1.4.0`), the ingress choice, the minor-version rule and `stable`, the ingress-off
+  upgrade on one and on three servers, which files `save` and both pushes fetch, the re-run message, `join`'s version,
+  the CA check, and the bundle's version.
+- `tests/integration/40-versions.sh` (new): each `verified` version in `tests/rke2-versions.conf` (v1.35.10) from a
+  `save` bundle, with the ingress on (a request through it) and off (nothing on 80 or 443); and a 1.36 bundle with the
+  ingress off and with `INGRESS_CONTROLLER=ingress-nginx`, whose images must come from the bundle. Fresh installs
+  only: the upgrade chain between minors is a one-time bench per new minor, recorded in spec 29.
+- `tests/integration/30-functional.sh`: the test Ingress names the class of the controller that runs (R21), and the
+  default install's is Traefik.
+- A4 checks that a join without `RKE2_VERSION` takes the cluster's version, and that no ingress runs with
+  `INSTALL_INGRESS=false`. A5 pins `RKE2_VERSION` to the last release's default for both runs.
+
 ## v1.4.0 — 2026-11-12 — Velero's S3 keys arrive exactly; images-pull-push v1.2.0
 
 Spec 21 (chubtoad-automation).
