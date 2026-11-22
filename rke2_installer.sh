@@ -1601,11 +1601,8 @@ apply_utilities () {
     fi
     if [[ ${INSTALL_DNS_UTILITY,,} == "true" ]]; then
         echo "  Installing dnsutils"
-        # need to add check for registry and update yaml path
-        if [[ $AIR_GAPPED_MODE -eq 1 ]]; then
-            kubectl apply -f $WORKING_DIR/rke2-utilities/dnsutils.yaml
-        else
-            kubectl apply -f $DNSUTILS_URL
+        if ! apply_dnsutils; then
+            echo "  WARNING: the dnsutils pod couldn't be created; continuing (dnsutils is non-critical)."
         fi
         # Warn-and-continue: 'default' may contain unrelated user workloads and dnsutils is a
         # non-critical troubleshooting pod - do not fail the install over it.
@@ -1613,6 +1610,44 @@ apply_utilities () {
             echo "  WARNING: pods in the 'default' namespace are not all ready; continuing (dnsutils is non-critical)."
         fi
     fi
+}
+
+# apply_dnsutils: the DNS utility pod from Kubernetes' dnsutils.yaml (the bundle's copy when air-gapped). V6 (spec 31):
+# the CIS profile enforces Pod Security "restricted" on 'default', which refused the plain pod and failed the install,
+# so with ENABLE_CIS the same pod gets a restricted-compliant security context.
+apply_dnsutils () {
+    local src=$WORKING_DIR/rke2-utilities/dnsutils.yaml tmp img
+    if [[ $AIR_GAPPED_MODE -ne 1 ]]; then
+        tmp=$(mktemp); curl -sfL "$DNSUTILS_URL" -o "$tmp" || { rm -f "$tmp"; return 1; }; src=$tmp
+    fi
+    if [[ ${ENABLE_CIS,,} != "true" ]]; then
+        kubectl apply -f "$src"; local rc=$?; [[ -n "${tmp:-}" ]] && rm -f "$tmp"; return $rc
+    fi
+    img=$(awk '/image:/ {print $2; exit}' "$src"); [[ -n "${tmp:-}" ]] && rm -f "$tmp"
+    [[ -n "$img" ]] || return 1
+    kubectl apply -f - <<DNSEOF
+apiVersion: v1
+kind: Pod
+metadata:
+  name: dnsutils
+  namespace: default
+spec:
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65534
+    runAsGroup: 65534
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+  - name: dnsutils
+    image: $img
+    imagePullPolicy: IfNotPresent
+    securityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop: ["ALL"]
+  restartPolicy: Always
+DNSEOF
 }
 
 # -- Upgrade Definitions -- #

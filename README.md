@@ -429,12 +429,19 @@ velero backup create manual-backup --from-schedule daily-full-backup --wait
 # List backups
 velero backup get
 
-# Describe a backup
-velero backup describe <backup-name> --details
+# Describe a backup, and read its logs
+velero backup describe <backup-name> --details --insecure-skip-tls-verify
+velero backup logs <backup-name> --insecure-skip-tls-verify
 
 # Restore from a backup
 velero restore create --from-backup <backup-name> --wait
 ```
+
+**A self-signed S3 endpoint** (SeaweedFS' default certificate, for one) needs `--insecure-skip-tls-verify` on the
+commands that download from the bucket: `backup describe --details`, `backup logs`, `restore describe --details` and
+`restore logs`. The installer sets `insecureSkipTLSVerify=true` for the server, but the CLI fetches those files itself,
+so without the flag it prints `x509: certificate signed by unknown authority` where the details should be. Backups and
+restores aren't affected. With a certificate the host trusts, or `--cacert <file>`, the flag isn't needed.
 
 #### Air-Gapped Velero
 
