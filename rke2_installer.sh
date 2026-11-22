@@ -1603,7 +1603,9 @@ apply_utilities () {
         kubectl apply -f $WORKING_DIR/rke2-utilities/local-path-storage.yaml
         # Hard-fail: the storageclass patch below and dependent PVCs need a live provisioner. With CNI_TYPE=none it
         # can't start until a CNI is installed, so it isn't waited for.
-        if [[ $CNI_NONE == "false" ]] && ! check_namespace_pods_ready local-path-storage; then
+        if [[ $CNI_NONE == "false" ]] && all_nodes_control_plane_tainted; then
+            echo "  NOTE: every node has the control-plane taint, so local-path-provisioner starts when the first agent joins (V10)."
+        elif [[ $CNI_NONE == "false" ]] && ! check_namespace_pods_ready local-path-storage; then
             echo "Error: local-path-provisioner pods did not become ready within the timeout."
             echo "  Inspect with 'kubectl get pods -n local-path-storage'."
             exit 1
@@ -3692,6 +3694,31 @@ image_pull_push_check () {
     fetch_helper "$dest" "$IMAGE_PULL_PUSH_URL" "$IMAGE_PULL_PUSH_REF" "$IMAGE_PULL_PUSH_SHA256" || exit 1
 }
 
+# drop_helm_jobs_awaiting_agent <not-ready lines>: V10 (spec 31). With CONTROL_PLANE_TAINT=true, RKE2's add-on charts
+# (Traefik, metrics-server, the snapshot controller) are installed by helm-install jobs that don't tolerate the
+# control-plane taint, so on a first server they wait for an agent to join, and every such install failed its pod wait
+# (the README says to set the taint before installing the first server). While every node carries that taint, their
+# Pending jobs are left out, and the install says what happens next. Anything else still counts.
+# all_nodes_control_plane_tainted: true while every node has the control-plane taint (no agent has joined yet).
+all_nodes_control_plane_tainted() {
+  local list
+  list=$(kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}={.spec.taints[*].key}{"\n"}{end}' 2>/dev/null) || return 1
+  [[ -n "$list" ]] && ! grep -v 'node-role.kubernetes.io/control-plane' <<< "$list" | grep -q .
+}
+drop_helm_jobs_awaiting_agent() {
+  local lines=$1
+  if all_nodes_control_plane_tainted; then
+    if [[ -z "${HELM_JOBS_NOTE_SHOWN:-}" ]]; then
+      echo "  NOTE: every node has the control-plane taint, so RKE2's add-on charts (Traefik, metrics-server, the snapshot"
+      echo "        controller) install when the first agent joins."
+      HELM_JOBS_NOTE_SHOWN=1
+    fi >&2
+    grep -v '^helm-install-.* Pending ' <<< "$lines" || true
+  else
+    printf '%s\n' "$lines"
+  fi
+}
+
 # drop_unplaceable_cilium_operator <not-ready lines>: V8 (spec 31). RKE2's Cilium chart runs two cilium-operator replicas
 # on the host network, one per node, so on a single node the second stays Pending for good while the first does the
 # work, and every single-node CNI_TYPE=cilium install failed its pod wait. Pending operator pods are left out while the
@@ -3735,6 +3762,9 @@ check_namespace_pods_ready() {
       fi
       if [[ "$ns" == "kube-system" ]] && grep -q '^cilium-operator-.* Pending ' <<< "$not_ready"; then
         not_ready=$(drop_unplaceable_cilium_operator "$not_ready")
+      fi
+      if [[ "$ns" == "kube-system" ]] && grep -q '^helm-install-.* Pending ' <<< "$not_ready"; then
+        not_ready=$(drop_helm_jobs_awaiting_agent "$not_ready")
       fi
     else
       pods=$(kubectl get pods -n "$ns" --no-headers 2>&1 >/dev/null) || true
