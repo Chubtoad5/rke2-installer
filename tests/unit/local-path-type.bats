@@ -124,3 +124,33 @@ esac'
   grep -A1 'kubectl apply -f $WORKING_DIR/rke2-utilities/local-path-storage.yaml' "$BATS_TEST_DIRNAME/../../rke2_installer.sh" | grep -q 'local_path_helper_access'
   sed -n '/^run_install_velero/,/^}/p' "$BATS_TEST_DIRNAME/../../rke2_installer.sh" | grep -q '^  local_path_helper_access$'
 }
+
+@test "N2: a template with quotes and a backslash still patches as valid JSON, with them kept" {
+  { helper_tpl; printf '%s\n' '    command: ["sh", "-c", "echo a\\b"]'; } > "$T/tpl"; stub_lp "$T/tpl"
+  SELINUX_ENFORCING=true run local_path_helper_access
+  [ "$status" -eq 0 ]
+  line=$(grep 'patch configmap local-path-config' "$STUB_LOG")
+  json=${line#*--type merge -p }
+  python3 -c 'import json,sys,yaml; t=json.loads(sys.argv[1])["data"]["helperPod.yaml"]; d=yaml.safe_load(t); c=d["spec"]["containers"][0]; assert c["securityContext"]["privileged"] is True and c["command"][2]=="echo a\\b", c' "$json"
+}
+
+@test "N2: a template whose container has its own securityContext is left alone, with a warning" {
+  { helper_tpl; printf '%s\n' '    securityContext: {runAsUser: 0}'; } > "$T/tpl"; stub_lp "$T/tpl"
+  SELINUX_ENFORCING=true run local_path_helper_access
+  [ "$status" -eq 0 ]
+  ! called "patch configmap"
+  [[ "$output" == *"has its own securityContext, without privileged: true"* ]]
+}
+
+@test "N2: a failed patch is a warning, not the end of the install" {
+  helper_tpl > "$T/tpl"
+  stub kubectl 'case "$*" in
+  "get namespace local-path-storage") exit 0 ;;
+  *"get configmap local-path-config"*) cat "'"$T"'/tpl" ;;
+  *"patch configmap"*) exit 1 ;;
+  *) exit 0 ;;
+esac'
+  SELINUX_ENFORCING=true run local_path_helper_access
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"couldn't make local-path's helper pods privileged"* ]]
+}

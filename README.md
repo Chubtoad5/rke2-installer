@@ -371,6 +371,8 @@ Installs the Rancher local-path-provisioner and sets it as the default `StorageC
 
 Since v2.1.0 the class makes `local` volumes (`defaultVolumeType: local`), not local-path's default `hostPath`, because Velero's node-agent never backs up `hostPath` volumes. A `local` volume sits in the same folder on the same node. Two differences: a pod's `fsGroup` now applies to it, and on SELinux-enforcing hosts the folder is relabelled for the pod that mounts it, so two pods on one node can't share it at once. PVCs made before keep their type; `install velero` names them. A `defaultVolumeType` set by hand is left alone.
 
+On SELinux-enforcing hosts (Rocky, RHEL) local-path's helper pods, which create and delete each volume's folder, run privileged (a `securityContext` patched into the `local-path-config` ConfigMap), because a `local` volume's folder carries its pod's own SELinux categories; without it a deleted PVC's data stayed on disk. With `ENABLE_CIS=true` the `local-path-storage` namespace is labelled `privileged` for Pod Security, because `restricted` refuses the helper pods' `hostPath` volume and PVCs stayed Pending (before v2.1.0 too). A re-run of `install` or `install velero` puts both back if the manifest was re-applied; pass the same `ENABLE_CIS` the cluster was installed with.
+
 ---
 
 ### CIS Hardening

@@ -2242,18 +2242,26 @@ local_path_helper_access() {
   kubectl get namespace local-path-storage &>/dev/null || return 0
   if [[ ${ENABLE_CIS,,} == true ]]; then
     kubectl label namespace local-path-storage pod-security.kubernetes.io/enforce=privileged \
-      pod-security.kubernetes.io/audit=privileged pod-security.kubernetes.io/warn=privileged --overwrite >/dev/null
+      pod-security.kubernetes.io/audit=privileged pod-security.kubernetes.io/warn=privileged --overwrite >/dev/null \
+      || echo "  WARNING: couldn't label local-path-storage for CIS: local-path PVCs may stay Pending."
   fi
   [[ $SELINUX_ENFORCING == true ]] || return 0
   local cur new body
   cur=$(kubectl -n local-path-storage get configmap local-path-config -o jsonpath='{.data.helperPod\.yaml}' 2>/dev/null) || return 0
   [[ -n "$cur" && "$cur" != *"privileged: true"* ]] || return 0
+  # A template someone edited to give the container its own securityContext is theirs: a second one would be ignored.
+  if grep -qE '^ +securityContext:' <<< "$cur"; then
+    echo "  WARNING: local-path's helper pod template has its own securityContext, without privileged: true. On this"
+    echo "  SELinux host its helper pods can't remove deleted PVCs' folders: add 'privileged: true' to it."
+    return 0
+  fi
   new=$(sed 's|^\( *\)- name: helper-pod$|&\n\1  securityContext: {privileged: true}|' <<< "$cur")
   [[ "$new" == *"privileged: true"* ]] || { echo "  WARNING: local-path's helper pod template has an unexpected shape: left as it is."; return 0; }
-  # As a JSON string: the template holds no quotes or backslashes, only newlines
-  body=$(sed ':a;N;$!ba;s/\n/\\n/g' <<< "$new")
+  # As a JSON string: backslashes, quotes and tabs escaped, then the newlines
+  body=$(sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/\t/\\t/g' -e 's/\r//g' <<< "$new" | sed ':a;N;$!ba;s/\n/\\n/g')
   echo "  SELinux is enforcing: local-path's helper pods run privileged, so they can remove pods' relabelled folders."
-  kubectl -n local-path-storage patch configmap local-path-config --type merge -p "{\"data\":{\"helperPod.yaml\":\"$body\"}}" >/dev/null
+  kubectl -n local-path-storage patch configmap local-path-config --type merge -p "{\"data\":{\"helperPod.yaml\":\"$body\"}}" >/dev/null \
+    || echo "  WARNING: couldn't make local-path's helper pods privileged: deleted PVCs may keep their data on disk."
 }
 
 # warn_hostpath_volumes: Q19. Names the PVCs whose volumes are hostPath, which Velero skips, so nobody counts on them.
@@ -2414,6 +2422,9 @@ SNAPEOF
     # under CIS an unlabelled one enforces "restricted", which refuses the node-agent, so it gets the same labels here.
     if ! kubectl get namespace velero &>/dev/null; then
       kubectl create namespace velero >/dev/null
+    fi
+    # Also when the namespace was made before, by hand or by a run that stopped here, without them
+    if [[ -z "$(kubectl get namespace velero -o jsonpath='{.metadata.labels.pod-security\.kubernetes\.io/enforce}' 2>/dev/null)" ]]; then
       kubectl label namespace velero component=velero \
         pod-security.kubernetes.io/enforce=privileged pod-security.kubernetes.io/enforce-version=latest \
         pod-security.kubernetes.io/audit=privileged pod-security.kubernetes.io/audit-version=latest \

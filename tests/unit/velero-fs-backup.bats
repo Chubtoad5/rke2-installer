@@ -29,6 +29,7 @@ V
   *"get daemonset node-agent -o jsonpath={.spec.template.spec.containers[0].args}"*) cat "'"$T"'/ds" 2>/dev/null ;;
   *"-n velero get daemonset"*) exit 1 ;;
   "get namespace velero") [[ ! -f "'"$T"'/nons" ]] ;;
+  *"get namespace velero -o jsonpath"*) [[ -f "'"$T"'/labelled" ]] && echo privileged ;;
   *) cat > /dev/null 2>&1; exit 0 ;;
 esac'
 }
@@ -148,9 +149,12 @@ esac'
   grep 'kubectl label namespace velero' "$STUB_LOG" | grep -q 'component=velero'
 }
 
-@test "N1: an existing velero namespace is left as it is" {
+@test "N1: an existing velero namespace isn't made again; it gets the labels only if it has none" {
   SEL=true drive
   [ "$status" -eq 0 ]
   ! called "kubectl create namespace velero"
+  called "kubectl label namespace velero"
+  : > "$STUB_LOG"; touch "$T/labelled"
+  SEL=true drive
   ! called "kubectl label namespace velero"
 }

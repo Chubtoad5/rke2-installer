@@ -337,6 +337,24 @@ Make it create `local` volumes rather than `hostPath` ones, so Velero can back u
 kubectl annotate storageclass local-path defaultVolumeType=local --overwrite
 ```
 
+**SELinux enforcing (Rocky, RHEL):** a `local` volume's folder carries its pod's own SELinux categories, so local-path's
+helper pod must run privileged to delete it; otherwise a deleted PVC's data stays on disk. Edit the helper pod template
+and add a `securityContext` under the container `- name: helper-pod`:
+
+```bash
+kubectl -n local-path-storage edit configmap local-path-config
+#   in helperPod.yaml, under "- name: helper-pod":
+#     securityContext: {privileged: true}
+```
+
+**CIS (`profile: cis`):** Pod Security `restricted` refuses the helper pod's `hostPath` volume, so PVCs stay Pending.
+Label the namespace:
+
+```bash
+kubectl label namespace local-path-storage pod-security.kubernetes.io/enforce=privileged \
+  pod-security.kubernetes.io/audit=privileged pod-security.kubernetes.io/warn=privileged --overwrite
+```
+
 ### DNS Utility Pod
 
 A convenience pod for testing DNS resolution inside the cluster:
