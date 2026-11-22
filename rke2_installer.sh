@@ -1828,19 +1828,25 @@ check_upgrade_image_in_registry () {
     [[ -s "$ca" ]] && tls=(--cacert "$ca")
     # The credentials go through curl's config on stdin, not its arguments.
     user_esc=$(dq_escape "$REG_USER"); pass_esc=$(dq_escape "$REG_PASS")
-    resp=$(printf 'user = "%s:%s"\n' "$user_esc" "$pass_esc" \
-           | curl -s -m 20 "${tls[@]}" -K - -w '\n%{http_code}' "https://${REGISTRY_INFO}/v2/rancher/rke2-upgrade/tags/list") || resp=""
-    code=${resp##*$'\n'}; body=${resp%$'\n'*}
-    if [[ "$code" == "200" ]] && grep -q "\"$tag\"" <<< "$body"; then
-        echo "  The registry has rancher/rke2-upgrade:$tag."
-    elif [[ "$code" == "200" || "$code" == "404" ]]; then
-        echo "Error: the registry $REGISTRY_INFO has no rancher/rke2-upgrade:$tag, so the upgrade job couldn't pull it."
-        echo "  On a connected host, build and push a bundle for that version, then upgrade:"
-        echo "  sudo RKE2_VERSION=$UPGRADE_VERSION ./$SCRIPT_NAME save push -registry $REGISTRY_INFO <user> <password>"
-        exit 1
-    else
-        echo "  WARNING: couldn't check the registry for rancher/rke2-upgrade:$tag (HTTP ${code:-no answer}). Going on."
-    fi
+    # V11 (spec 31): the upgrade job needs rke2-upgrade, and the upgraded node needs rke2-runtime for the same version
+    # before it can start. Only rke2-upgrade was checked, so a push that stopped partway (a missing Harbor project, say)
+    # let the upgrade begin, and the server stayed down with "rke2-runtime ... NOT_FOUND".
+    local repo
+    for repo in rke2-upgrade rke2-runtime; do
+        resp=$(printf 'user = "%s:%s"\n' "$user_esc" "$pass_esc" \
+               | curl -s -m 20 "${tls[@]}" -K - -w '\n%{http_code}' "https://${REGISTRY_INFO}/v2/rancher/$repo/tags/list") || resp=""
+        code=${resp##*$'\n'}; body=${resp%$'\n'*}
+        if [[ "$code" == "200" ]] && grep -q "\"$tag\"" <<< "$body"; then
+            echo "  The registry has rancher/$repo:$tag."
+        elif [[ "$code" == "200" || "$code" == "404" ]]; then
+            echo "Error: the registry $REGISTRY_INFO has no rancher/$repo:$tag, so the upgraded nodes couldn't start. Nothing was changed."
+            echo "  Push a bundle for that version (it carries both), then upgrade:"
+            echo "  sudo RKE2_VERSION=$UPGRADE_VERSION ./$SCRIPT_NAME save push -registry $REGISTRY_INFO <user> <password>"
+            exit 1
+        else
+            echo "  WARNING: couldn't check the registry for rancher/$repo:$tag (HTTP ${code:-no answer}). Going on."
+        fi
+    done
 }
 
 # wait_for_upgrade: until every node the upgrade targets reports UPGRADE_VERSION and is schedulable again (the plans
@@ -3254,8 +3260,10 @@ run_push () {
     if [[ $SAVE_MODE -eq 1 ]]; then
         AIR_GAPPED_MODE=1
     fi
-    push_utility_images
+    # RKE2's own images first (V11, spec 31): a utility or add-on image that can't be pushed (a Harbor project missing,
+    # say) used to stop the push before the core images, and an upgrade to them then left the server down.
     push_rke2_images
+    push_utility_images
     echo "--- Finished push workflow"
 }
 
