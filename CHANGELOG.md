@@ -37,16 +37,33 @@ move. RKE2's own default stays v1.36.6+rke2r1.
   the same folder. It had been deleted, and the upgrade failed with "manifests not found … Re-run 'save'".
 - **Air-gapped monitoring bundles carry Prometheus' config-reloader and the Fluent Bit tag that runs** (V13). Prometheus
   stayed in `Init:ErrImagePull` and Fluent Bit couldn't pull, on every version tried.
+  The list now holds only what `install monitoring` runs: it used to carry Grafana (485 MB), its sidecar, its test
+  image and Alertmanager, which the install disables, and pushing that Grafana failed on Leap 16 (Docker 29.7.2, "does
+  not provide any platform"), so `install push` exited 1 there.
 - **Local-path volumes provision on SELinux-enforcing hosts** with a custom `PVC_DATA` (V14, an equivalence to
   `/opt/local-path-provisioner`), and with the default folder made before `rke2-selinux` (V16, a relabel). They stayed
   Pending.
 - **A custom `KUBELET_DATA` gets `/var/lib/kubelet`'s SELinux labels** (V15), so Velero's node-agent can read it; it
   crash-looped on "open /host_pods: permission denied".
 - **A first `install velero` no longer stops at V1's node-agent check** on a cluster that never had Velero.
+- **Velero backs up `local-path` volumes' data** (T11, Q14 and Q19). Before, on a cluster without Longhorn, every
+  scheduled backup was `PartiallyFailed` ("missing region in aws configuration", from Velero's native AWS snapshotter),
+  and a restore brought PVCs back empty. Now:
+  - `install velero` turns the native snapshotter off (`--use-volume-snapshots=false`) and removes the location an
+    earlier install made with no region;
+  - when `VSC_DRIVER` isn't a registered CSI driver, the schedule backs volumes up with the node-agent
+    (`--default-volumes-to-fs-backup`), and an existing schedule is patched;
+  - the `local-path` StorageClass makes `local` volumes (`defaultVolumeType: local`), because Velero never backs up
+    `hostPath` ones, local-path's default. PVCs made before keep their type, and `install velero` names them.
+  - on SELinux-enforcing hosts (Rocky, RHEL), Velero's file-system backup and restore pods run privileged (Velero's
+    `privilegedFsBackup`, through the node-agent's `node-agent-config` ConfigMap; an existing node-agent is replaced so it
+    reads it), because each pod's `local` volume carries that pod's own SELinux categories. Only those short-lived pods
+    are privileged; the node-agent isn't.
+  - With Longhorn nothing else changes: CSI snapshots with the data mover, as before.
 
 ### Docs
 - README: the Velero CLI's `--insecure-skip-tls-verify` with a self-signed S3 endpoint (V5); the Harbor projects a push
-  needs (V7); what was checked on 1.36.
+  needs (V7), which harbor-registry-installer v1.5.0 creates by default; what was checked on 1.36.
 
 ## v2.0.0 — 2026-11-20 — RKE2 v1.36.6 by default (Traefik); v1.35.10 verified; one minor version at a time
 

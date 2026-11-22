@@ -321,7 +321,7 @@ multipathd, UFW/firewalld, the NetworkManager CNI conf, and the CIS `etcd` user.
 exist (`Failed to push image … Skipping`, then `step 'run_push' failed`). Create these projects before the first
 `push`, `install push` or `install velero push`: `rancher`, `e2e-test-images`, `ingress-nginx`, `kube-state-metrics`,
 `prometheus`, `prometheus-operator`, `kiwigrid`, `grafana`, `fluent`, `jkroepke`, `velero` and `bats` (`library` comes
-with Harbor; `jkroepke` holds kube-prometheus-stack's webhook image, from `ghcr.io`). A registry that makes repositories on push, such as a plain `registry:2`, needs nothing.
+with Harbor; `jkroepke` holds kube-prometheus-stack's webhook image, from `ghcr.io`). harbor-registry-installer v1.5.0 and later creates all of them when its `PROJECTS` is left unset (its README, "Projects for the Chubtoad5 tools"). A registry that makes repositories on push, such as a plain `registry:2`, needs nothing.
 
 **Mirrors.** `-registry` writes `/etc/rancher/rke2/registries.yaml` mirroring `docker.io`, `quay.io`, `registry.k8s.io`,
 `cr.fluentbit.io` and, since v2.1.0, `ghcr.io` (kube-prometheus-stack's webhook image) to the registry. A node whose
@@ -369,6 +369,8 @@ Klipper is the RKE2 built-in service LoadBalancer. It allows `LoadBalancer` type
 
 Installs the Rancher local-path-provisioner and sets it as the default `StorageClass`. Persistent volume claims using this class are stored on the local node filesystem under `PVC_DATA`. Disable with `INSTALL_LOCAL_PATH_PROVISIONER=false`.
 
+Since v2.1.0 the class makes `local` volumes (`defaultVolumeType: local`), not local-path's default `hostPath`, because Velero's node-agent never backs up `hostPath` volumes. A `local` volume sits in the same folder on the same node, and pods see no difference. PVCs made before keep their type; `install velero` names them. A `defaultVolumeType` set by hand is left alone.
+
 ---
 
 ### CIS Hardening
@@ -388,13 +390,13 @@ Set `ENABLE_CIS=true` to apply the RKE2 CIS Kubernetes hardening profile. This i
 
 **Optional** — Run as a separate step after RKE2 is installed.
 
-Velero provides Kubernetes cluster backup and restore using an S3-compatible object store and CSI volume snapshots (e.g. Longhorn).
+Velero provides Kubernetes cluster backup and restore using an S3-compatible object store. Volumes are backed up by CSI snapshots with the data mover when `VSC_DRIVER` is a registered CSI driver (Longhorn by default), and by the node-agent (file-system backup) when it isn't, as on a plain cluster with only `local-path`. Velero can't back up `hostPath` volumes: `install velero` names any it finds (see [Local Path Provisioner](#local-path-provisioner)). On SELinux-enforcing hosts, the file-system backup and restore pods run privileged (Velero's `privilegedFsBackup`, in the `node-agent-config` ConfigMap), because each pod's volume carries that pod's own SELinux categories.
 
 #### Prerequisites
 
 1. An S3-compatible object store (MinIO, Ceph RGW, AWS S3, etc.)
 2. A pre-created S3 bucket (default name: `velero`)
-3. Longhorn (or another CSI driver) installed in the cluster for volume snapshots
+3. For CSI snapshots, Longhorn (or another CSI driver, named in `VSC_DRIVER`). Without one, the schedule uses file-system backup (since v2.1.0)
    - With a custom `KUBELET_DATA`, `VELERO_VERSION` must be v1.17.0 or later (the node-agent's `--kubelet-root-dir`)
 4. Set the following variables in the script before running:
 

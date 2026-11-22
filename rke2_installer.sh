@@ -1682,6 +1682,7 @@ apply_utilities () {
             exit 1
         fi
         kubectl patch storageclass local-path -p '{"metadata": {"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
+        set_local_path_volume_type
     fi
     if [[ ${INSTALL_DNS_UTILITY,,} == "true" ]]; then
         echo "  Installing dnsutils"
@@ -2215,6 +2216,32 @@ write_velero_credentials () {
     ( umask 077; printf '[default]\naws_access_key_id=%s\naws_secret_access_key=%s\n' "$VELERO_S3_ACCESS_KEY" "$VELERO_S3_SECRET_KEY" > "$1" )
 }
 
+# set_local_path_volume_type: Q19 (spec 31). Velero's node-agent never backs up hostPath volumes, which local-path makes
+# by default, so a restore brought its PVCs back empty. A "local" volume sits in the same folder on the same node, pods see
+# no difference, and the node-agent backs it up. Existing PVCs keep their type. A type someone set by hand is left alone.
+set_local_path_volume_type() {
+  kubectl get storageclass local-path &>/dev/null || return 0
+  local now
+  now=$(kubectl get storageclass local-path -o jsonpath='{.metadata.annotations.defaultVolumeType}' 2>/dev/null) || now=""
+  case "$now" in
+    local) return 0 ;;
+    "") echo "  local-path makes 'local' volumes from now on, so Velero can back up their data."
+        kubectl annotate storageclass local-path defaultVolumeType=local --overwrite >/dev/null ;;
+    *) echo "  NOTE: local-path's defaultVolumeType is '$now' (set by hand): left as it is. Velero can't back up hostPath volumes." ;;
+  esac
+}
+
+# warn_hostpath_volumes: Q19. Names the PVCs whose volumes are hostPath, which Velero skips, so nobody counts on them.
+warn_hostpath_volumes() {
+  local pvs
+  pvs=$(kubectl get pv -o jsonpath='{range .items[?(@.spec.hostPath)]}{.spec.claimRef.namespace}/{.spec.claimRef.name}{" "}{end}' 2>/dev/null) || pvs=""
+  pvs=${pvs% }
+  [[ -n "$pvs" ]] || return 0
+  echo "  WARNING: Velero can't back up the data of these PVCs, because their volumes are hostPath: $pvs"
+  echo "  They were made before local-path made 'local' volumes. Their objects are backed up, but a restore brings them"
+  echo "  back empty. To have the data backed up, copy it out, recreate the PVC, and copy it back."
+}
+
 # velero_converge_versions: V3 (spec 31). 'velero install' over a running Velero leaves its Deployment and DaemonSet as they
 # are, so a re-run with a newer VELERO_VERSION used to put the new CLI beside the old server and say nothing. When the
 # running images differ from the requested ones, this takes Velero's documented upgrade steps: the CRDs, then the images.
@@ -2284,11 +2311,16 @@ run_install_velero () {
   echo "  Snapshot controller is running."
 
   # RK-11: the default VSC_DRIVER (driver.longhorn.io) assumes the ap-tools stack.
-  # Velero still installs and does object backups without it, so warn loudly rather than fail.
+  # T11 (spec 31, Q14): without that CSI driver, nothing copied a volume's data, so a restore brought PVCs back empty.
+  # Then the schedule backs volumes up with the node-agent (file-system backup) instead.
+  set_local_path_volume_type
+  warn_hostpath_volumes
+  local fs_backup=0
   if ! kubectl get csidriver "$VSC_DRIVER" &>/dev/null; then
-      echo "  WARNING: CSI driver '$VSC_DRIVER' is not registered in this cluster (default assumes Longhorn"
-      echo "  installed by ap-tools). CSI volume snapshots WILL FAIL until VSC_DRIVER/VSC_NAME are set to an"
-      echo "  installed CSI driver ('kubectl get csidrivers'). Object/resource backups are unaffected."
+      fs_backup=1
+      echo "  NOTE: CSI driver '$VSC_DRIVER' isn't registered in this cluster (the default assumes Longhorn, installed by"
+      echo "  ap-tools). Volumes are backed up by Velero's node-agent (file-system backup), not CSI snapshots. For CSI"
+      echo "  snapshots, set VSC_DRIVER and VSC_NAME to an installed CSI driver ('kubectl get csidrivers')."
   fi
 
   # Create VolumeSnapshotClass for Longhorn
@@ -2327,6 +2359,25 @@ SNAPEOF
   if [[ -n "$mounted" && "${mounted%/}" != "$kubelet_root/pods" ]]; then
     echo "  The node-agent mounts $mounted, not $kubelet_root/pods: replacing it."
     kubectl -n velero delete daemonset node-agent --wait=true >/dev/null
+    mounted=""
+  fi
+  # Q19 (spec 31): with SELinux enforcing, the runtime relabels each pod's local volume with that pod's own categories, and
+  # Velero (1.17+) copies it from a short-lived backup pod, which then can't read it ("permission denied"), so the
+  # file-system backup failed. The node-agent's ConfigMap makes those backup and restore pods privileged (Velero's
+  # privilegedFsBackup), which run unconfined; the node-agent itself stays as it is. 'velero install' leaves an existing
+  # DaemonSet alone, so one that doesn't read the ConfigMap is replaced.
+  local agent_args=() agent_cm_args
+  if [[ $SELINUX_ENFORCING == true ]]; then
+    agent_args=(--node-agent-configmap node-agent-config)
+    echo "  SELinux is enforcing: Velero's file-system backup pods run privileged, so they can read pods' relabelled volumes."
+    kubectl create namespace velero --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+    kubectl -n velero create configmap node-agent-config --from-literal=node-agent-config.json='{"privilegedFsBackup": true}' \
+      --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+    agent_cm_args=$(kubectl -n velero get daemonset node-agent -o jsonpath='{.spec.template.spec.containers[0].args}' 2>/dev/null) || agent_cm_args=""
+    if [[ -n "$mounted" && "$agent_cm_args" != *"--node-agent-configmap"* ]]; then
+      echo "  The node-agent doesn't read that ConfigMap: replacing it."
+      kubectl -n velero delete daemonset node-agent --wait=true >/dev/null
+    fi
   fi
   echo "  Installing Velero server into the cluster..."
   velero install \
@@ -2339,8 +2390,20 @@ SNAPEOF
     --secret-file "$velero_creds" \
     --features=EnableCSI \
     --use-node-agent \
-    --use-volume-snapshots=true \
+    "${agent_args[@]}" \
+    --use-volume-snapshots=false \
     --wait
+
+  # T11 (spec 31, Q14): Velero's native AWS snapshotter has no use here (volumes go through CSI or the node-agent), and its
+  # location, which earlier installs made with no region, turned every backup with a PV into PartiallyFailed ("missing
+  # region in aws configuration"). An earlier install's location is removed; one with a region is someone's own.
+  local vsl_provider vsl_region
+  vsl_provider=$(kubectl -n velero get volumesnapshotlocation default -o jsonpath='{.spec.provider}' 2>/dev/null) || vsl_provider=""
+  vsl_region=$(kubectl -n velero get volumesnapshotlocation default -o jsonpath='{.spec.config.region}' 2>/dev/null) || vsl_region=""
+  if [[ "$vsl_provider" == aws && -z "$vsl_region" ]]; then
+      echo "  Removing the volume snapshot location an earlier install made (no region): it made backups PartiallyFailed."
+      kubectl -n velero delete volumesnapshotlocation default >/dev/null
+  fi
 
   # Clean up credentials file
   rm -f "$velero_creds"
@@ -2359,15 +2422,26 @@ SNAPEOF
 
   # Create scheduled backup (RK-4: guarded so 'install velero' is re-runnable -
   # 'velero schedule create' hard-fails when the schedule already exists)
+  local fs_args=()
+  ((fs_backup)) && fs_args=(--default-volumes-to-fs-backup)
   if velero schedule get daily-full-backup &>/dev/null; then
       echo "  Schedule 'daily-full-backup' already exists; leaving it in place."
       echo "  (To apply changed schedule settings: 'velero schedule delete daily-full-backup --confirm' and re-run.)"
+      # T11: an earlier install's schedule, on a cluster with no CSI driver for VSC_DRIVER, copied no volume data
+      local fs_now
+      fs_now=$(kubectl -n velero get schedule daily-full-backup -o jsonpath='{.spec.template.defaultVolumesToFsBackup}' 2>/dev/null) || fs_now=""
+      if ((fs_backup)) && [[ "$fs_now" != true ]]; then
+          echo "  Turning on file-system backup in the existing schedule, so volumes' data is backed up."
+          kubectl -n velero patch schedule daily-full-backup --type merge \
+            -p '{"spec":{"template":{"defaultVolumesToFsBackup":true}}}' >/dev/null
+      fi
   else
       echo "  Creating scheduled backup '${VELERO_BACKUP_SCHEDULE}'..."
       velero schedule create daily-full-backup \
         --schedule="${VELERO_BACKUP_SCHEDULE}" \
         --ttl ${VELERO_BACKUP_TTL} \
         --snapshot-move-data \
+        "${fs_args[@]}" \
         --include-cluster-resources=true \
         --include-namespaces ${VELERO_BACKUP_NAMESPACES}
   fi
