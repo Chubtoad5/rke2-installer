@@ -3170,8 +3170,11 @@ extract_monitoring_images () {
     echo "  Extracting images from kube-prometheus-stack v${KUBE_PROMETHEUS_STACK_VERSION} chart..."
     # V13 (spec 31): the operator gets Prometheus' config-reloader image as an argument, not on an image: line, so it
     # was left out, and an air-gapped Prometheus stayed in Init:ErrImagePull. Both forms are listed now.
+    # Rendered with install monitoring's own disables (grafana, alertmanager), so the list holds what the install runs.
+    # The defaults also listed Grafana (485 MB), its sidecar, its test image and Alertmanager, none of them ever run; and
+    # pushing Grafana 13.3.0-distroless failed on Leap 16 (Docker 29, containerd store: "does not provide any platform").
     local kps_rendered
-    kps_rendered=$(helm template airgap-check "$kps_chart")
+    kps_rendered=$(helm template airgap-check "$kps_chart" --set grafana.enabled=false --set alertmanager.enabled=false)
     {
         grep -E '^\s+image:' <<< "$kps_rendered" | awk '{print $2}'
         grep -oE -- '--prometheus-config-reloader=[^" ]+' <<< "$kps_rendered" | cut -d= -f2-

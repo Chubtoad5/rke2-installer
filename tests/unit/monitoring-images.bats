@@ -30,3 +30,10 @@ list() { sort -u "$WORKING_DIR/rke2-utilities/images/utility-images.txt"; }
   list | grep -qx 'cr.fluentbit.io/fluent/fluent-bit:5.1.5'
   ! list | grep -q 'fluent-bit:5.1.3'
 }
+
+@test "V13: the chart is rendered with install monitoring's disables, so Grafana and Alertmanager aren't listed" {
+  extract_monitoring_images >/dev/null
+  grep -q 'helm template airgap-check .*kube-prometheus-stack-92.22.0.tgz --set grafana.enabled=false --set alertmanager.enabled=false' "$STUB_LOG"
+  run grep -n -A1 '^grafana:' "$BATS_TEST_DIRNAME/../../rke2_installer.sh"
+  [[ "$output" == *"enabled: false"* ]]
+}
