@@ -105,6 +105,7 @@ SKIP_CORE_INSTALL=0
 SERVICE_ACTION="start"
 SELINUX_ENFORCING="false"
 STATE_FILE="/etc/rke2-installer/install-state.env"
+FROM_BUNDLE=0
 fqdn_pattern='^([a-z0-9]+(-[a-z0-9]+)*\.)+[a-z]{2,}$'
 ipv4_pattern='^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$'
 TMP_DIR=$(mktemp -d /tmp/rke2-installer.XXXXXX)
@@ -3835,6 +3836,10 @@ run_debug() {
 cleanup () {
     if [[ $INSTALL_MODE -eq 1 || $JOIN_MODE -eq 1 || $UPGRADE_MODE -eq 1 ]]; then
         echo "  Installation detected, no cleanup required..."
+    elif [[ "${FROM_BUNDLE:-0}" -eq 1 ]]; then
+        # V12 (spec 31): a push from an extracted bundle removed the bundle, so the upgrade or install that follows in
+        # the same folder failed with "manifests not found ... Re-run 'save'".
+        echo "  $WORKING_DIR is an extracted bundle: kept for the next command."
     else
         echo "  Cleaning up..."
         rm -rf "$WORKING_DIR"
@@ -4141,6 +4146,8 @@ if [[ -f $base_dir/rke2-save-version.txt ]]; then
         echo "NOTE: rke2-save-version.txt is in $base_dir, but RKE2_FORCE_ONLINE=true: staying online."
     else
         AIR_GAPPED_MODE=1
+        # V12 (spec 31): this folder is an extracted bundle, the user's, so cleanup keeps it.
+        [[ $SAVE_MODE -eq 0 ]] && FROM_BUNDLE=1
         # An install, join or push from a bundle needs the bundle's files. Without them, say so now, instead of
         # failing later on a missing archive. uninstall and a rebuilding save don't need them.
         if [[ ( $INSTALL_MODE -eq 1 && $INSTALL_TYPE == "rke2" ) || $JOIN_MODE -eq 1 || ( $PUSH_MODE -eq 1 && $SAVE_MODE -eq 0 ) ]]; then
