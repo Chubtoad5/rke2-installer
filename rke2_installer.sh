@@ -5,7 +5,7 @@ set -o errexit
 set -o nounset
 set -o pipefail
 
-SCRIPT_VERSION="2.0.0"
+SCRIPT_VERSION="2.1.0"
 
 # --- USER DEFINED VARIABLES ---#
 RKE2_VERSION_GIVEN=${RKE2_VERSION:-}                                          # what the caller set, before the default (spec 29, R23)
@@ -44,8 +44,8 @@ RKE2_SELINUX_FALLBACK=${RKE2_SELINUX_FALLBACK:-}                              # 
 DEBUG=${DEBUG:-"1"}
 
 # Velero Backup Configuration
-VELERO_VERSION=${VELERO_VERSION:-"v1.17.1"}
-VELERO_AWS_PLUGIN_VERSION=${VELERO_AWS_PLUGIN_VERSION:-"v1.13.0"}
+VELERO_VERSION=${VELERO_VERSION:-"v1.18.4"}
+VELERO_AWS_PLUGIN_VERSION=${VELERO_AWS_PLUGIN_VERSION:-"v1.14.4"}
 VELERO_BUCKET=${VELERO_BUCKET:-"velero"}
 VELERO_S3_URL=${VELERO_S3_URL:-""}                                   # S3 endpoint URL, e.g. https://s3.example.com:8333
 VELERO_S3_ACCESS_KEY=${VELERO_S3_ACCESS_KEY:-""}                     # S3 access key
@@ -63,9 +63,9 @@ MONITORING_LOKI_PORT=${MONITORING_LOKI_PORT:-"3100"}                 # Loki HTTP
 MONITORING_PROMETHEUS_PORT=${MONITORING_PROMETHEUS_PORT:-"9090"}     # Prometheus remote-write receiver port on the monitoring host
 CLUSTER_NAME=${CLUSTER_NAME:-"edge-lab"}                             # Cluster label applied to all metrics and logs
 HELM_VERSION=${HELM_VERSION:-"4.0.1"}                                # Helm version to download if not already installed
-KUBE_PROMETHEUS_STACK_VERSION=${KUBE_PROMETHEUS_STACK_VERSION:-"69.8.0"}  # kube-prometheus-stack Helm chart version
-FLUENT_BIT_CHART_VERSION=${FLUENT_BIT_CHART_VERSION:-"0.55.0"}       # Fluent Bit Helm chart version (fluent/fluent-bit, uses 0.x.x versioning)
-FLUENT_BIT_VERSION=${FLUENT_BIT_VERSION:-"4.2.2"}                    # Fluent Bit application/image version (appVersion in the chart above)
+KUBE_PROMETHEUS_STACK_VERSION=${KUBE_PROMETHEUS_STACK_VERSION:-"92.22.0"}  # kube-prometheus-stack Helm chart version
+FLUENT_BIT_CHART_VERSION=${FLUENT_BIT_CHART_VERSION:-"0.58.3"}       # Fluent Bit Helm chart version (fluent/fluent-bit, uses 0.x.x versioning)
+FLUENT_BIT_VERSION=${FLUENT_BIT_VERSION:-"5.1.5"}                    # Fluent Bit application/image version (appVersion in the chart above)
 PROMETHEUS_RETENTION=${PROMETHEUS_RETENTION:-"48h"}                  # In-cluster Prometheus retention (short; long-term lives on external host)
 PROMETHEUS_STORAGE_SIZE=${PROMETHEUS_STORAGE_SIZE:-"50Gi"}           # PVC size for in-cluster Prometheus
 PROMETHEUS_STORAGE_CLASS=${PROMETHEUS_STORAGE_CLASS:-"longhorn"}     # StorageClass for Prometheus and Alertmanager PVCs
@@ -105,6 +105,7 @@ SKIP_CORE_INSTALL=0
 SERVICE_ACTION="start"
 SELINUX_ENFORCING="false"
 STATE_FILE="/etc/rke2-installer/install-state.env"
+FROM_BUNDLE=0
 fqdn_pattern='^([a-z0-9]+(-[a-z0-9]+)*\.)+[a-z]{2,}$'
 ipv4_pattern='^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$'
 TMP_DIR=$(mktemp -d /tmp/rke2-installer.XXXXXX)
@@ -955,6 +956,74 @@ install_ingress_nginx_images () {
     rm -rf $WORKING_DIR/rke2-ingress-images/images
 }
 
+# label_custom_kubelet_dir: V15 (spec 31). The policy labels /var/lib/kubelet's tree container_var_lib_t (pod-resources
+# kubelet_var_lib_t). A custom KUBELET_DATA was default_t, so a pod that reads the pods directory through a hostPath,
+# such as Velero's node-agent, was denied ("open /host_pods: permission denied") and crash-looped, and install velero
+# failed. The path gets /var/lib/kubelet's labels through an equivalence, recorded for uninstall. Pods' own volumes
+# are container_file_t, a customizable type, which restorecon leaves as it is.
+label_custom_kubelet_dir () {
+    local d
+    d=$(trim_slashes "${KUBELET_DATA:-}")
+    [[ -n "$d" && "$d" != "default" && "$d" != "/var/lib/kubelet" ]] || return 0
+    if ! command -v semanage >/dev/null 2>&1 || ! command -v restorecon >/dev/null 2>&1; then
+        echo "  WARNING: SELinux is enforcing and KUBELET_DATA is $d, but semanage or restorecon isn't installed, so it can't be"
+        echo "  labelled like /var/lib/kubelet, and pods that read it (Velero's node-agent) will be denied. Install policycoreutils-python-utils."
+        return 0
+    fi
+    if [[ "$(matchpathcon -n "$d/pods" 2>/dev/null)" == *:container_var_lib_t:* ]]; then
+        echo "  $d already has /var/lib/kubelet's SELinux labels."
+    elif semanage fcontext -a -e /var/lib/kubelet "$d"; then
+        echo "  Labelled $d like /var/lib/kubelet for SELinux (semanage fcontext -a -e)."
+        state_set RKE2I_SELINUX_EQUIV_KUBELET "$d"
+    else
+        echo "  WARNING: semanage couldn't give $d /var/lib/kubelet's SELinux labels (see its error above); pods that read it"
+        echo "  (Velero's node-agent) can then be denied."
+        return 0
+    fi
+    mkdir -p "$d"
+    if ! matchpathcon -V "$d" >/dev/null 2>&1 || { [[ -d "$d/pods" ]] && ! matchpathcon -V "$d/pods" >/dev/null 2>&1; }; then
+        restorecon -R "$d"
+    fi
+}
+
+# label_custom_pvc_dir: V14 (spec 31). local-path-provisioner's helper pods (container_t) make each volume's folder
+# under PVC_DATA/local-path-provisioner. RKE2's SELinux policy labels only /opt/local-path-provisioner (and
+# /var/local-path-provisioner) container_file_t, so under a custom PVC_DATA the folder was default_t, the helper's mkdir
+# was denied, and every local-path PVC stayed Pending. The folder gets /opt/local-path-provisioner's labels, recorded
+# for uninstall, as R26 does for RKE2_DATA.
+label_custom_pvc_dir () {
+    local d lp
+    d=$(trim_slashes "${PVC_DATA:-}")
+    # V16 (spec 31): the default folder has the policy's own rule, but a folder made before rke2-selinux was installed
+    # keeps the label it was made with (usr_t, seen on an air-gapped Rocky server), and local-path's helpers were denied.
+    if [[ "$d" == "/opt/local-path-provisioner" || "$d" == "default" ]]; then
+        if [[ -d /opt/local-path-provisioner ]] && command -v restorecon >/dev/null 2>&1 && command -v matchpathcon >/dev/null 2>&1 \
+           && ! matchpathcon -V /opt/local-path-provisioner >/dev/null 2>&1; then
+            restorecon -R /opt/local-path-provisioner && echo "  Relabelled /opt/local-path-provisioner for SELinux (it was made before the policy)."
+        fi
+        return 0
+    fi
+    [[ -n "$d" ]] || return 0
+    lp="$d/local-path-provisioner"
+    if ! command -v semanage >/dev/null 2>&1 || ! command -v restorecon >/dev/null 2>&1; then
+        echo "  WARNING: SELinux is enforcing and PVC_DATA is $d, but semanage or restorecon isn't installed, so local-path"
+        echo "  volumes there can't be labelled, and their pods' folders will be denied. Install policycoreutils-python-utils."
+        return 0
+    fi
+    if [[ "$(matchpathcon -n "$lp" 2>/dev/null)" == *:container_file_t:* ]]; then
+        echo "  $lp already has local-path-provisioner's SELinux labels."
+    elif semanage fcontext -a -e /opt/local-path-provisioner "$lp"; then
+        echo "  Labelled $lp like /opt/local-path-provisioner for SELinux (semanage fcontext -a -e)."
+        state_set RKE2I_SELINUX_EQUIV_PVC "$lp"
+    else
+        echo "  WARNING: semanage couldn't give $lp /opt/local-path-provisioner's SELinux labels (see its error above);"
+        echo "  local-path volumes there can then be denied."
+        return 0
+    fi
+    mkdir -p "$lp"
+    matchpathcon -V "$lp" >/dev/null 2>&1 || restorecon -R "$lp"
+}
+
 # label_custom_data_dir: on an SELinux-enforcing host, a custom RKE2_DATA gets the labels /var/lib/rancher/rke2 has,
 # through a file-context equivalence, as RKE2's docs say for a custom data-dir. Without it the path is usr_t or
 # var_lib_t: rke2-selinux confines etcd as rke2_service_db_t, which may only write rke2_service_db_file_t, so etcd can't
@@ -963,6 +1032,8 @@ install_ingress_nginx_images () {
 # records the pre-install state first. An equivalence this run adds is recorded, and uninstall removes it.
 label_custom_data_dir () {
     [[ "$SELINUX_ENFORCING" == "true" ]] || return 0
+    label_custom_pvc_dir
+    label_custom_kubelet_dir
     local d
     d=$(trim_slashes "$RKE2_DATA")
     [[ "$d" != "/var/lib/rancher/rke2" ]] || return 0
@@ -1017,8 +1088,19 @@ create_registry_config () {
         echo "  Certificate saved to $CERTS_DIR."
         # registries.yaml carries the registry credentials - write it 0600 (RK-8). Both are escaped for YAML's
         # double quotes (R12).
-        local user_esc pass_esc
+        local user_esc pass_esc ghcr_block=""
         user_esc=$(dq_escape "$REG_USER"); pass_esc=$(dq_escape "$REG_PASS")
+        # V9 (spec 31): kube-prometheus-stack (84.x and later) takes its admission webhook's image from ghcr.io, which
+        # no mirror covered, so air-gapped monitoring couldn't pull it. A new registries.yaml mirrors ghcr.io too. An
+        # existing one without it keeps its exact content, so a running node's re-run sees no change (and doesn't stop
+        # for RKE2_RECONFIGURE); RKE2_RECONFIGURE=true adds it there.
+        if [[ ! -f /etc/rancher/rke2/registries.yaml ]] || grep -q '^  ghcr.io:' /etc/rancher/rke2/registries.yaml \
+           || [[ "${RKE2_RECONFIGURE,,}" == "true" ]]; then
+            ghcr_block=$'  ghcr.io:\n    endpoint:\n      - "https://'"${REG_FQDN}:${REG_PORT}"$'"\n'
+        else
+            echo "  NOTE: this node's registries.yaml has no ghcr.io mirror, which air-gapped 'install monitoring' needs"
+            echo "        (kube-prometheus-stack's webhook image). Re-run with RKE2_RECONFIGURE=true to add it."
+        fi
         ( umask 077; cat > /etc/rancher/rke2/registries.yaml <<EOF
 configs:
   ${REG_FQDN}:${REG_PORT}:
@@ -1040,7 +1122,7 @@ mirrors:
   cr.fluentbit.io:
     endpoint:
       - "https://${REG_FQDN}:${REG_PORT}"
-  ${REG_FQDN}:${REG_PORT}:
+${ghcr_block}  ${REG_FQDN}:${REG_PORT}:
     endpoint:
       - "https://${REG_FQDN}:${REG_PORT}"
 EOF
@@ -1590,29 +1672,70 @@ apply_utilities () {
            sed -i "s|\"paths\":\[\s*\"[^\"]*\"\s*\]|\"paths\":[\"${PVC_DATA}/local-path-provisioner\"]|g" $WORKING_DIR/rke2-utilities/local-path-storage.yaml
         fi    
         kubectl apply -f $WORKING_DIR/rke2-utilities/local-path-storage.yaml
+        local_path_helper_access
         # Hard-fail: the storageclass patch below and dependent PVCs need a live provisioner. With CNI_TYPE=none it
         # can't start until a CNI is installed, so it isn't waited for.
-        if [[ $CNI_NONE == "false" ]] && ! check_namespace_pods_ready local-path-storage; then
+        if [[ $CNI_NONE == "false" ]] && all_nodes_control_plane_tainted; then
+            echo "  NOTE: every node has the control-plane taint, so local-path-provisioner starts when the first agent joins (V10)."
+        elif [[ $CNI_NONE == "false" ]] && ! check_namespace_pods_ready local-path-storage; then
             echo "Error: local-path-provisioner pods did not become ready within the timeout."
             echo "  Inspect with 'kubectl get pods -n local-path-storage'."
             exit 1
         fi
         kubectl patch storageclass local-path -p '{"metadata": {"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
+        set_local_path_volume_type
     fi
     if [[ ${INSTALL_DNS_UTILITY,,} == "true" ]]; then
         echo "  Installing dnsutils"
-        # need to add check for registry and update yaml path
-        if [[ $AIR_GAPPED_MODE -eq 1 ]]; then
-            kubectl apply -f $WORKING_DIR/rke2-utilities/dnsutils.yaml
-        else
-            kubectl apply -f $DNSUTILS_URL
+        if ! apply_dnsutils; then
+            echo "  WARNING: the dnsutils pod couldn't be created; continuing (dnsutils is non-critical)."
         fi
         # Warn-and-continue: 'default' may contain unrelated user workloads and dnsutils is a
         # non-critical troubleshooting pod - do not fail the install over it.
-        if [[ $CNI_NONE == "false" ]] && ! check_namespace_pods_ready default; then
+        if [[ $CNI_NONE == "false" ]] && all_nodes_control_plane_tainted; then
+            echo "  NOTE: every node has the control-plane taint, so dnsutils starts when the first agent joins (V10)."
+        elif [[ $CNI_NONE == "false" ]] && ! check_namespace_pods_ready default; then
             echo "  WARNING: pods in the 'default' namespace are not all ready; continuing (dnsutils is non-critical)."
         fi
     fi
+}
+
+# apply_dnsutils: the DNS utility pod from Kubernetes' dnsutils.yaml (the bundle's copy when air-gapped). V6 (spec 31):
+# the CIS profile enforces Pod Security "restricted" on 'default', which refused the plain pod and failed the install,
+# so with ENABLE_CIS the same pod gets a restricted-compliant security context.
+apply_dnsutils () {
+    local src=$WORKING_DIR/rke2-utilities/dnsutils.yaml tmp img
+    if [[ $AIR_GAPPED_MODE -ne 1 ]]; then
+        tmp=$(mktemp); curl -sfL "$DNSUTILS_URL" -o "$tmp" || { rm -f "$tmp"; return 1; }; src=$tmp
+    fi
+    if [[ ${ENABLE_CIS,,} != "true" ]]; then
+        kubectl apply -f "$src"; local rc=$?; [[ -n "${tmp:-}" ]] && rm -f "$tmp"; return $rc
+    fi
+    img=$(awk '/image:/ {print $2; exit}' "$src"); [[ -n "${tmp:-}" ]] && rm -f "$tmp"
+    [[ -n "$img" ]] || return 1
+    kubectl apply -f - <<DNSEOF
+apiVersion: v1
+kind: Pod
+metadata:
+  name: dnsutils
+  namespace: default
+spec:
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65534
+    runAsGroup: 65534
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+  - name: dnsutils
+    image: $img
+    imagePullPolicy: IfNotPresent
+    securityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop: ["ALL"]
+  restartPolicy: Always
+DNSEOF
 }
 
 # -- Upgrade Definitions -- #
@@ -1782,19 +1905,25 @@ check_upgrade_image_in_registry () {
     [[ -s "$ca" ]] && tls=(--cacert "$ca")
     # The credentials go through curl's config on stdin, not its arguments.
     user_esc=$(dq_escape "$REG_USER"); pass_esc=$(dq_escape "$REG_PASS")
-    resp=$(printf 'user = "%s:%s"\n' "$user_esc" "$pass_esc" \
-           | curl -s -m 20 "${tls[@]}" -K - -w '\n%{http_code}' "https://${REGISTRY_INFO}/v2/rancher/rke2-upgrade/tags/list") || resp=""
-    code=${resp##*$'\n'}; body=${resp%$'\n'*}
-    if [[ "$code" == "200" ]] && grep -q "\"$tag\"" <<< "$body"; then
-        echo "  The registry has rancher/rke2-upgrade:$tag."
-    elif [[ "$code" == "200" || "$code" == "404" ]]; then
-        echo "Error: the registry $REGISTRY_INFO has no rancher/rke2-upgrade:$tag, so the upgrade job couldn't pull it."
-        echo "  On a connected host, build and push a bundle for that version, then upgrade:"
-        echo "  sudo RKE2_VERSION=$UPGRADE_VERSION ./$SCRIPT_NAME save push -registry $REGISTRY_INFO <user> <password>"
-        exit 1
-    else
-        echo "  WARNING: couldn't check the registry for rancher/rke2-upgrade:$tag (HTTP ${code:-no answer}). Going on."
-    fi
+    # V11 (spec 31): the upgrade job needs rke2-upgrade, and the upgraded node needs rke2-runtime for the same version
+    # before it can start. Only rke2-upgrade was checked, so a push that stopped partway (a missing Harbor project, say)
+    # let the upgrade begin, and the server stayed down with "rke2-runtime ... NOT_FOUND".
+    local repo
+    for repo in rke2-upgrade rke2-runtime; do
+        resp=$(printf 'user = "%s:%s"\n' "$user_esc" "$pass_esc" \
+               | curl -s -m 20 "${tls[@]}" -K - -w '\n%{http_code}' "https://${REGISTRY_INFO}/v2/rancher/$repo/tags/list") || resp=""
+        code=${resp##*$'\n'}; body=${resp%$'\n'*}
+        if [[ "$code" == "200" ]] && grep -q "\"$tag\"" <<< "$body"; then
+            echo "  The registry has rancher/$repo:$tag."
+        elif [[ "$code" == "200" || "$code" == "404" ]]; then
+            echo "Error: the registry $REGISTRY_INFO has no rancher/$repo:$tag, so the upgraded nodes couldn't start. Nothing was changed."
+            echo "  Push a bundle for that version (it carries both), then upgrade:"
+            echo "  sudo RKE2_VERSION=$UPGRADE_VERSION ./$SCRIPT_NAME save push -registry $REGISTRY_INFO <user> <password>"
+            exit 1
+        else
+            echo "  WARNING: couldn't check the registry for rancher/$repo:$tag (HTTP ${code:-no answer}). Going on."
+        fi
+    done
 }
 
 # wait_for_upgrade: until every node the upgrade targets reports UPGRADE_VERSION and is schedulable again (the plans
@@ -2088,6 +2217,119 @@ write_velero_credentials () {
     ( umask 077; printf '[default]\naws_access_key_id=%s\naws_secret_access_key=%s\n' "$VELERO_S3_ACCESS_KEY" "$VELERO_S3_SECRET_KEY" > "$1" )
 }
 
+# set_local_path_volume_type: Q19 (spec 31). Velero's node-agent never backs up hostPath volumes, which local-path makes
+# by default, so a restore brought its PVCs back empty. A "local" volume sits in the same folder on the same node, pods see
+# no difference, and the node-agent backs it up. Existing PVCs keep their type. A type someone set by hand is left alone.
+set_local_path_volume_type() {
+  kubectl get storageclass local-path &>/dev/null || return 0
+  local now
+  now=$(kubectl get storageclass local-path -o jsonpath='{.metadata.annotations.defaultVolumeType}' 2>/dev/null) || now=""
+  case "$now" in
+    local) return 0 ;;
+    "") echo "  local-path makes 'local' volumes from now on, so Velero can back up their data."
+        kubectl annotate storageclass local-path defaultVolumeType=local --overwrite >/dev/null ;;
+    *) echo "  NOTE: local-path's defaultVolumeType is '$now' (set by hand): left as it is. Velero can't back up hostPath volumes." ;;
+  esac
+}
+
+# local_path_helper_access: spec 31, N2 and V17. local-path creates and deletes each volume's folder from a helper pod.
+# - N2: with SELinux enforcing, a "local" volume's folder carries the pod's own categories, so a confined helper pod
+#   couldn't delete it: the PV stayed Released and its data on disk. The helper pod runs privileged.
+# - V17: under CIS, the local-path-storage namespace enforced Pod Security "restricted", which refuses the helper pod's
+#   hostPath volume, so no local-path PVC ever bound. The namespace is labelled privileged.
+# Called after every apply of the manifest, which puts the stock helper pod back.
+local_path_helper_access() {
+  kubectl get namespace local-path-storage &>/dev/null || return 0
+  if [[ ${ENABLE_CIS,,} == true ]]; then
+    kubectl label namespace local-path-storage pod-security.kubernetes.io/enforce=privileged \
+      pod-security.kubernetes.io/audit=privileged pod-security.kubernetes.io/warn=privileged --overwrite >/dev/null \
+      || echo "  WARNING: couldn't label local-path-storage for CIS: local-path PVCs may stay Pending."
+  fi
+  [[ $SELINUX_ENFORCING == true ]] || return 0
+  local cur new body
+  cur=$(kubectl -n local-path-storage get configmap local-path-config -o jsonpath='{.data.helperPod\.yaml}' 2>/dev/null) || return 0
+  [[ -n "$cur" && "$cur" != *"privileged: true"* ]] || return 0
+  # A template someone edited to give the container its own securityContext is theirs: a second one would be ignored.
+  if grep -qE '^ +securityContext:' <<< "$cur"; then
+    echo "  WARNING: local-path's helper pod template has its own securityContext, without privileged: true. On this"
+    echo "  SELinux host its helper pods can't remove deleted PVCs' folders: add 'privileged: true' to it."
+    return 0
+  fi
+  new=$(sed 's|^\( *\)- name: helper-pod$|&\n\1  securityContext: {privileged: true}|' <<< "$cur")
+  [[ "$new" == *"privileged: true"* ]] || { echo "  WARNING: local-path's helper pod template has an unexpected shape: left as it is."; return 0; }
+  # As a JSON string: backslashes, quotes and tabs escaped, then the newlines
+  body=$(sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/\t/\\t/g' -e 's/\r//g' <<< "$new" | sed ':a;N;$!ba;s/\n/\\n/g')
+  echo "  SELinux is enforcing: local-path's helper pods run privileged, so they can remove pods' relabelled folders."
+  kubectl -n local-path-storage patch configmap local-path-config --type merge -p "{\"data\":{\"helperPod.yaml\":\"$body\"}}" >/dev/null \
+    || echo "  WARNING: couldn't make local-path's helper pods privileged: deleted PVCs may keep their data on disk."
+}
+
+# warn_hostpath_volumes: Q19. Names the PVCs whose volumes are hostPath, which Velero skips, so nobody counts on them.
+warn_hostpath_volumes() {
+  local pvs
+  pvs=$(kubectl get pv -o jsonpath='{range .items[?(@.spec.hostPath)]}{.spec.claimRef.namespace}/{.spec.claimRef.name}{" "}{end}' 2>/dev/null) || pvs=""
+  pvs=${pvs% }
+  [[ -n "$pvs" ]] || return 0
+  echo "  WARNING: Velero can't back up the data of these PVCs, because their volumes are hostPath: $pvs"
+  echo "  They were made before local-path made 'local' volumes. Their objects are backed up, but a restore brings them"
+  echo "  back empty. To have the data backed up, copy it out, recreate the PVC, and copy it back."
+}
+
+# warn_local_path_without_fs_backup: with a CSI driver for VSC_DRIVER the schedule uses CSI snapshots only, which don't
+# cover local-path volumes, so their PVCs would restore empty under a Completed backup. Names them.
+warn_local_path_without_fs_backup() {
+  local pvcs
+  pvcs=$(kubectl get pv -o jsonpath='{range .items[?(@.spec.storageClassName=="local-path")]}{.spec.claimRef.namespace}/{.spec.claimRef.name}{" "}{end}' 2>/dev/null) || pvcs=""
+  pvcs=${pvcs% }
+  [[ -n "$pvcs" ]] || return 0
+  echo "  WARNING: these PVCs are on local-path, which CSI snapshots ($VSC_DRIVER) don't cover, so their data isn't backed up: $pvcs"
+  echo "  Move them to the CSI driver's storage class, or annotate their pods for file-system backup"
+  echo "  (backup.velero.io/backup-volumes=<volume name>)."
+}
+
+# velero_converge_versions: V3 (spec 31). 'velero install' over a running Velero leaves its Deployment and DaemonSet as they
+# are, so a re-run with a newer VELERO_VERSION used to put the new CLI beside the old server and say nothing. When the
+# running images differ from the requested ones, this takes Velero's documented upgrade steps: the CRDs, then the images.
+velero_converge_versions () {
+  local want_server="velero/velero:${VELERO_VERSION}" want_plugin="velero/velero-plugin-for-aws:${VELERO_AWS_PLUGIN_VERSION}"
+  local have_server have_plugin plugin_name
+  have_server=$(kubectl -n velero get deploy velero -o jsonpath='{.spec.template.spec.containers[?(@.name=="velero")].image}' 2>/dev/null) || have_server=""
+  [[ -n "$have_server" ]] || return 0
+  plugin_name=$(kubectl -n velero get deploy velero -o jsonpath='{range .spec.template.spec.initContainers[*]}{.name}={.image}{"\n"}{end}' 2>/dev/null \
+    | awk -F= '$2 ~ /velero-plugin-for-aws/ {print $1; exit}') || plugin_name=""
+  have_plugin=$(kubectl -n velero get deploy velero -o jsonpath="{.spec.template.spec.initContainers[?(@.name==\"$plugin_name\")].image}" 2>/dev/null) || have_plugin=""
+  if [[ "$have_server" == "$want_server" && ( -z "$plugin_name" || "$have_plugin" == "$want_plugin" ) ]]; then
+    return 0
+  fi
+  echo "  Velero runs ${have_server}${plugin_name:+ with $have_plugin}; moving it to $want_server with $want_plugin (Velero's upgrade steps)."
+  if ! velero install --crds-only --dry-run -o yaml | kubectl apply --server-side --force-conflicts -f - >/dev/null; then
+    echo "Error: couldn't update Velero's CRDs to ${VELERO_VERSION}. Velero still runs $have_server."
+    exit 1
+  fi
+  kubectl -n velero set image deployment/velero "velero=$want_server" ${plugin_name:+"$plugin_name=$want_plugin"} >/dev/null || exit 1
+  if kubectl -n velero get daemonset node-agent &>/dev/null; then
+    kubectl -n velero set image daemonset/node-agent "node-agent=$want_server" >/dev/null || exit 1
+    kubectl -n velero rollout status daemonset/node-agent --timeout="${POD_WAIT_TIMEOUT}s" >/dev/null || true
+  fi
+  kubectl -n velero rollout status deployment/velero --timeout="${POD_WAIT_TIMEOUT}s" >/dev/null || true
+}
+
+# velero_kubelet_root: the kubelet root directory Velero's node-agent must mount (spec 31, V1). The node's config.yaml
+# (kubelet-arg root-dir=) wins, because that's what the kubelet runs with; then KUBELET_DATA; then the default. A
+# node-agent that mounts the wrong pods directory crash-loops with "unexpected directory structure for host-pods volume".
+RKE2_CONFIG_YAML=${RKE2_CONFIG_YAML:-/etc/rancher/rke2/config.yaml}
+velero_kubelet_root () {
+  local root=""
+  if [[ -r "$RKE2_CONFIG_YAML" ]]; then
+    root=$(sed -n 's/^[[:space:]]*-[[:space:]]*"\{0,1\}root-dir=\([^"]*\)"\{0,1\}[[:space:]]*$/\1/p' "$RKE2_CONFIG_YAML" | head -1)
+  fi
+  if [[ -z "$root" && -n "$KUBELET_DATA" && "$KUBELET_DATA" != "default" ]]; then
+    root=$KUBELET_DATA
+  fi
+  root=${root%/}
+  echo "${root:-/var/lib/kubelet}"
+}
+
 run_install_velero () {
   export KUBECONFIG=/root/.kube/config
   export PATH=$PATH:$RKE2_DATA/bin
@@ -2114,11 +2356,19 @@ run_install_velero () {
   echo "  Snapshot controller is running."
 
   # RK-11: the default VSC_DRIVER (driver.longhorn.io) assumes the ap-tools stack.
-  # Velero still installs and does object backups without it, so warn loudly rather than fail.
+  # T11 (spec 31, Q14): without that CSI driver, nothing copied a volume's data, so a restore brought PVCs back empty.
+  # Then the schedule backs volumes up with the node-agent (file-system backup) instead.
+  set_local_path_volume_type
+  local_path_helper_access
+  warn_hostpath_volumes
+  local fs_backup=0
   if ! kubectl get csidriver "$VSC_DRIVER" &>/dev/null; then
-      echo "  WARNING: CSI driver '$VSC_DRIVER' is not registered in this cluster (default assumes Longhorn"
-      echo "  installed by ap-tools). CSI volume snapshots WILL FAIL until VSC_DRIVER/VSC_NAME are set to an"
-      echo "  installed CSI driver ('kubectl get csidrivers'). Object/resource backups are unaffected."
+      fs_backup=1
+      echo "  NOTE: CSI driver '$VSC_DRIVER' isn't registered in this cluster (the default assumes Longhorn, installed by"
+      echo "  ap-tools). Volumes are backed up by Velero's node-agent (file-system backup), not CSI snapshots. For CSI"
+      echo "  snapshots, set VSC_DRIVER and VSC_NAME to an installed CSI driver ('kubectl get csidrivers')."
+  else
+      warn_local_path_without_fs_backup
   fi
 
   # Create VolumeSnapshotClass for Longhorn
@@ -2142,9 +2392,55 @@ SNAPEOF
   local velero_creds="$TMP_DIR/credentials-velero"
   write_velero_credentials "$velero_creds"
 
-  # Install Velero into the cluster
+  # Install Velero into the cluster. The node-agent mounts <kubelet root>/pods, so a custom kubelet root must reach it (V1).
+  local kubelet_root kubelet_args=()
+  kubelet_root=$(velero_kubelet_root)
+  if [[ "$kubelet_root" != "/var/lib/kubelet" ]]; then
+    echo "  The kubelet root is $kubelet_root: the node-agent mounts its pods directory."
+    kubelet_args=(--kubelet-root-dir "$kubelet_root")
+  fi
+  # 'velero install' leaves an existing DaemonSet as it is, so a node-agent made with the wrong pods directory (any install
+  # before V1 on a custom root) would keep crash-looping. It holds no state: remove it, and the install below makes it again.
+  local mounted
+  # A first install has no velero namespace yet: kubectl fails, and under errexit that ended the install here.
+  mounted=$(kubectl -n velero get daemonset node-agent -o jsonpath='{.spec.template.spec.volumes[?(@.name=="host-pods")].hostPath.path}' 2>/dev/null) || mounted=""
+  if [[ -n "$mounted" && "${mounted%/}" != "$kubelet_root/pods" ]]; then
+    echo "  The node-agent mounts $mounted, not $kubelet_root/pods: replacing it."
+    kubectl -n velero delete daemonset node-agent --wait=true >/dev/null
+    mounted=""
+  fi
+  # Q19 (spec 31): with SELinux enforcing, the runtime relabels each pod's local volume with that pod's own categories, and
+  # Velero (1.17+) copies it from a short-lived backup pod, which then can't read it ("permission denied"), so the
+  # file-system backup failed. The node-agent's ConfigMap makes those backup and restore pods privileged (Velero's
+  # privilegedFsBackup), which run unconfined; the node-agent itself stays as it is. 'velero install' leaves an existing
+  # DaemonSet alone, so one that doesn't read the ConfigMap is replaced.
+  local agent_args=() agent_cm_args
+  if [[ $SELINUX_ENFORCING == true ]]; then
+    agent_args=(--node-agent-configmap node-agent-config)
+    echo "  SELinux is enforcing: Velero's file-system backup pods run privileged, so they can read pods' relabelled volumes."
+    # The ConfigMap needs the namespace first. Velero labels its namespace for Pod Security only when it creates it, and
+    # under CIS an unlabelled one enforces "restricted", which refuses the node-agent, so it gets the same labels here.
+    if ! kubectl get namespace velero &>/dev/null; then
+      kubectl create namespace velero >/dev/null
+    fi
+    # Also when the namespace was made before, by hand or by a run that stopped here, without them
+    if [[ -z "$(kubectl get namespace velero -o jsonpath='{.metadata.labels.pod-security\.kubernetes\.io/enforce}' 2>/dev/null)" ]]; then
+      kubectl label namespace velero component=velero \
+        pod-security.kubernetes.io/enforce=privileged pod-security.kubernetes.io/enforce-version=latest \
+        pod-security.kubernetes.io/audit=privileged pod-security.kubernetes.io/audit-version=latest \
+        pod-security.kubernetes.io/warn=privileged pod-security.kubernetes.io/warn-version=latest --overwrite >/dev/null
+    fi
+    kubectl -n velero create configmap node-agent-config --from-literal=node-agent-config.json='{"privilegedFsBackup": true}' \
+      --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+    agent_cm_args=$(kubectl -n velero get daemonset node-agent -o jsonpath='{.spec.template.spec.containers[0].args}' 2>/dev/null) || agent_cm_args=""
+    if [[ -n "$mounted" && "$agent_cm_args" != *"--node-agent-configmap"* ]]; then
+      echo "  The node-agent doesn't read that ConfigMap: replacing it."
+      kubectl -n velero delete daemonset node-agent --wait=true >/dev/null
+    fi
+  fi
   echo "  Installing Velero server into the cluster..."
   velero install \
+    "${kubelet_args[@]}" \
     --provider aws \
     --plugins velero/velero-plugin-for-aws:${VELERO_AWS_PLUGIN_VERSION} \
     --bucket ${VELERO_BUCKET} \
@@ -2153,11 +2449,26 @@ SNAPEOF
     --secret-file "$velero_creds" \
     --features=EnableCSI \
     --use-node-agent \
-    --use-volume-snapshots=true \
+    "${agent_args[@]}" \
+    --use-volume-snapshots=false \
     --wait
+
+  # T11 (spec 31, Q14): Velero's native AWS snapshotter has no use here (volumes go through CSI or the node-agent), and its
+  # location, which earlier installs made with no region, turned every backup with a PV into PartiallyFailed ("missing
+  # region in aws configuration"). An earlier install's location is removed; one with a region is someone's own.
+  local vsl_provider vsl_region
+  vsl_provider=$(kubectl -n velero get volumesnapshotlocation default -o jsonpath='{.spec.provider}' 2>/dev/null) || vsl_provider=""
+  vsl_region=$(kubectl -n velero get volumesnapshotlocation default -o jsonpath='{.spec.config.region}' 2>/dev/null) || vsl_region=""
+  if [[ "$vsl_provider" == aws && -z "$vsl_region" ]]; then
+      echo "  Removing the volume snapshot location an earlier install made (no region): it made backups PartiallyFailed."
+      kubectl -n velero delete volumesnapshotlocation default >/dev/null
+  fi
 
   # Clean up credentials file
   rm -f "$velero_creds"
+
+  # A re-run over an older Velero moves it to the requested versions (V3)
+  velero_converge_versions
 
   # Verify installation
   echo "  Verifying Velero installation..."
@@ -2170,15 +2481,26 @@ SNAPEOF
 
   # Create scheduled backup (RK-4: guarded so 'install velero' is re-runnable -
   # 'velero schedule create' hard-fails when the schedule already exists)
+  local fs_args=()
+  ((fs_backup)) && fs_args=(--default-volumes-to-fs-backup)
   if velero schedule get daily-full-backup &>/dev/null; then
       echo "  Schedule 'daily-full-backup' already exists; leaving it in place."
       echo "  (To apply changed schedule settings: 'velero schedule delete daily-full-backup --confirm' and re-run.)"
+      # T11: an earlier install's schedule, on a cluster with no CSI driver for VSC_DRIVER, copied no volume data
+      local fs_now
+      fs_now=$(kubectl -n velero get schedule daily-full-backup -o jsonpath='{.spec.template.defaultVolumesToFsBackup}' 2>/dev/null) || fs_now=""
+      if ((fs_backup)) && [[ "$fs_now" != true ]]; then
+          echo "  Turning on file-system backup in the existing schedule, so volumes' data is backed up."
+          kubectl -n velero patch schedule daily-full-backup --type merge \
+            -p '{"spec":{"template":{"defaultVolumesToFsBackup":true}}}' >/dev/null
+      fi
   else
       echo "  Creating scheduled backup '${VELERO_BACKUP_SCHEDULE}'..."
       velero schedule create daily-full-backup \
         --schedule="${VELERO_BACKUP_SCHEDULE}" \
         --ttl ${VELERO_BACKUP_TTL} \
         --snapshot-move-data \
+        "${fs_args[@]}" \
         --include-cluster-resources=true \
         --include-namespaces ${VELERO_BACKUP_NAMESPACES}
   fi
@@ -2403,6 +2725,22 @@ kubeStateMetrics:
 alertmanager:
   enabled: false
 PROMEOF
+  # V4 (spec 31): Helm installs a chart's CRDs on the first install only, so a re-run with a newer chart used to leave the
+  # new operator on the old CRDs (seen: operator v0.94.2 on v0.90.1 CRDs). kube-prometheus-stack's upgrade notes apply
+  # them first, server-side because they're too large for a client-side apply's annotation.
+  local prom_crds; prom_crds=$(mktemp)
+  # shellcheck disable=SC2086
+  if helm show crds "$PROM_CHART_REF" $prom_version_flag > "$prom_crds" 2>/dev/null && [[ -s "$prom_crds" ]]; then
+    echo "  Applying kube-prometheus-stack's CRDs..."
+    if ! kubectl apply --server-side --force-conflicts -f "$prom_crds" >/dev/null; then
+      rm -f "$prom_crds" "$prom_values"
+      echo "Error: couldn't apply kube-prometheus-stack ${KUBE_PROMETHEUS_STACK_VERSION}'s CRDs; nothing was upgraded."
+      exit 1
+    fi
+  else
+    echo "  WARNING: couldn't read kube-prometheus-stack's CRDs from the chart; Helm adds them on a first install only."
+  fi
+  rm -f "$prom_crds"
   # shellcheck disable=SC2086
   helm upgrade --install kube-prometheus-stack "$PROM_CHART_REF" \
     --namespace monitoring \
@@ -2543,6 +2881,19 @@ resources:
     cpu: 500m
     memory: 256Mi
 FBEOF
+  # V2 (spec 31): with SELinux enforcing (Rocky and RHEL by default), Fluent Bit as container_t can't create its position
+  # databases in /var/log (var_log_t), so it crash-looped with "cannot open database" and this install failed. A log
+  # collector reads every pod's logs and the journal anyway; spc_t is the type container-selinux gives such host agents.
+  # RKE2's own policy has no log-reader type (Rancher's rke_logreader_t comes with rancher-selinux, which RKE2 doesn't install).
+  if [[ "$SELINUX_ENFORCING" == "true" ]]; then
+    echo "  SELinux is enforcing: Fluent Bit runs as spc_t, so it can keep its read positions in /var/log."
+    cat >> "$fb_values" <<'FBSEL'
+
+podSecurityContext:
+  seLinuxOptions:
+    type: spc_t
+FBSEL
+  fi
   # shellcheck disable=SC2086
   helm upgrade --install fluent-bit "$FB_CHART_REF" \
     --namespace monitoring \
@@ -2697,6 +3048,14 @@ uninstall_rke2() {
         if [[ -n "${RKE2I_SELINUX_EQUIV:-}" ]] && command -v semanage >/dev/null 2>&1; then
             echo "  Removing the SELinux file-context equivalence for $RKE2I_SELINUX_EQUIV..."
             semanage fcontext -d -e /var/lib/rancher/rke2 "$RKE2I_SELINUX_EQUIV" 2>/dev/null || true
+        fi
+        if [[ -n "${RKE2I_SELINUX_EQUIV_KUBELET:-}" ]] && command -v semanage >/dev/null 2>&1; then
+            echo "  Removing the SELinux file-context equivalence for $RKE2I_SELINUX_EQUIV_KUBELET..."
+            semanage fcontext -d -e /var/lib/kubelet "$RKE2I_SELINUX_EQUIV_KUBELET" 2>/dev/null || true
+        fi
+        if [[ -n "${RKE2I_SELINUX_EQUIV_PVC:-}" ]] && command -v semanage >/dev/null 2>&1; then
+            echo "  Removing the SELinux file-context equivalence for $RKE2I_SELINUX_EQUIV_PVC..."
+            semanage fcontext -d -e /opt/local-path-provisioner "$RKE2I_SELINUX_EQUIV_PVC" 2>/dev/null || true
         fi
         # Swap: uncomment the fstab lines this installer commented out; re-enable swap
         # only if it was on before install.
@@ -2942,16 +3301,23 @@ extract_monitoring_images () {
     fi
 
     echo "  Extracting images from kube-prometheus-stack v${KUBE_PROMETHEUS_STACK_VERSION} chart..."
-    helm template airgap-check "$kps_chart" \
-        | grep -E '^\s+image:' \
-        | awk '{print $2}' \
-        | tr -d '"' \
-        | grep -v '^$' \
-        | sort -u \
-        >> $WORKING_DIR/rke2-utilities/images/utility-images.txt
+    # V13 (spec 31): the operator gets Prometheus' config-reloader image as an argument, not on an image: line, so it
+    # was left out, and an air-gapped Prometheus stayed in Init:ErrImagePull. Both forms are listed now.
+    # Rendered with install monitoring's own disables (grafana, alertmanager), so the list holds what the install runs.
+    # The defaults also listed Grafana (485 MB), its sidecar, its test image and Alertmanager, none of them ever run; and
+    # pushing Grafana 13.3.0-distroless failed on Leap 16 (Docker 29, containerd store: "does not provide any platform").
+    local kps_rendered
+    kps_rendered=$(helm template airgap-check "$kps_chart" --set grafana.enabled=false --set alertmanager.enabled=false)
+    {
+        grep -E '^\s+image:' <<< "$kps_rendered" | awk '{print $2}'
+        grep -oE -- '--prometheus-config-reloader=[^" ]+' <<< "$kps_rendered" | cut -d= -f2-
+    } | tr -d '"' | grep -v '^$' | sort -u >> $WORKING_DIR/rke2-utilities/images/utility-images.txt
 
     echo "  Extracting images from fluent-bit chart v${FLUENT_BIT_CHART_VERSION} (app v${FLUENT_BIT_VERSION})..."
+    # V13 (spec 31): rendered with the image install monitoring sets, not the chart's default tag. FLUENT_BIT_VERSION
+    # 5.1.5 on chart 0.58.3 (default 5.1.3) put the wrong tag in the bundle, and an air-gapped Fluent Bit couldn't pull.
     helm template airgap-check "$fb_chart" \
+        --set image.repository=cr.fluentbit.io/fluent/fluent-bit --set "image.tag=${FLUENT_BIT_VERSION}" \
         | grep -E '^\s+image:' \
         | awk '{print $2}' \
         | tr -d '"' \
@@ -3118,8 +3484,10 @@ run_push () {
     if [[ $SAVE_MODE -eq 1 ]]; then
         AIR_GAPPED_MODE=1
     fi
-    push_utility_images
+    # RKE2's own images first (V11, spec 31): a utility or add-on image that can't be pushed (a Harbor project missing,
+    # say) used to stop the push before the core images, and an upgrade to them then left the server down.
     push_rke2_images
+    push_utility_images
     echo "--- Finished push workflow"
 }
 
@@ -3548,6 +3916,47 @@ image_pull_push_check () {
     fetch_helper "$dest" "$IMAGE_PULL_PUSH_URL" "$IMAGE_PULL_PUSH_REF" "$IMAGE_PULL_PUSH_SHA256" || exit 1
 }
 
+# drop_helm_jobs_awaiting_agent <not-ready lines>: V10 (spec 31). With CONTROL_PLANE_TAINT=true, RKE2's add-on charts
+# (Traefik, metrics-server, the snapshot controller) are installed by helm-install jobs that don't tolerate the
+# control-plane taint, so on a first server they wait for an agent to join, and every such install failed its pod wait
+# (the README says to set the taint before installing the first server). While every node carries that taint, their
+# Pending jobs are left out, and the install says what happens next. Anything else still counts.
+# all_nodes_control_plane_tainted: true while every node has the control-plane taint (no agent has joined yet).
+all_nodes_control_plane_tainted() {
+  local list
+  list=$(kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}={.spec.taints[*].key}{"\n"}{end}' 2>/dev/null) || return 1
+  [[ -n "$list" ]] && ! grep -v 'node-role.kubernetes.io/control-plane' <<< "$list" | grep -q .
+}
+drop_helm_jobs_awaiting_agent() {
+  local lines=$1
+  if all_nodes_control_plane_tainted; then
+    if [[ -z "${HELM_JOBS_NOTE_SHOWN:-}" ]]; then
+      echo "  NOTE: every node has the control-plane taint, so RKE2's add-on charts (Traefik, metrics-server, the snapshot"
+      echo "        controller) install when the first agent joins."
+      HELM_JOBS_NOTE_SHOWN=1
+    fi >&2
+    grep -v '^helm-install-.* Pending ' <<< "$lines" || true
+  else
+    printf '%s\n' "$lines"
+  fi
+}
+
+# drop_unplaceable_cilium_operator <not-ready lines>: V8 (spec 31). RKE2's Cilium chart runs two cilium-operator replicas
+# on the host network, one per node, so on a single node the second stays Pending for good while the first does the
+# work, and every single-node CNI_TYPE=cilium install failed its pod wait. Pending operator pods are left out while the
+# Deployment has a ready replica and the cluster has fewer nodes than replicas; a join that adds a node schedules them.
+drop_unplaceable_cilium_operator() {
+  local lines=$1 ready want nodes
+  ready=$(kubectl get deployment -n kube-system cilium-operator -o jsonpath='{.status.readyReplicas}' 2>/dev/null) || true
+  want=$(kubectl get deployment -n kube-system cilium-operator -o jsonpath='{.spec.replicas}' 2>/dev/null) || true
+  nodes=$(kubectl get nodes --no-headers 2>/dev/null | grep -c .) || true
+  if [[ "${ready:-0}" -ge 1 && -n "$want" && "${nodes:-0}" -lt "$want" ]]; then
+    grep -v '^cilium-operator-.* Pending ' <<< "$lines" || true
+  else
+    printf '%s\n' "$lines"
+  fi
+}
+
 check_namespace_pods_ready() {
   # check_namespace_pods_ready [namespace]: kube-system by default. Deletes completed pods, then waits up to
   # POD_WAIT_TIMEOUT seconds for every pod to be ready. Readiness is checked before the deadline, so a namespace that
@@ -3572,6 +3981,12 @@ check_namespace_pods_ready() {
       # RKE2's charts have created any. CoreDNS, which every install has, isn't there yet then: not ready (spec 29).
       if [[ "$ns" == "kube-system" ]] && ! grep -q '^rke2-coredns-' <<< "$pods"; then
         not_ready="${not_ready:+$not_ready$'\n'}rke2-coredns 0/1 NotCreatedYet"
+      fi
+      if [[ "$ns" == "kube-system" ]] && grep -q '^cilium-operator-.* Pending ' <<< "$not_ready"; then
+        not_ready=$(drop_unplaceable_cilium_operator "$not_ready")
+      fi
+      if [[ "$ns" == "kube-system" ]] && grep -q '^helm-install-.* Pending ' <<< "$not_ready"; then
+        not_ready=$(drop_helm_jobs_awaiting_agent "$not_ready")
       fi
     else
       pods=$(kubectl get pods -n "$ns" --no-headers 2>&1 >/dev/null) || true
@@ -3640,6 +4055,10 @@ run_debug() {
 cleanup () {
     if [[ $INSTALL_MODE -eq 1 || $JOIN_MODE -eq 1 || $UPGRADE_MODE -eq 1 ]]; then
         echo "  Installation detected, no cleanup required..."
+    elif [[ "${FROM_BUNDLE:-0}" -eq 1 ]]; then
+        # V12 (spec 31): a push from an extracted bundle removed the bundle, so the upgrade or install that follows in
+        # the same folder failed with "manifests not found ... Re-run 'save'".
+        echo "  $WORKING_DIR is an extracted bundle: kept for the next command."
     else
         echo "  Cleaning up..."
         rm -rf "$WORKING_DIR"
@@ -3946,6 +4365,8 @@ if [[ -f $base_dir/rke2-save-version.txt ]]; then
         echo "NOTE: rke2-save-version.txt is in $base_dir, but RKE2_FORCE_ONLINE=true: staying online."
     else
         AIR_GAPPED_MODE=1
+        # V12 (spec 31): this folder is an extracted bundle, the user's, so cleanup keeps it.
+        [[ $SAVE_MODE -eq 0 ]] && FROM_BUNDLE=1
         # An install, join or push from a bundle needs the bundle's files. Without them, say so now, instead of
         # failing later on a missing archive. uninstall and a rebuilding save don't need them.
         if [[ ( $INSTALL_MODE -eq 1 && $INSTALL_TYPE == "rke2" ) || $JOIN_MODE -eq 1 || ( $PUSH_MODE -eq 1 && $SAVE_MODE -eq 0 ) ]]; then

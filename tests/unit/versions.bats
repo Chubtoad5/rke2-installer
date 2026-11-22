@@ -30,10 +30,19 @@ rendered() {
 
 # --- The default ---
 
-@test "the default RKE2_VERSION is v1.36.6+rke2r1, and the script says v2.0.0" {
+@test "the default RKE2_VERSION is v1.36.6+rke2r1, and the script says v2.1.0" {
   run bash -c 'grep -E "^RKE2_VERSION=|^SCRIPT_VERSION=" "$1"' _ "$BATS_TEST_DIRNAME/../../rke2_installer.sh"
   [[ "$output" == *'RKE2_VERSION=${RKE2_VERSION:-"v1.36.6+rke2r1"}'* ]]
-  [[ "$output" == *'SCRIPT_VERSION="2.0.0"'* ]]
+  [[ "$output" == *'SCRIPT_VERSION="2.1.0"'* ]]
+}
+
+@test "the add-on defaults are spec 31's checked set (Q4)" {
+  local f="$BATS_TEST_DIRNAME/../../rke2_installer.sh"
+  grep -qF 'VELERO_VERSION=${VELERO_VERSION:-"v1.18.4"}' "$f"
+  grep -qF 'VELERO_AWS_PLUGIN_VERSION=${VELERO_AWS_PLUGIN_VERSION:-"v1.14.4"}' "$f"
+  grep -qF 'KUBE_PROMETHEUS_STACK_VERSION=${KUBE_PROMETHEUS_STACK_VERSION:-"92.22.0"}' "$f"
+  grep -qF 'FLUENT_BIT_CHART_VERSION=${FLUENT_BIT_CHART_VERSION:-"0.58.3"}' "$f"
+  grep -qF 'FLUENT_BIT_VERSION=${FLUENT_BIT_VERSION:-"5.1.5"}' "$f"
 }
 
 @test "the verified list matches tests/rke2-versions.conf" {

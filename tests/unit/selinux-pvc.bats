@@ -1,0 +1,84 @@
+#!/usr/bin/env bats
+# V14 (spec 31): under a custom PVC_DATA on an SELinux-enforcing host, local-path-provisioner's folder was default_t,
+# its helper pods' mkdir was denied, and every local-path PVC stayed Pending (Prometheus' volume, on Rocky 10). The folder
+# gets /opt/local-path-provisioner's labels (container_file_t) through an equivalence, recorded for uninstall.
+load ../helpers
+setup() {
+  setup_stubs
+  load_script rke2_installer.sh
+  T=$(mktemp -d); STATE_FILE=$T/state SELINUX_ENFORCING=true RKE2_DATA=/var/lib/rancher/rke2
+  stub semanage; stub restorecon
+}
+teardown() { rm -rf "$T"; }
+
+@test "V14: a custom PVC_DATA's local-path folder gets /opt/local-path-provisioner's labels, recorded for uninstall" {
+  PVC_DATA=$T/pvc/
+  stub matchpathcon 'echo "$2 system_u:object_r:default_t:s0"; exit 1'
+  run label_custom_data_dir
+  [ "$status" -eq 0 ]
+  called "semanage fcontext -a -e /opt/local-path-provisioner $T/pvc/local-path-provisioner"
+  called "restorecon -R $T/pvc/local-path-provisioner"
+  grep -qx "RKE2I_SELINUX_EQUIV_PVC=\"$T/pvc/local-path-provisioner\"" "$T/state"
+}
+
+@test "V14: nothing for the default PVC_DATA, an empty one, or with SELinux not enforcing" {
+  stub matchpathcon 'exit 0'
+  PVC_DATA=/opt/local-path-provisioner label_custom_data_dir
+  PVC_DATA="" label_custom_data_dir
+  SELINUX_ENFORCING=false PVC_DATA=$T/pvc label_custom_data_dir
+  ! called "semanage" || false
+}
+
+@test "V14: a folder already labelled container_file_t gets no rule and no record" {
+  PVC_DATA=$T/pvc
+  stub matchpathcon '[ "$1" = -n ] && echo "system_u:object_r:container_file_t:s0"; exit 0'
+  run label_custom_data_dir
+  [[ "$output" == *"already has local-path-provisioner's SELinux labels"* ]]
+  ! called "semanage" || false
+  [ ! -f "$T/state" ]
+}
+
+@test "V14: uninstall removes the equivalence install recorded" {
+  run grep -n -A3 'RKE2I_SELINUX_EQUIV_PVC:-' "$BATS_TEST_DIRNAME/../../rke2_installer.sh"
+  [[ "$output" == *'semanage fcontext -d -e /opt/local-path-provisioner "$RKE2I_SELINUX_EQUIV_PVC"'* ]]
+}
+
+# V15 (spec 31): a custom KUBELET_DATA was default_t on an SELinux-enforcing host, so Velero's node-agent couldn't read
+# its pods directory and crash-looped. It gets /var/lib/kubelet's labels, recorded for uninstall.
+@test "V15: a custom KUBELET_DATA gets /var/lib/kubelet's labels, recorded for uninstall" {
+  KUBELET_DATA=$T/kubelet/
+  stub matchpathcon 'echo "$2 system_u:object_r:default_t:s0"; exit 1'
+  run label_custom_data_dir
+  [ "$status" -eq 0 ]
+  called "semanage fcontext -a -e /var/lib/kubelet $T/kubelet"
+  called "restorecon -R $T/kubelet"
+  grep -qx "RKE2I_SELINUX_EQUIV_KUBELET=\"$T/kubelet\"" "$T/state"
+}
+
+@test "V15: nothing for the default KUBELET_DATA, or one already labelled container_var_lib_t" {
+  KUBELET_DATA=/var/lib/kubelet
+  stub matchpathcon 'exit 0'
+  label_custom_data_dir
+  ! called "semanage fcontext -a -e /var/lib/kubelet" || false
+  KUBELET_DATA=$T/kubelet
+  stub matchpathcon '[ "$1" = -n ] && echo "system_u:object_r:container_var_lib_t:s0"; exit 0'
+  run label_custom_data_dir
+  [[ "$output" == *"already has /var/lib/kubelet's SELinux labels"* ]]
+  ! called "semanage fcontext -a -e /var/lib/kubelet" || false
+}
+
+@test "V15: uninstall removes the kubelet equivalence install recorded" {
+  run grep -n -A3 'RKE2I_SELINUX_EQUIV_KUBELET:-' "$BATS_TEST_DIRNAME/../../rke2_installer.sh"
+  [[ "$output" == *'semanage fcontext -d -e /var/lib/kubelet "$RKE2I_SELINUX_EQUIV_KUBELET"'* ]]
+}
+
+# V16 (spec 31): the default /opt/local-path-provisioner, made before rke2-selinux was installed, kept usr_t, and
+# local-path's helpers were denied on an air-gapped Rocky server. It's relabelled when its label is wrong.
+@test "V16: a default local-path folder with the wrong label is relabelled, with no equivalence added" {
+  PVC_DATA=/opt/local-path-provisioner
+  stub matchpathcon 'exit 1'
+  [ -d /opt/local-path-provisioner ] || skip "needs /opt/local-path-provisioner (root in a container)"
+  run label_custom_pvc_dir
+  called "restorecon -R /opt/local-path-provisioner"
+  ! called "semanage" || false
+}

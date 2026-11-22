@@ -1,5 +1,78 @@
 # Changelog — rke2-installer
 
+## v2.1.0 — 2026-11-22 — 1.36's add-ons, CIS, Cilium, taint and air-gapped upgrades fixed; newer add-on defaults
+
+Spec 31 (chubtoad-automation): a one-time bench of what CI doesn't run on 1.36 (monitoring, Velero, CIS, Cilium, the
+data paths and network settings, three servers, an air-gapped upgrade). A minor version, because the add-on defaults
+move. RKE2's own default stays v1.36.6+rke2r1.
+
+### Changed
+- **Add-on defaults move to newer releases:** Velero v1.18.4 with velero-plugin-for-aws v1.14.4 (were v1.17.1 and
+  v1.13.0), kube-prometheus-stack 92.22.0 (was 69.8.0, from early 2025), fluent-bit chart 0.58.3 with Fluent Bit 5.1.5
+  (were 0.55.0 and 4.2.2). Each is the newest release of a line that has had its fixes; checked on 1.36.6 on Ubuntu 24.04
+  and Rocky 10, online and air-gapped. A re-run of `install monitoring` or `install velero` moves a cluster to them (V3,
+  V4). `ap-tools` passes its own versions, so it doesn't move.
+
+### Fixed
+- **`install velero` with a custom kubelet root** (V1): the node-agent mounted `/var/lib/kubelet/pods` and crash-looped
+  ("unexpected directory structure for host-pods volume"), so the install failed. The root now comes from the node's
+  `config.yaml` (then `KUBELET_DATA`) and reaches `--kubelet-root-dir`; a node-agent made with the wrong path is replaced.
+- **`install monitoring` with SELinux enforcing** (V2, Rocky and RHEL by default): Fluent Bit couldn't create its
+  position databases in `/var/log` and crash-looped, so the install failed. It runs as `spc_t` there now.
+- **A re-run of `install velero` with a newer `VELERO_VERSION` upgrades the server** (V3), through Velero's upgrade
+  steps. Before, the new CLI ran beside the old server.
+- **`install monitoring` applies the chart's CRDs before upgrading** (V4). A newer chart's operator ran on the old CRDs.
+- **`ENABLE_CIS=true` installs finish** (V6): Pod Security `restricted` refused the DNS utility pod and the install exited
+  1 at its last step. Under CIS it gets a compliant security context, and a refused DNS utility only warns.
+- **Single-node `CNI_TYPE=cilium` installs finish** (V8): the second `cilium-operator` replica can't be placed on one
+  node, and the pod wait failed after 300 s. It no longer counts while one replica is ready.
+- **Air-gapped `install monitoring` can pull kube-prometheus-stack's webhook image** (V9), which comes from `ghcr.io`
+  since 84.x. A new `registries.yaml` mirrors `ghcr.io`; an existing one is kept as it is unless `RKE2_RECONFIGURE=true`.
+- **A first server with `CONTROL_PLANE_TAINT=true` finishes its install** (V10): RKE2's add-on charts and
+  local-path-provisioner wait for an agent there, and the pod wait failed after 300 s.
+- **An air-gapped upgrade can't take the server down because of a partial push** (V11): the preflight now needs
+  `rancher/rke2-runtime` for the target version as well as `rke2-upgrade`, and `push` sends RKE2's images before the
+  add-ons'. A push stopped by an add-on image had left the runtime out, and the upgraded server didn't start.
+- **A push from an extracted bundle keeps the bundle** (V12), so an air-gapped `upgrade` or `install` can follow it in
+  the same folder. It had been deleted, and the upgrade failed with "manifests not found … Re-run 'save'".
+- **Air-gapped monitoring bundles carry Prometheus' config-reloader and the Fluent Bit tag that runs** (V13). Prometheus
+  stayed in `Init:ErrImagePull` and Fluent Bit couldn't pull, on every version tried.
+  The list now holds only what `install monitoring` runs: it used to carry Grafana (485 MB), its sidecar, its test
+  image and Alertmanager, which the install disables, and pushing that Grafana failed on Leap 16 (Docker 29.7.2, "does
+  not provide any platform"), so `install push` exited 1 there.
+- **Local-path volumes provision on SELinux-enforcing hosts** with a custom `PVC_DATA` (V14, an equivalence to
+  `/opt/local-path-provisioner`), and with the default folder made before `rke2-selinux` (V16, a relabel). They stayed
+  Pending.
+- **A custom `KUBELET_DATA` gets `/var/lib/kubelet`'s SELinux labels** (V15), so Velero's node-agent can read it; it
+  crash-looped on "open /host_pods: permission denied".
+- **A first `install velero` no longer stops at V1's node-agent check** on a cluster that never had Velero.
+- **Velero backs up `local-path` volumes' data** (T11, Q14 and Q19). Before, on a cluster without Longhorn, every
+  scheduled backup was `PartiallyFailed` ("missing region in aws configuration", from Velero's native AWS snapshotter),
+  and a restore brought PVCs back empty. Now:
+  - `install velero` turns the native snapshotter off (`--use-volume-snapshots=false`) and removes the location an
+    earlier install made with no region;
+  - when `VSC_DRIVER` isn't a registered CSI driver, the schedule backs volumes up with the node-agent
+    (`--default-volumes-to-fs-backup`), and an existing schedule is patched;
+  - the `local-path` StorageClass makes `local` volumes (`defaultVolumeType: local`), because Velero never backs up
+    `hostPath` ones, local-path's default. PVCs made before keep their type, and `install velero` names them.
+  - on SELinux-enforcing hosts (Rocky, RHEL), Velero's file-system backup and restore pods run privileged (Velero's
+    `privilegedFsBackup`, through the node-agent's `node-agent-config` ConfigMap; an existing node-agent is replaced so it
+    reads it), because each pod's `local` volume carries that pod's own SELinux categories. Only those short-lived pods
+    are privileged; the node-agent isn't.
+  - With Longhorn nothing else changes: CSI snapshots with the data mover, as before.
+  - With Longhorn and local-path both, `install velero` names the local-path PVCs, which CSI snapshots don't cover.
+  - On an SELinux-enforcing host, a `velero` namespace the installer makes gets Velero's Pod Security labels, so the
+    node-agent is admitted under CIS.
+- **Deleting a local-path PVC removes its data on SELinux-enforcing hosts** (N2): local-path's helper pods run privileged
+  there, because a `local` volume's folder carries the pod's own SELinux categories. Without it the PV stayed `Released`
+  and its data on disk.
+- **Local-path PVCs bind under CIS** (V17, every version before): the `local-path-storage` namespace is labelled
+  `privileged`. CIS's Pod Security `restricted` refused the helper pods' `hostPath` volume, so PVCs stayed Pending.
+
+### Docs
+- README: the Velero CLI's `--insecure-skip-tls-verify` with a self-signed S3 endpoint (V5); the Harbor projects a push
+  needs (V7), which harbor-registry-installer v1.5.0 creates by default; what was checked on 1.36.
+
 ## v2.0.0 — 2026-11-20 — RKE2 v1.36.6 by default (Traefik); v1.35.10 verified; one minor version at a time
 
 Spec 29 (chubtoad-automation). A major version: a plain `install` now gives Kubernetes 1.36 with Traefik, and re-runs

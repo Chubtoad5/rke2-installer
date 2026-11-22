@@ -76,7 +76,9 @@ was checked with. Each was checked on Ubuntu 24.04, Ubuntu 24.04 minimal, Rocky 
 
 Any other version still installs, with no warning, but hasn't been checked. The upgrade from v1.34.5 to v1.35.10 to
 v1.36.6 was tested once, by hand, when 1.36 became the default: with a workload and a volume, with the ingress on and
-off, on all four distros. The Velero and monitoring add-ons haven't been checked on 1.35 or 1.36.
+off, on all four distros. The Velero and monitoring add-ons, CIS, Cilium, three servers and an air-gapped upgrade from
+1.35 were checked once on 1.36.6, by hand, on Ubuntu 24.04 and Rocky 10 (since v2.1.0; spec 31 in the project that
+maintains this installer). The add-ons weren't checked on 1.35.
 
 **RKE2 1.37 removes ingress-nginx.** A cluster that still runs it has to move to Traefik first, using Rancher's
 [migration guide](https://docs.rke2.io/reference/ingress_migration); RKE2 says a 1.37 server
@@ -202,8 +204,8 @@ All configuration is done by editing the `USER DEFINED VARIABLES` section at the
 
 | Variable | Default | Description |
 |---|---|---|
-| `VELERO_VERSION` | `v1.17.1` | Velero CLI/server version |
-| `VELERO_AWS_PLUGIN_VERSION` | `v1.13.0` | Velero AWS plugin version (used for S3 backend) |
+| `VELERO_VERSION` | `v1.18.4` | Velero CLI/server version |
+| `VELERO_AWS_PLUGIN_VERSION` | `v1.14.4` | Velero AWS plugin version (used for S3 backend) |
 | `VELERO_BUCKET` | `velero` | S3 bucket name for backup storage. In a multi-cluster environment set this per cluster (e.g. `VELERO_BUCKET=$CLUSTER_NAME`) to avoid backup collision. The installer prints a warning if `VELERO_BUCKET` is left at the default `velero` while `CLUSTER_NAME` has been customised. |
 | `VELERO_S3_URL` | *(required)* | S3 endpoint URL, e.g. `https://s3.example.com:8333` |
 | `VELERO_S3_ACCESS_KEY` | *(required)* | S3 access key. Velero reads it from an AWS credentials file, so a key that file would change is refused: see below |
@@ -225,9 +227,9 @@ All configuration is done by editing the `USER DEFINED VARIABLES` section at the
 | `MONITORING_PROMETHEUS_PORT` | `9090` | Prometheus remote-write receiver port |
 | `CLUSTER_NAME` | `edge-lab` | Cluster label applied to all metrics and logs for multi-cluster filtering |
 | `HELM_VERSION` | `4.0.1` | Helm version to install if not already present (default bumped from 3.12.0; still overridable) |
-| `KUBE_PROMETHEUS_STACK_VERSION` | `69.8.0` | kube-prometheus-stack Helm chart version |
-| `FLUENT_BIT_CHART_VERSION` | `0.55.0` | Fluent Bit Helm chart version |
-| `FLUENT_BIT_VERSION` | `4.2.2` | Fluent Bit application/image version |
+| `KUBE_PROMETHEUS_STACK_VERSION` | `92.22.0` | kube-prometheus-stack Helm chart version |
+| `FLUENT_BIT_CHART_VERSION` | `0.58.3` | Fluent Bit Helm chart version |
+| `FLUENT_BIT_VERSION` | `5.1.5` | Fluent Bit application/image version |
 | `PROMETHEUS_RETENTION` | `48h` | In-cluster Prometheus retention (short-term; long-term is on the external host) |
 | `PROMETHEUS_STORAGE_SIZE` | `50Gi` | PVC size for the in-cluster Prometheus |
 | `PROMETHEUS_STORAGE_CLASS` | `longhorn` | StorageClass used for Prometheus PVCs |
@@ -314,6 +316,18 @@ multipathd, UFW/firewalld, the NetworkManager CNI conf, and the CIS `etcd` user.
 | `-tls-san <fqdn-or-ip>` | Add an extra TLS SAN to the API server certificate. Use with `install` or `join server`. |
 | `-registry <registry:port> <username> <password>` | Configure a private registry as a pull-through mirror. Use with `install`, `install velero`, `join`, `push`, or `upgrade`. Quote the password for your shell; from there it reaches `registries.yaml` and `docker login` whole, `"`, `\`, spaces and `*` included (since 1.3.2). |
 
+**Pushing to Harbor: make the projects first.** `push` keeps each image's path under the registry, for example
+`<registry>/rancher/rke2-runtime` and `<registry>/velero/velero`, and Harbor refuses a push into a project that doesn't
+exist (`Failed to push image … Skipping`, then `step 'run_push' failed`). Create these projects before the first
+`push`, `install push` or `install velero push`: `rancher`, `e2e-test-images`, `ingress-nginx`, `kube-state-metrics`,
+`prometheus`, `prometheus-operator`, `kiwigrid`, `grafana`, `fluent`, `jkroepke`, `velero` and `bats` (`library` comes
+with Harbor; `jkroepke` holds kube-prometheus-stack's webhook image, from `ghcr.io`). harbor-registry-installer v1.5.0 and later creates all of them when its `PROJECTS` is left unset (its README, "Projects for the Chubtoad5 tools"). A registry that makes repositories on push, such as a plain `registry:2`, needs nothing.
+
+**Mirrors.** `-registry` writes `/etc/rancher/rke2/registries.yaml` mirroring `docker.io`, `quay.io`, `registry.k8s.io`,
+`cr.fluentbit.io` and, since v2.1.0, `ghcr.io` (kube-prometheus-stack's webhook image) to the registry. A node whose
+`registries.yaml` an earlier version wrote keeps it exactly, so its re-runs don't stop; re-run with
+`RKE2_RECONFIGURE=true` to add `ghcr.io`, which restarts RKE2 on that node.
+
 ---
 
 ## Optional Components
@@ -355,6 +369,10 @@ Klipper is the RKE2 built-in service LoadBalancer. It allows `LoadBalancer` type
 
 Installs the Rancher local-path-provisioner and sets it as the default `StorageClass`. Persistent volume claims using this class are stored on the local node filesystem under `PVC_DATA`. Disable with `INSTALL_LOCAL_PATH_PROVISIONER=false`.
 
+Since v2.1.0 the class makes `local` volumes (`defaultVolumeType: local`), not local-path's default `hostPath`, because Velero's node-agent never backs up `hostPath` volumes. A `local` volume sits in the same folder on the same node. Two differences: a pod's `fsGroup` now applies to it, and on SELinux-enforcing hosts the folder is relabelled for the pod that mounts it, so two pods on one node can't share it at once. PVCs made before keep their type; `install velero` names them. A `defaultVolumeType` set by hand is left alone.
+
+On SELinux-enforcing hosts (Rocky, RHEL) local-path's helper pods, which create and delete each volume's folder, run privileged (a `securityContext` patched into the `local-path-config` ConfigMap), because a `local` volume's folder carries its pod's own SELinux categories; without it a deleted PVC's data stayed on disk. With `ENABLE_CIS=true` the `local-path-storage` namespace is labelled `privileged` for Pod Security, because `restricted` refuses the helper pods' `hostPath` volume and PVCs stayed Pending (before v2.1.0 too). A re-run of `install` or `install velero` puts both back if the manifest was re-applied; pass the same `ENABLE_CIS` the cluster was installed with.
+
 ---
 
 ### CIS Hardening
@@ -374,13 +392,14 @@ Set `ENABLE_CIS=true` to apply the RKE2 CIS Kubernetes hardening profile. This i
 
 **Optional** — Run as a separate step after RKE2 is installed.
 
-Velero provides Kubernetes cluster backup and restore using an S3-compatible object store and CSI volume snapshots (e.g. Longhorn).
+Velero provides Kubernetes cluster backup and restore using an S3-compatible object store. Volumes are backed up by CSI snapshots with the data mover when `VSC_DRIVER` is a registered CSI driver (Longhorn by default), and by the node-agent (file-system backup) when it isn't, as on a plain cluster with only `local-path`. Velero can't back up `hostPath` volumes: `install velero` names any it finds (see [Local Path Provisioner](#local-path-provisioner)). On SELinux-enforcing hosts, the file-system backup and restore pods run privileged (Velero's `privilegedFsBackup`, in the `node-agent-config` ConfigMap, Velero v1.17 or later), because each pod's volume carries that pod's own SELinux categories. With a CSI driver registered, `install velero` names any PVCs on local-path, which CSI snapshots don't cover.
 
 #### Prerequisites
 
 1. An S3-compatible object store (MinIO, Ceph RGW, AWS S3, etc.)
 2. A pre-created S3 bucket (default name: `velero`)
-3. Longhorn (or another CSI driver) installed in the cluster for volume snapshots
+3. For CSI snapshots, Longhorn (or another CSI driver, named in `VSC_DRIVER`). Without one, the schedule uses file-system backup (since v2.1.0)
+   - With a custom `KUBELET_DATA`, `VELERO_VERSION` must be v1.17.0 or later (the node-agent's `--kubelet-root-dir`)
 4. Set the following variables in the script before running:
 
 ```bash
@@ -429,12 +448,19 @@ velero backup create manual-backup --from-schedule daily-full-backup --wait
 # List backups
 velero backup get
 
-# Describe a backup
-velero backup describe <backup-name> --details
+# Describe a backup, and read its logs
+velero backup describe <backup-name> --details --insecure-skip-tls-verify
+velero backup logs <backup-name> --insecure-skip-tls-verify
 
 # Restore from a backup
 velero restore create --from-backup <backup-name> --wait
 ```
+
+**A self-signed S3 endpoint** (SeaweedFS' default certificate, for one) needs `--insecure-skip-tls-verify` on the
+commands that download from the bucket: `backup describe --details`, `backup logs`, `restore describe --details` and
+`restore logs`. The installer sets `insecureSkipTLSVerify=true` for the server, but the CLI fetches those files itself,
+so without the flag it prints `x509: certificate signed by unknown authority` where the details should be. Backups and
+restores aren't affected. With a certificate the host trusts, or `--cacert <file>`, the flag isn't needed.
 
 #### Air-Gapped Velero
 
@@ -587,6 +613,11 @@ kubectl get nodes                       # Verify node versions
 #### Air-Gapped Upgrades
 
 The `save` command includes the system-upgrade-controller manifests and the `rancher/rke2-upgrade` image for the `RKE2_VERSION` the bundle is built for, plus the stable release's when it can be looked up. An air-gapped upgrade can't use `stable`, because that needs `update.rke2.io`. So the rule is: build the bundle with `RKE2_VERSION=<target>`, then upgrade to that same version.
+
+Inside an air gap, where only that side reaches the registry, extract the bundle there and run `push -registry …` from
+it, then `upgrade … -registry …` in the same folder. Since v2.1.0 the extracted bundle is kept after the push (before,
+the push deleted it and the upgrade failed with "manifests not found in air-gapped archive"). The upgrade refuses before
+changing anything when the registry lacks `rancher/rke2-upgrade` or `rancher/rke2-runtime` for the target version.
 
 1. On an internet-connected machine, run `save` and `push` for the target version, to put its upgrade images in the registry
 2. On the air-gapped host, run `upgrade` to that version with `-registry`. The script skips the downloads and uses the pushed images

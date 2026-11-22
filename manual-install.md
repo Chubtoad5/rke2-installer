@@ -330,6 +330,31 @@ kubectl patch storageclass local-path \
   -p '{"metadata": {"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
 ```
 
+Make it create `local` volumes rather than `hostPath` ones, so Velero can back up their data (it never backs up
+`hostPath` volumes, local-path's default). PVCs made before keep their type:
+
+```bash
+kubectl annotate storageclass local-path defaultVolumeType=local --overwrite
+```
+
+**SELinux enforcing (Rocky, RHEL):** a `local` volume's folder carries its pod's own SELinux categories, so local-path's
+helper pod must run privileged to delete it; otherwise a deleted PVC's data stays on disk. Edit the helper pod template
+and add a `securityContext` under the container `- name: helper-pod`:
+
+```bash
+kubectl -n local-path-storage edit configmap local-path-config
+#   in helperPod.yaml, under "- name: helper-pod":
+#     securityContext: {privileged: true}
+```
+
+**CIS (`profile: cis`):** Pod Security `restricted` refuses the helper pod's `hostPath` volume, so PVCs stay Pending.
+Label the namespace:
+
+```bash
+kubectl label namespace local-path-storage pod-security.kubernetes.io/enforce=privileged \
+  pod-security.kubernetes.io/audit=privileged pod-security.kubernetes.io/warn=privileged --overwrite
+```
+
 ### DNS Utility Pod
 
 A convenience pod for testing DNS resolution inside the cluster:
@@ -389,7 +414,7 @@ Velero provides cluster backup and restore using an S3-compatible object store a
 #### Install Velero CLI
 
 ```bash
-VELERO_VERSION="v1.17.1"
+VELERO_VERSION="v1.18.4"
 curl -L "https://github.com/vmware-tanzu/velero/releases/download/${VELERO_VERSION}/velero-${VELERO_VERSION}-linux-amd64.tar.gz" \
   -o "velero-${VELERO_VERSION}-linux-amd64.tar.gz"
 tar -xzf "velero-${VELERO_VERSION}-linux-amd64.tar.gz"
@@ -440,20 +465,33 @@ EOF
 ```bash
 velero install \
   --provider aws \
-  --plugins velero/velero-plugin-for-aws:v1.13.0 \
+  --plugins velero/velero-plugin-for-aws:v1.14.4 \
   --bucket velero \
   --backup-location-config \
     region=us-east-1,s3ForcePathStyle=true,s3Url=https://s3.example.com:8333,checksumAlgorithm="",insecureSkipTLSVerify=true \
   --secret-file /tmp/credentials-velero \
   --features=EnableCSI \
   --use-node-agent \
-  --use-volume-snapshots=true \
+  --use-volume-snapshots=false \
   --wait
 
 rm -f /tmp/credentials-velero
 ```
 
 > Replace the `--bucket`, `s3Url`, and credentials with your actual values.
+
+> **SELinux enforcing (Rocky, RHEL):** each pod's `local` volume carries that pod's own SELinux categories, so Velero's
+> file-system backup pods must run privileged to read it (Velero v1.17 or later). Before `velero install`, create the
+> namespace with Velero's Pod Security labels and the node-agent's ConfigMap, then add
+> `--node-agent-configmap node-agent-config` to the command above:
+>
+> ```bash
+> kubectl create namespace velero
+> kubectl label namespace velero component=velero pod-security.kubernetes.io/enforce=privileged \
+>   pod-security.kubernetes.io/audit=privileged pod-security.kubernetes.io/warn=privileged
+> kubectl -n velero create configmap node-agent-config \
+>   --from-literal=node-agent-config.json='{"privilegedFsBackup": true}'
+> ```
 
 #### Create a Scheduled Backup
 
@@ -465,6 +503,9 @@ velero schedule create daily-full-backup \
   --include-cluster-resources=true \
   --include-namespaces default
 ```
+
+> Without a CSI driver for your volumes (a plain cluster with only local-path), add `--default-volumes-to-fs-backup`, so
+> the node-agent copies the volumes' data. CSI snapshots don't cover local-path volumes.
 
 > Adjust `--include-namespaces` to list the namespaces you want backed up (comma-separated).
 
@@ -584,7 +625,7 @@ helm upgrade --install kube-prometheus-stack \
   prometheus-community/kube-prometheus-stack \
   --namespace monitoring \
   --values /tmp/prom-values.yaml \
-  --version 69.8.0 \
+  --version 92.22.0 \
   --wait --timeout 10m
 
 rm -f /tmp/prom-values.yaml
@@ -600,7 +641,7 @@ kind: DaemonSet
 
 image:
   repository: cr.fluentbit.io/fluent/fluent-bit
-  tag: "4.2.2"
+  tag: "5.1.5"
 
 tolerations:
   - operator: Exists
@@ -728,7 +769,7 @@ helm upgrade --install fluent-bit \
   fluent/fluent-bit \
   --namespace monitoring \
   --values /tmp/fb-values.yaml \
-  --version 0.55.0 \
+  --version 0.58.3 \
   --wait --timeout 5m
 
 rm -f /tmp/fb-values.yaml
@@ -936,7 +977,7 @@ curl -sfL "https://raw.githubusercontent.com/kubernetes/website/main/content/en/
   -o rke2-offline/dnsutils.yaml
 
 # Velero CLI
-VELERO_VERSION="v1.17.1"
+VELERO_VERSION="v1.18.4"
 curl -L "https://github.com/vmware-tanzu/velero/releases/download/${VELERO_VERSION}/velero-${VELERO_VERSION}-linux-amd64.tar.gz" \
   -o rke2-offline/velero-${VELERO_VERSION}-linux-amd64.tar.gz
 
@@ -949,8 +990,8 @@ curl -fsSLo "rke2-offline/helm-v${HELM_VERSION}-linux-amd64.tar.gz" \
 helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
 helm repo add fluent https://fluent.github.io/helm-charts
 helm repo update
-helm pull prometheus-community/kube-prometheus-stack --version 69.8.0 -d rke2-offline/
-helm pull fluent/fluent-bit --version 0.55.0 -d rke2-offline/
+helm pull prometheus-community/kube-prometheus-stack --version 92.22.0 -d rke2-offline/
+helm pull fluent/fluent-bit --version 0.58.3 -d rke2-offline/
 ```
 
 #### Create the Archive
@@ -1025,14 +1066,14 @@ systemctl start rke2-server.service
 
   # Install kube-prometheus-stack from local chart
   helm upgrade --install kube-prometheus-stack \
-    rke2-offline/kube-prometheus-stack-69.8.0.tgz \
+    rke2-offline/kube-prometheus-stack-92.22.0.tgz \
     --namespace monitoring --create-namespace \
     --values /tmp/prom-values.yaml \
     --wait --timeout 10m
 
   # Install Fluent Bit from local chart
   helm upgrade --install fluent-bit \
-    rke2-offline/fluent-bit-0.55.0.tgz \
+    rke2-offline/fluent-bit-0.58.3.tgz \
     --namespace monitoring \
     --values /tmp/fb-values.yaml \
     --wait --timeout 5m

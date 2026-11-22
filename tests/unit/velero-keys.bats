@@ -1,7 +1,10 @@
 #!/usr/bin/env bats
 # R15 (spec 21): Velero's S3 keys reach its AWS credentials file in a form the AWS SDK's parser reads back exactly, and a
 # key it can't carry is refused before anything changes. The parser below is a line-for-line port of aws-sdk-go-v2
-# internal/ini v1.7.2, which velero v1.17.1 and velero-plugin-for-aws v1.13.0 use for this file.
+# internal/ini v1.7.2, which velero v1.17.1 and velero-plugin-for-aws v1.13.0 use for this file. v1.18.4 and v1.14.4 (the
+# defaults since v2.1.0, spec 31) read it with aws-sdk-go-v2 config v1.32.17's own parser instead: every key
+# check_velero_keys accepts read back unchanged there too (spec 31's runbook, all 39 keys), and it reads three of the
+# refused ones (a backslash before a quote or an n) unchanged, so the check is stricter than it needs to be there.
 load ../helpers
 load ../vectors
 setup() {

@@ -173,9 +173,10 @@ else
   # Files the password's * could glob to, in the folder the installer runs from
   touch "$W/Aa1-glob-bait" "$W/Aa1 x" "$W/~"
   # images-pull-push keeps each image's path, so Harbor needs a project per namespace: rke2's push also carries the
-  # monitoring and Velero images. library comes with Harbor. A namespace added to push's lists shows up below as a
+  # monitoring and Velero images (jkroepke: kube-prometheus-stack 84+'s webhook image, from ghcr.io; spec 31). library
+  # comes with Harbor. A namespace added to push's lists shows up below as a
   # failed push that names the image.
-  for p in rancher e2e-test-images bats fluent grafana ingress-nginx kiwigrid kube-state-metrics prometheus prometheus-operator velero; do
+  for p in rancher e2e-test-images bats fluent grafana ingress-nginx jkroepke kiwigrid kube-state-metrics prometheus prometheus-operator velero; do
     c=$(h -o /dev/null -w '%{http_code}' -X POST "https://$R/api/v2.0/projects" -d "{\"project_name\":\"$p\",\"metadata\":{\"public\":\"false\"}}")
     [[ "$c" == 201 || "$c" == 409 ]] || bad "create Harbor project $p: $c"
   done
