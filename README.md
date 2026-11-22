@@ -323,6 +323,11 @@ exist (`Failed to push image … Skipping`, then `step 'run_push' failed`). Crea
 `prometheus`, `prometheus-operator`, `kiwigrid`, `grafana`, `fluent`, `jkroepke`, `velero` and `bats` (`library` comes
 with Harbor; `jkroepke` holds kube-prometheus-stack's webhook image, from `ghcr.io`). A registry that makes repositories on push, such as a plain `registry:2`, needs nothing.
 
+**Mirrors.** `-registry` writes `/etc/rancher/rke2/registries.yaml` mirroring `docker.io`, `quay.io`, `registry.k8s.io`,
+`cr.fluentbit.io` and, since v2.1.0, `ghcr.io` (kube-prometheus-stack's webhook image) to the registry. A node whose
+`registries.yaml` an earlier version wrote keeps it exactly, so its re-runs don't stop; re-run with
+`RKE2_RECONFIGURE=true` to add `ghcr.io`, which restarts RKE2 on that node.
+
 ---
 
 ## Optional Components
@@ -390,6 +395,7 @@ Velero provides Kubernetes cluster backup and restore using an S3-compatible obj
 1. An S3-compatible object store (MinIO, Ceph RGW, AWS S3, etc.)
 2. A pre-created S3 bucket (default name: `velero`)
 3. Longhorn (or another CSI driver) installed in the cluster for volume snapshots
+   - With a custom `KUBELET_DATA`, `VELERO_VERSION` must be v1.17.0 or later (the node-agent's `--kubelet-root-dir`)
 4. Set the following variables in the script before running:
 
 ```bash
@@ -603,6 +609,11 @@ kubectl get nodes                       # Verify node versions
 #### Air-Gapped Upgrades
 
 The `save` command includes the system-upgrade-controller manifests and the `rancher/rke2-upgrade` image for the `RKE2_VERSION` the bundle is built for, plus the stable release's when it can be looked up. An air-gapped upgrade can't use `stable`, because that needs `update.rke2.io`. So the rule is: build the bundle with `RKE2_VERSION=<target>`, then upgrade to that same version.
+
+Inside an air gap, where only that side reaches the registry, extract the bundle there and run `push -registry …` from
+it, then `upgrade … -registry …` in the same folder. Since v2.1.0 the extracted bundle is kept after the push (before,
+the push deleted it and the upgrade failed with "manifests not found in air-gapped archive"). The upgrade refuses before
+changing anything when the registry lacks `rancher/rke2-upgrade` or `rancher/rke2-runtime` for the target version.
 
 1. On an internet-connected machine, run `save` and `push` for the target version, to put its upgrade images in the registry
 2. On the air-gapped host, run `upgrade` to that version with `-registry`. The script skips the downloads and uses the pushed images
