@@ -994,7 +994,16 @@ label_custom_kubelet_dir () {
 label_custom_pvc_dir () {
     local d lp
     d=$(trim_slashes "${PVC_DATA:-}")
-    [[ -n "$d" && "$d" != "default" && "$d" != "/opt/local-path-provisioner" ]] || return 0
+    # V16 (spec 31): the default folder has the policy's own rule, but a folder made before rke2-selinux was installed
+    # keeps the label it was made with (usr_t, seen on an air-gapped Rocky server), and local-path's helpers were denied.
+    if [[ "$d" == "/opt/local-path-provisioner" || "$d" == "default" ]]; then
+        if [[ -d /opt/local-path-provisioner ]] && command -v restorecon >/dev/null 2>&1 && command -v matchpathcon >/dev/null 2>&1 \
+           && ! matchpathcon -V /opt/local-path-provisioner >/dev/null 2>&1; then
+            restorecon -R /opt/local-path-provisioner && echo "  Relabelled /opt/local-path-provisioner for SELinux (it was made before the policy)."
+        fi
+        return 0
+    fi
+    [[ -n "$d" ]] || return 0
     lp="$d/local-path-provisioner"
     if ! command -v semanage >/dev/null 2>&1 || ! command -v restorecon >/dev/null 2>&1; then
         echo "  WARNING: SELinux is enforcing and PVC_DATA is $d, but semanage or restorecon isn't installed, so local-path"

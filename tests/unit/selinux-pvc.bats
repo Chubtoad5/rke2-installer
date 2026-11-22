@@ -71,3 +71,14 @@ teardown() { rm -rf "$T"; }
   run grep -n -A3 'RKE2I_SELINUX_EQUIV_KUBELET:-' "$BATS_TEST_DIRNAME/../../rke2_installer.sh"
   [[ "$output" == *'semanage fcontext -d -e /var/lib/kubelet "$RKE2I_SELINUX_EQUIV_KUBELET"'* ]]
 }
+
+# V16 (spec 31): the default /opt/local-path-provisioner, made before rke2-selinux was installed, kept usr_t, and
+# local-path's helpers were denied on an air-gapped Rocky server. It's relabelled when its label is wrong.
+@test "V16: a default local-path folder with the wrong label is relabelled, with no equivalence added" {
+  PVC_DATA=/opt/local-path-provisioner
+  stub matchpathcon 'exit 1'
+  [ -d /opt/local-path-provisioner ] || skip "needs /opt/local-path-provisioner (root in a container)"
+  run label_custom_pvc_dir
+  called "restorecon -R /opt/local-path-provisioner"
+  ! called "semanage" || false
+}
