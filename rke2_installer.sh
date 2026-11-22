@@ -3089,16 +3089,20 @@ extract_monitoring_images () {
     fi
 
     echo "  Extracting images from kube-prometheus-stack v${KUBE_PROMETHEUS_STACK_VERSION} chart..."
-    helm template airgap-check "$kps_chart" \
-        | grep -E '^\s+image:' \
-        | awk '{print $2}' \
-        | tr -d '"' \
-        | grep -v '^$' \
-        | sort -u \
-        >> $WORKING_DIR/rke2-utilities/images/utility-images.txt
+    # V13 (spec 31): the operator gets Prometheus' config-reloader image as an argument, not on an image: line, so it
+    # was left out, and an air-gapped Prometheus stayed in Init:ErrImagePull. Both forms are listed now.
+    local kps_rendered
+    kps_rendered=$(helm template airgap-check "$kps_chart")
+    {
+        grep -E '^\s+image:' <<< "$kps_rendered" | awk '{print $2}'
+        grep -oE -- '--prometheus-config-reloader=[^" ]+' <<< "$kps_rendered" | cut -d= -f2-
+    } | tr -d '"' | grep -v '^$' | sort -u >> $WORKING_DIR/rke2-utilities/images/utility-images.txt
 
     echo "  Extracting images from fluent-bit chart v${FLUENT_BIT_CHART_VERSION} (app v${FLUENT_BIT_VERSION})..."
+    # V13 (spec 31): rendered with the image install monitoring sets, not the chart's default tag. FLUENT_BIT_VERSION
+    # 5.1.5 on chart 0.58.3 (default 5.1.3) put the wrong tag in the bundle, and an air-gapped Fluent Bit couldn't pull.
     helm template airgap-check "$fb_chart" \
+        --set image.repository=cr.fluentbit.io/fluent/fluent-bit --set "image.tag=${FLUENT_BIT_VERSION}" \
         | grep -E '^\s+image:' \
         | awk '{print $2}' \
         | tr -d '"' \
