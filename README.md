@@ -318,8 +318,8 @@ multipathd, UFW/firewalld, the NetworkManager CNI conf, and the CIS `etcd` user.
 `<registry>/rancher/rke2-runtime` and `<registry>/velero/velero`, and Harbor refuses a push into a project that doesn't
 exist (`Failed to push image … Skipping`, then `step 'run_push' failed`). Create these projects before the first
 `push`, `install push` or `install velero push`: `rancher`, `e2e-test-images`, `ingress-nginx`, `kube-state-metrics`,
-`prometheus`, `prometheus-operator`, `kiwigrid`, `grafana`, `fluent`, `velero` and `bats` (`library` comes with
-Harbor). A registry that makes repositories on push, such as a plain `registry:2`, needs nothing.
+`prometheus`, `prometheus-operator`, `kiwigrid`, `grafana`, `fluent`, `jkroepke`, `velero` and `bats` (`library` comes
+with Harbor; `jkroepke` holds kube-prometheus-stack's webhook image, from `ghcr.io`). A registry that makes repositories on push, such as a plain `registry:2`, needs nothing.
 
 ---
 

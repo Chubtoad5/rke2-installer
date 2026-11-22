@@ -1017,8 +1017,19 @@ create_registry_config () {
         echo "  Certificate saved to $CERTS_DIR."
         # registries.yaml carries the registry credentials - write it 0600 (RK-8). Both are escaped for YAML's
         # double quotes (R12).
-        local user_esc pass_esc
+        local user_esc pass_esc ghcr_block=""
         user_esc=$(dq_escape "$REG_USER"); pass_esc=$(dq_escape "$REG_PASS")
+        # V9 (spec 31): kube-prometheus-stack (84.x and later) takes its admission webhook's image from ghcr.io, which
+        # no mirror covered, so air-gapped monitoring couldn't pull it. A new registries.yaml mirrors ghcr.io too. An
+        # existing one without it keeps its exact content, so a running node's re-run sees no change (and doesn't stop
+        # for RKE2_RECONFIGURE); RKE2_RECONFIGURE=true adds it there.
+        if [[ ! -f /etc/rancher/rke2/registries.yaml ]] || grep -q '^  ghcr.io:' /etc/rancher/rke2/registries.yaml \
+           || [[ "${RKE2_RECONFIGURE,,}" == "true" ]]; then
+            ghcr_block=$'  ghcr.io:\n    endpoint:\n      - "https://'"${REG_FQDN}:${REG_PORT}"$'"\n'
+        else
+            echo "  NOTE: this node's registries.yaml has no ghcr.io mirror, which air-gapped 'install monitoring' needs"
+            echo "        (kube-prometheus-stack's webhook image). Re-run with RKE2_RECONFIGURE=true to add it."
+        fi
         ( umask 077; cat > /etc/rancher/rke2/registries.yaml <<EOF
 configs:
   ${REG_FQDN}:${REG_PORT}:
@@ -1040,7 +1051,7 @@ mirrors:
   cr.fluentbit.io:
     endpoint:
       - "https://${REG_FQDN}:${REG_PORT}"
-  ${REG_FQDN}:${REG_PORT}:
+${ghcr_block}  ${REG_FQDN}:${REG_PORT}:
     endpoint:
       - "https://${REG_FQDN}:${REG_PORT}"
 EOF
