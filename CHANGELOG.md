@@ -60,6 +60,14 @@ move. RKE2's own default stays v1.36.6+rke2r1.
     reads it), because each pod's `local` volume carries that pod's own SELinux categories. Only those short-lived pods
     are privileged; the node-agent isn't.
   - With Longhorn nothing else changes: CSI snapshots with the data mover, as before.
+  - With Longhorn and local-path both, `install velero` names the local-path PVCs, which CSI snapshots don't cover.
+  - On an SELinux-enforcing host, a `velero` namespace the installer makes gets Velero's Pod Security labels, so the
+    node-agent is admitted under CIS.
+- **Deleting a local-path PVC removes its data on SELinux-enforcing hosts** (N2): local-path's helper pods run privileged
+  there, because a `local` volume's folder carries the pod's own SELinux categories. Without it the PV stayed `Released`
+  and its data on disk.
+- **Local-path PVCs bind under CIS** (V17, every version before): the `local-path-storage` namespace is labelled
+  `privileged`. CIS's Pod Security `restricted` refused the helper pods' `hostPath` volume, so PVCs stayed Pending.
 
 ### Docs
 - README: the Velero CLI's `--insecure-skip-tls-verify` with a self-signed S3 endpoint (V5); the Harbor projects a push

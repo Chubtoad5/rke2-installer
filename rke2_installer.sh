@@ -1672,6 +1672,7 @@ apply_utilities () {
            sed -i "s|\"paths\":\[\s*\"[^\"]*\"\s*\]|\"paths\":[\"${PVC_DATA}/local-path-provisioner\"]|g" $WORKING_DIR/rke2-utilities/local-path-storage.yaml
         fi    
         kubectl apply -f $WORKING_DIR/rke2-utilities/local-path-storage.yaml
+        local_path_helper_access
         # Hard-fail: the storageclass patch below and dependent PVCs need a live provisioner. With CNI_TYPE=none it
         # can't start until a CNI is installed, so it isn't waited for.
         if [[ $CNI_NONE == "false" ]] && all_nodes_control_plane_tainted; then
@@ -2231,6 +2232,30 @@ set_local_path_volume_type() {
   esac
 }
 
+# local_path_helper_access: spec 31, N2 and V17. local-path creates and deletes each volume's folder from a helper pod.
+# - N2: with SELinux enforcing, a "local" volume's folder carries the pod's own categories, so a confined helper pod
+#   couldn't delete it: the PV stayed Released and its data on disk. The helper pod runs privileged.
+# - V17: under CIS, the local-path-storage namespace enforced Pod Security "restricted", which refuses the helper pod's
+#   hostPath volume, so no local-path PVC ever bound. The namespace is labelled privileged.
+# Called after every apply of the manifest, which puts the stock helper pod back.
+local_path_helper_access() {
+  kubectl get namespace local-path-storage &>/dev/null || return 0
+  if [[ ${ENABLE_CIS,,} == true ]]; then
+    kubectl label namespace local-path-storage pod-security.kubernetes.io/enforce=privileged \
+      pod-security.kubernetes.io/audit=privileged pod-security.kubernetes.io/warn=privileged --overwrite >/dev/null
+  fi
+  [[ $SELINUX_ENFORCING == true ]] || return 0
+  local cur new body
+  cur=$(kubectl -n local-path-storage get configmap local-path-config -o jsonpath='{.data.helperPod\.yaml}' 2>/dev/null) || return 0
+  [[ -n "$cur" && "$cur" != *"privileged: true"* ]] || return 0
+  new=$(sed 's|^\( *\)- name: helper-pod$|&\n\1  securityContext: {privileged: true}|' <<< "$cur")
+  [[ "$new" == *"privileged: true"* ]] || { echo "  WARNING: local-path's helper pod template has an unexpected shape: left as it is."; return 0; }
+  # As a JSON string: the template holds no quotes or backslashes, only newlines
+  body=$(sed ':a;N;$!ba;s/\n/\\n/g' <<< "$new")
+  echo "  SELinux is enforcing: local-path's helper pods run privileged, so they can remove pods' relabelled folders."
+  kubectl -n local-path-storage patch configmap local-path-config --type merge -p "{\"data\":{\"helperPod.yaml\":\"$body\"}}" >/dev/null
+}
+
 # warn_hostpath_volumes: Q19. Names the PVCs whose volumes are hostPath, which Velero skips, so nobody counts on them.
 warn_hostpath_volumes() {
   local pvs
@@ -2240,6 +2265,18 @@ warn_hostpath_volumes() {
   echo "  WARNING: Velero can't back up the data of these PVCs, because their volumes are hostPath: $pvs"
   echo "  They were made before local-path made 'local' volumes. Their objects are backed up, but a restore brings them"
   echo "  back empty. To have the data backed up, copy it out, recreate the PVC, and copy it back."
+}
+
+# warn_local_path_without_fs_backup: with a CSI driver for VSC_DRIVER the schedule uses CSI snapshots only, which don't
+# cover local-path volumes, so their PVCs would restore empty under a Completed backup. Names them.
+warn_local_path_without_fs_backup() {
+  local pvcs
+  pvcs=$(kubectl get pv -o jsonpath='{range .items[?(@.spec.storageClassName=="local-path")]}{.spec.claimRef.namespace}/{.spec.claimRef.name}{" "}{end}' 2>/dev/null) || pvcs=""
+  pvcs=${pvcs% }
+  [[ -n "$pvcs" ]] || return 0
+  echo "  WARNING: these PVCs are on local-path, which CSI snapshots ($VSC_DRIVER) don't cover, so their data isn't backed up: $pvcs"
+  echo "  Move them to the CSI driver's storage class, or annotate their pods for file-system backup"
+  echo "  (backup.velero.io/backup-volumes=<volume name>)."
 }
 
 # velero_converge_versions: V3 (spec 31). 'velero install' over a running Velero leaves its Deployment and DaemonSet as they
@@ -2314,6 +2351,7 @@ run_install_velero () {
   # T11 (spec 31, Q14): without that CSI driver, nothing copied a volume's data, so a restore brought PVCs back empty.
   # Then the schedule backs volumes up with the node-agent (file-system backup) instead.
   set_local_path_volume_type
+  local_path_helper_access
   warn_hostpath_volumes
   local fs_backup=0
   if ! kubectl get csidriver "$VSC_DRIVER" &>/dev/null; then
@@ -2321,6 +2359,8 @@ run_install_velero () {
       echo "  NOTE: CSI driver '$VSC_DRIVER' isn't registered in this cluster (the default assumes Longhorn, installed by"
       echo "  ap-tools). Volumes are backed up by Velero's node-agent (file-system backup), not CSI snapshots. For CSI"
       echo "  snapshots, set VSC_DRIVER and VSC_NAME to an installed CSI driver ('kubectl get csidrivers')."
+  else
+      warn_local_path_without_fs_backup
   fi
 
   # Create VolumeSnapshotClass for Longhorn
@@ -2370,7 +2410,15 @@ SNAPEOF
   if [[ $SELINUX_ENFORCING == true ]]; then
     agent_args=(--node-agent-configmap node-agent-config)
     echo "  SELinux is enforcing: Velero's file-system backup pods run privileged, so they can read pods' relabelled volumes."
-    kubectl create namespace velero --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+    # The ConfigMap needs the namespace first. Velero labels its namespace for Pod Security only when it creates it, and
+    # under CIS an unlabelled one enforces "restricted", which refuses the node-agent, so it gets the same labels here.
+    if ! kubectl get namespace velero &>/dev/null; then
+      kubectl create namespace velero >/dev/null
+      kubectl label namespace velero component=velero \
+        pod-security.kubernetes.io/enforce=privileged pod-security.kubernetes.io/enforce-version=latest \
+        pod-security.kubernetes.io/audit=privileged pod-security.kubernetes.io/audit-version=latest \
+        pod-security.kubernetes.io/warn=privileged pod-security.kubernetes.io/warn-version=latest --overwrite >/dev/null
+    fi
     kubectl -n velero create configmap node-agent-config --from-literal=node-agent-config.json='{"privilegedFsBackup": true}' \
       --dry-run=client -o yaml | kubectl apply -f - >/dev/null
     agent_cm_args=$(kubectl -n velero get daemonset node-agent -o jsonpath='{.spec.template.spec.containers[0].args}' 2>/dev/null) || agent_cm_args=""

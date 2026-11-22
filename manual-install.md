@@ -330,6 +330,13 @@ kubectl patch storageclass local-path \
   -p '{"metadata": {"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
 ```
 
+Make it create `local` volumes rather than `hostPath` ones, so Velero can back up their data (it never backs up
+`hostPath` volumes, local-path's default). PVCs made before keep their type:
+
+```bash
+kubectl annotate storageclass local-path defaultVolumeType=local --overwrite
+```
+
 ### DNS Utility Pod
 
 A convenience pod for testing DNS resolution inside the cluster:
@@ -447,13 +454,26 @@ velero install \
   --secret-file /tmp/credentials-velero \
   --features=EnableCSI \
   --use-node-agent \
-  --use-volume-snapshots=true \
+  --use-volume-snapshots=false \
   --wait
 
 rm -f /tmp/credentials-velero
 ```
 
 > Replace the `--bucket`, `s3Url`, and credentials with your actual values.
+
+> **SELinux enforcing (Rocky, RHEL):** each pod's `local` volume carries that pod's own SELinux categories, so Velero's
+> file-system backup pods must run privileged to read it (Velero v1.17 or later). Before `velero install`, create the
+> namespace with Velero's Pod Security labels and the node-agent's ConfigMap, then add
+> `--node-agent-configmap node-agent-config` to the command above:
+>
+> ```bash
+> kubectl create namespace velero
+> kubectl label namespace velero component=velero pod-security.kubernetes.io/enforce=privileged \
+>   pod-security.kubernetes.io/audit=privileged pod-security.kubernetes.io/warn=privileged
+> kubectl -n velero create configmap node-agent-config \
+>   --from-literal=node-agent-config.json='{"privilegedFsBackup": true}'
+> ```
 
 #### Create a Scheduled Backup
 
@@ -465,6 +485,9 @@ velero schedule create daily-full-backup \
   --include-cluster-resources=true \
   --include-namespaces default
 ```
+
+> Without a CSI driver for your volumes (a plain cluster with only local-path), add `--default-volumes-to-fs-backup`, so
+> the node-agent copies the volumes' data. CSI snapshots don't cover local-path volumes.
 
 > Adjust `--include-namespaces` to list the namespaces you want backed up (comma-separated).
 

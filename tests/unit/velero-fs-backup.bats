@@ -28,6 +28,7 @@ V
   *"get daemonset node-agent -o jsonpath={.spec.template.spec.volumes"*) [[ -f "'"$T"'/ds" ]] && echo /var/lib/kubelet/pods || exit 1 ;;
   *"get daemonset node-agent -o jsonpath={.spec.template.spec.containers[0].args}"*) cat "'"$T"'/ds" 2>/dev/null ;;
   *"-n velero get daemonset"*) exit 1 ;;
+  "get namespace velero") [[ ! -f "'"$T"'/nons" ]] ;;
   *) cat > /dev/null 2>&1; exit 0 ;;
 esac'
 }
@@ -136,4 +137,20 @@ esac'
   : > "$STUB_LOG"; echo '["node-agent","server","--node-agent-configmap=node-agent-config"]' > "$T/ds"
   SEL=true drive
   ! called "delete daemonset node-agent"
+}
+
+@test "N1: on an enforcing host with no velero namespace yet, it's made with Velero's Pod Security labels (CIS)" {
+  touch "$T/nons"
+  SEL=true drive
+  [ "$status" -eq 0 ]
+  called "kubectl create namespace velero"
+  grep 'kubectl label namespace velero' "$STUB_LOG" | grep -q 'pod-security.kubernetes.io/enforce=privileged'
+  grep 'kubectl label namespace velero' "$STUB_LOG" | grep -q 'component=velero'
+}
+
+@test "N1: an existing velero namespace is left as it is" {
+  SEL=true drive
+  [ "$status" -eq 0 ]
+  ! called "kubectl create namespace velero"
+  ! called "kubectl label namespace velero"
 }

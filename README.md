@@ -369,7 +369,7 @@ Klipper is the RKE2 built-in service LoadBalancer. It allows `LoadBalancer` type
 
 Installs the Rancher local-path-provisioner and sets it as the default `StorageClass`. Persistent volume claims using this class are stored on the local node filesystem under `PVC_DATA`. Disable with `INSTALL_LOCAL_PATH_PROVISIONER=false`.
 
-Since v2.1.0 the class makes `local` volumes (`defaultVolumeType: local`), not local-path's default `hostPath`, because Velero's node-agent never backs up `hostPath` volumes. A `local` volume sits in the same folder on the same node, and pods see no difference. PVCs made before keep their type; `install velero` names them. A `defaultVolumeType` set by hand is left alone.
+Since v2.1.0 the class makes `local` volumes (`defaultVolumeType: local`), not local-path's default `hostPath`, because Velero's node-agent never backs up `hostPath` volumes. A `local` volume sits in the same folder on the same node. Two differences: a pod's `fsGroup` now applies to it, and on SELinux-enforcing hosts the folder is relabelled for the pod that mounts it, so two pods on one node can't share it at once. PVCs made before keep their type; `install velero` names them. A `defaultVolumeType` set by hand is left alone.
 
 ---
 
@@ -390,7 +390,7 @@ Set `ENABLE_CIS=true` to apply the RKE2 CIS Kubernetes hardening profile. This i
 
 **Optional** — Run as a separate step after RKE2 is installed.
 
-Velero provides Kubernetes cluster backup and restore using an S3-compatible object store. Volumes are backed up by CSI snapshots with the data mover when `VSC_DRIVER` is a registered CSI driver (Longhorn by default), and by the node-agent (file-system backup) when it isn't, as on a plain cluster with only `local-path`. Velero can't back up `hostPath` volumes: `install velero` names any it finds (see [Local Path Provisioner](#local-path-provisioner)). On SELinux-enforcing hosts, the file-system backup and restore pods run privileged (Velero's `privilegedFsBackup`, in the `node-agent-config` ConfigMap), because each pod's volume carries that pod's own SELinux categories.
+Velero provides Kubernetes cluster backup and restore using an S3-compatible object store. Volumes are backed up by CSI snapshots with the data mover when `VSC_DRIVER` is a registered CSI driver (Longhorn by default), and by the node-agent (file-system backup) when it isn't, as on a plain cluster with only `local-path`. Velero can't back up `hostPath` volumes: `install velero` names any it finds (see [Local Path Provisioner](#local-path-provisioner)). On SELinux-enforcing hosts, the file-system backup and restore pods run privileged (Velero's `privilegedFsBackup`, in the `node-agent-config` ConfigMap, Velero v1.17 or later), because each pod's volume carries that pod's own SELinux categories. With a CSI driver registered, `install velero` names any PVCs on local-path, which CSI snapshots don't cover.
 
 #### Prerequisites
 
