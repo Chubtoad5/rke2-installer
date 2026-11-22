@@ -956,6 +956,35 @@ install_ingress_nginx_images () {
     rm -rf $WORKING_DIR/rke2-ingress-images/images
 }
 
+# label_custom_pvc_dir: V14 (spec 31). local-path-provisioner's helper pods (container_t) make each volume's folder
+# under PVC_DATA/local-path-provisioner. RKE2's SELinux policy labels only /opt/local-path-provisioner (and
+# /var/local-path-provisioner) container_file_t, so under a custom PVC_DATA the folder was default_t, the helper's mkdir
+# was denied, and every local-path PVC stayed Pending. The folder gets /opt/local-path-provisioner's labels, recorded
+# for uninstall, as R26 does for RKE2_DATA.
+label_custom_pvc_dir () {
+    local d lp
+    d=$(trim_slashes "${PVC_DATA:-}")
+    [[ -n "$d" && "$d" != "default" && "$d" != "/opt/local-path-provisioner" ]] || return 0
+    lp="$d/local-path-provisioner"
+    if ! command -v semanage >/dev/null 2>&1 || ! command -v restorecon >/dev/null 2>&1; then
+        echo "  WARNING: SELinux is enforcing and PVC_DATA is $d, but semanage or restorecon isn't installed, so local-path"
+        echo "  volumes there can't be labelled, and their pods' folders will be denied. Install policycoreutils-python-utils."
+        return 0
+    fi
+    if [[ "$(matchpathcon -n "$lp" 2>/dev/null)" == *:container_file_t:* ]]; then
+        echo "  $lp already has local-path-provisioner's SELinux labels."
+    elif semanage fcontext -a -e /opt/local-path-provisioner "$lp"; then
+        echo "  Labelled $lp like /opt/local-path-provisioner for SELinux (semanage fcontext -a -e)."
+        state_set RKE2I_SELINUX_EQUIV_PVC "$lp"
+    else
+        echo "  WARNING: semanage couldn't give $lp /opt/local-path-provisioner's SELinux labels (see its error above);"
+        echo "  local-path volumes there can then be denied."
+        return 0
+    fi
+    mkdir -p "$lp"
+    matchpathcon -V "$lp" >/dev/null 2>&1 || restorecon -R "$lp"
+}
+
 # label_custom_data_dir: on an SELinux-enforcing host, a custom RKE2_DATA gets the labels /var/lib/rancher/rke2 has,
 # through a file-context equivalence, as RKE2's docs say for a custom data-dir. Without it the path is usr_t or
 # var_lib_t: rke2-selinux confines etcd as rke2_service_db_t, which may only write rke2_service_db_file_t, so etcd can't
@@ -964,6 +993,7 @@ install_ingress_nginx_images () {
 # records the pre-install state first. An equivalence this run adds is recorded, and uninstall removes it.
 label_custom_data_dir () {
     [[ "$SELINUX_ENFORCING" == "true" ]] || return 0
+    label_custom_pvc_dir
     local d
     d=$(trim_slashes "$RKE2_DATA")
     [[ "$d" != "/var/lib/rancher/rke2" ]] || return 0
@@ -2845,6 +2875,10 @@ uninstall_rke2() {
         if [[ -n "${RKE2I_SELINUX_EQUIV:-}" ]] && command -v semanage >/dev/null 2>&1; then
             echo "  Removing the SELinux file-context equivalence for $RKE2I_SELINUX_EQUIV..."
             semanage fcontext -d -e /var/lib/rancher/rke2 "$RKE2I_SELINUX_EQUIV" 2>/dev/null || true
+        fi
+        if [[ -n "${RKE2I_SELINUX_EQUIV_PVC:-}" ]] && command -v semanage >/dev/null 2>&1; then
+            echo "  Removing the SELinux file-context equivalence for $RKE2I_SELINUX_EQUIV_PVC..."
+            semanage fcontext -d -e /opt/local-path-provisioner "$RKE2I_SELINUX_EQUIV_PVC" 2>/dev/null || true
         fi
         # Swap: uncomment the fstab lines this installer commented out; re-enable swap
         # only if it was on before install.
