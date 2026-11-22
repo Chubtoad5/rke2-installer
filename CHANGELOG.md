@@ -33,6 +33,16 @@ move. RKE2's own default stays v1.36.6+rke2r1.
 - **An air-gapped upgrade can't take the server down because of a partial push** (V11): the preflight now needs
   `rancher/rke2-runtime` for the target version as well as `rke2-upgrade`, and `push` sends RKE2's images before the
   add-ons'. A push stopped by an add-on image had left the runtime out, and the upgraded server didn't start.
+- **A push from an extracted bundle keeps the bundle** (V12), so an air-gapped `upgrade` or `install` can follow it in
+  the same folder. It had been deleted, and the upgrade failed with "manifests not found … Re-run 'save'".
+- **Air-gapped monitoring bundles carry Prometheus' config-reloader and the Fluent Bit tag that runs** (V13). Prometheus
+  stayed in `Init:ErrImagePull` and Fluent Bit couldn't pull, on every version tried.
+- **Local-path volumes provision on SELinux-enforcing hosts** with a custom `PVC_DATA` (V14, an equivalence to
+  `/opt/local-path-provisioner`), and with the default folder made before `rke2-selinux` (V16, a relabel). They stayed
+  Pending.
+- **A custom `KUBELET_DATA` gets `/var/lib/kubelet`'s SELinux labels** (V15), so Velero's node-agent can read it; it
+  crash-looped on "open /host_pods: permission denied".
+- **A first `install velero` no longer stops at V1's node-agent check** on a cluster that never had Velero.
 
 ### Docs
 - README: the Velero CLI's `--insecure-skip-tls-verify` with a self-signed S3 endpoint (V5); the Harbor projects a push
