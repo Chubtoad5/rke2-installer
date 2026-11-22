@@ -1619,7 +1619,9 @@ apply_utilities () {
         fi
         # Warn-and-continue: 'default' may contain unrelated user workloads and dnsutils is a
         # non-critical troubleshooting pod - do not fail the install over it.
-        if [[ $CNI_NONE == "false" ]] && ! check_namespace_pods_ready default; then
+        if [[ $CNI_NONE == "false" ]] && all_nodes_control_plane_tainted; then
+            echo "  NOTE: every node has the control-plane taint, so dnsutils starts when the first agent joins (V10)."
+        elif [[ $CNI_NONE == "false" ]] && ! check_namespace_pods_ready default; then
             echo "  WARNING: pods in the 'default' namespace are not all ready; continuing (dnsutils is non-critical)."
         fi
     fi

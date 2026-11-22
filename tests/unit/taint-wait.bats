@@ -50,3 +50,8 @@ esac'
   [ "$status" -eq 0 ]
   [[ "$output" == *"local-path-provisioner starts when the first agent joins"* ]]
 }
+
+@test "V10: apply_utilities skips the dnsutils wait too, with a note, while every node is tainted" {
+  run grep -n -A1 'if \[\[ \$CNI_NONE == "false" \]\] && all_nodes_control_plane_tainted; then' "$BATS_TEST_DIRNAME/../../rke2_installer.sh"
+  [[ "$output" == *"dnsutils starts when the first agent joins"* ]]
+}
