@@ -2151,11 +2151,11 @@ write_velero_credentials () {
 velero_converge_versions () {
   local want_server="velero/velero:${VELERO_VERSION}" want_plugin="velero/velero-plugin-for-aws:${VELERO_AWS_PLUGIN_VERSION}"
   local have_server have_plugin plugin_name
-  have_server=$(kubectl -n velero get deploy velero -o jsonpath='{.spec.template.spec.containers[?(@.name=="velero")].image}' 2>/dev/null)
+  have_server=$(kubectl -n velero get deploy velero -o jsonpath='{.spec.template.spec.containers[?(@.name=="velero")].image}' 2>/dev/null) || have_server=""
   [[ -n "$have_server" ]] || return 0
   plugin_name=$(kubectl -n velero get deploy velero -o jsonpath='{range .spec.template.spec.initContainers[*]}{.name}={.image}{"\n"}{end}' 2>/dev/null \
-    | awk -F= '$2 ~ /velero-plugin-for-aws/ {print $1; exit}')
-  have_plugin=$(kubectl -n velero get deploy velero -o jsonpath="{.spec.template.spec.initContainers[?(@.name==\"$plugin_name\")].image}" 2>/dev/null)
+    | awk -F= '$2 ~ /velero-plugin-for-aws/ {print $1; exit}') || plugin_name=""
+  have_plugin=$(kubectl -n velero get deploy velero -o jsonpath="{.spec.template.spec.initContainers[?(@.name==\"$plugin_name\")].image}" 2>/dev/null) || have_plugin=""
   if [[ "$have_server" == "$want_server" && ( -z "$plugin_name" || "$have_plugin" == "$want_plugin" ) ]]; then
     return 0
   fi
@@ -2252,7 +2252,8 @@ SNAPEOF
   # 'velero install' leaves an existing DaemonSet as it is, so a node-agent made with the wrong pods directory (any install
   # before V1 on a custom root) would keep crash-looping. It holds no state: remove it, and the install below makes it again.
   local mounted
-  mounted=$(kubectl -n velero get daemonset node-agent -o jsonpath='{.spec.template.spec.volumes[?(@.name=="host-pods")].hostPath.path}' 2>/dev/null)
+  # A first install has no velero namespace yet: kubectl fails, and under errexit that ended the install here.
+  mounted=$(kubectl -n velero get daemonset node-agent -o jsonpath='{.spec.template.spec.volumes[?(@.name=="host-pods")].hostPath.path}' 2>/dev/null) || mounted=""
   if [[ -n "$mounted" && "${mounted%/}" != "$kubelet_root/pods" ]]; then
     echo "  The node-agent mounts $mounted, not $kubelet_root/pods: replacing it."
     kubectl -n velero delete daemonset node-agent --wait=true >/dev/null
