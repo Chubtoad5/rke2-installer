@@ -3673,6 +3673,22 @@ image_pull_push_check () {
     fetch_helper "$dest" "$IMAGE_PULL_PUSH_URL" "$IMAGE_PULL_PUSH_REF" "$IMAGE_PULL_PUSH_SHA256" || exit 1
 }
 
+# drop_unplaceable_cilium_operator <not-ready lines>: V8 (spec 31). RKE2's Cilium chart runs two cilium-operator replicas
+# on the host network, one per node, so on a single node the second stays Pending for good while the first does the
+# work, and every single-node CNI_TYPE=cilium install failed its pod wait. Pending operator pods are left out while the
+# Deployment has a ready replica and the cluster has fewer nodes than replicas; a join that adds a node schedules them.
+drop_unplaceable_cilium_operator() {
+  local lines=$1 ready want nodes
+  ready=$(kubectl get deployment -n kube-system cilium-operator -o jsonpath='{.status.readyReplicas}' 2>/dev/null) || true
+  want=$(kubectl get deployment -n kube-system cilium-operator -o jsonpath='{.spec.replicas}' 2>/dev/null) || true
+  nodes=$(kubectl get nodes --no-headers 2>/dev/null | grep -c .) || true
+  if [[ "${ready:-0}" -ge 1 && -n "$want" && "${nodes:-0}" -lt "$want" ]]; then
+    grep -v '^cilium-operator-.* Pending ' <<< "$lines" || true
+  else
+    printf '%s\n' "$lines"
+  fi
+}
+
 check_namespace_pods_ready() {
   # check_namespace_pods_ready [namespace]: kube-system by default. Deletes completed pods, then waits up to
   # POD_WAIT_TIMEOUT seconds for every pod to be ready. Readiness is checked before the deadline, so a namespace that
@@ -3697,6 +3713,9 @@ check_namespace_pods_ready() {
       # RKE2's charts have created any. CoreDNS, which every install has, isn't there yet then: not ready (spec 29).
       if [[ "$ns" == "kube-system" ]] && ! grep -q '^rke2-coredns-' <<< "$pods"; then
         not_ready="${not_ready:+$not_ready$'\n'}rke2-coredns 0/1 NotCreatedYet"
+      fi
+      if [[ "$ns" == "kube-system" ]] && grep -q '^cilium-operator-.* Pending ' <<< "$not_ready"; then
+        not_ready=$(drop_unplaceable_cilium_operator "$not_ready")
       fi
     else
       pods=$(kubectl get pods -n "$ns" --no-headers 2>&1 >/dev/null) || true

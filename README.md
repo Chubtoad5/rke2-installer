@@ -314,6 +314,13 @@ multipathd, UFW/firewalld, the NetworkManager CNI conf, and the CIS `etcd` user.
 | `-tls-san <fqdn-or-ip>` | Add an extra TLS SAN to the API server certificate. Use with `install` or `join server`. |
 | `-registry <registry:port> <username> <password>` | Configure a private registry as a pull-through mirror. Use with `install`, `install velero`, `join`, `push`, or `upgrade`. Quote the password for your shell; from there it reaches `registries.yaml` and `docker login` whole, `"`, `\`, spaces and `*` included (since 1.3.2). |
 
+**Pushing to Harbor: make the projects first.** `push` keeps each image's path under the registry, for example
+`<registry>/rancher/rke2-runtime` and `<registry>/velero/velero`, and Harbor refuses a push into a project that doesn't
+exist (`Failed to push image … Skipping`, then `step 'run_push' failed`). Create these projects before the first
+`push`, `install push` or `install velero push`: `rancher`, `e2e-test-images`, `ingress-nginx`, `kube-state-metrics`,
+`prometheus`, `prometheus-operator`, `kiwigrid`, `grafana`, `fluent`, `velero` and `bats` (`library` comes with
+Harbor). A registry that makes repositories on push, such as a plain `registry:2`, needs nothing.
+
 ---
 
 ## Optional Components
