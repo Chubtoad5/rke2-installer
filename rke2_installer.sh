@@ -956,6 +956,36 @@ install_ingress_nginx_images () {
     rm -rf $WORKING_DIR/rke2-ingress-images/images
 }
 
+# label_custom_kubelet_dir: V15 (spec 31). The policy labels /var/lib/kubelet's tree container_var_lib_t (pod-resources
+# kubelet_var_lib_t). A custom KUBELET_DATA was default_t, so a pod that reads the pods directory through a hostPath,
+# such as Velero's node-agent, was denied ("open /host_pods: permission denied") and crash-looped, and install velero
+# failed. The path gets /var/lib/kubelet's labels through an equivalence, recorded for uninstall. Pods' own volumes
+# are container_file_t, a customizable type, which restorecon leaves as it is.
+label_custom_kubelet_dir () {
+    local d
+    d=$(trim_slashes "${KUBELET_DATA:-}")
+    [[ -n "$d" && "$d" != "default" && "$d" != "/var/lib/kubelet" ]] || return 0
+    if ! command -v semanage >/dev/null 2>&1 || ! command -v restorecon >/dev/null 2>&1; then
+        echo "  WARNING: SELinux is enforcing and KUBELET_DATA is $d, but semanage or restorecon isn't installed, so it can't be"
+        echo "  labelled like /var/lib/kubelet, and pods that read it (Velero's node-agent) will be denied. Install policycoreutils-python-utils."
+        return 0
+    fi
+    if [[ "$(matchpathcon -n "$d/pods" 2>/dev/null)" == *:container_var_lib_t:* ]]; then
+        echo "  $d already has /var/lib/kubelet's SELinux labels."
+    elif semanage fcontext -a -e /var/lib/kubelet "$d"; then
+        echo "  Labelled $d like /var/lib/kubelet for SELinux (semanage fcontext -a -e)."
+        state_set RKE2I_SELINUX_EQUIV_KUBELET "$d"
+    else
+        echo "  WARNING: semanage couldn't give $d /var/lib/kubelet's SELinux labels (see its error above); pods that read it"
+        echo "  (Velero's node-agent) can then be denied."
+        return 0
+    fi
+    mkdir -p "$d"
+    if ! matchpathcon -V "$d" >/dev/null 2>&1 || { [[ -d "$d/pods" ]] && ! matchpathcon -V "$d/pods" >/dev/null 2>&1; }; then
+        restorecon -R "$d"
+    fi
+}
+
 # label_custom_pvc_dir: V14 (spec 31). local-path-provisioner's helper pods (container_t) make each volume's folder
 # under PVC_DATA/local-path-provisioner. RKE2's SELinux policy labels only /opt/local-path-provisioner (and
 # /var/local-path-provisioner) container_file_t, so under a custom PVC_DATA the folder was default_t, the helper's mkdir
@@ -994,6 +1024,7 @@ label_custom_pvc_dir () {
 label_custom_data_dir () {
     [[ "$SELINUX_ENFORCING" == "true" ]] || return 0
     label_custom_pvc_dir
+    label_custom_kubelet_dir
     local d
     d=$(trim_slashes "$RKE2_DATA")
     [[ "$d" != "/var/lib/rancher/rke2" ]] || return 0
@@ -2875,6 +2906,10 @@ uninstall_rke2() {
         if [[ -n "${RKE2I_SELINUX_EQUIV:-}" ]] && command -v semanage >/dev/null 2>&1; then
             echo "  Removing the SELinux file-context equivalence for $RKE2I_SELINUX_EQUIV..."
             semanage fcontext -d -e /var/lib/rancher/rke2 "$RKE2I_SELINUX_EQUIV" 2>/dev/null || true
+        fi
+        if [[ -n "${RKE2I_SELINUX_EQUIV_KUBELET:-}" ]] && command -v semanage >/dev/null 2>&1; then
+            echo "  Removing the SELinux file-context equivalence for $RKE2I_SELINUX_EQUIV_KUBELET..."
+            semanage fcontext -d -e /var/lib/kubelet "$RKE2I_SELINUX_EQUIV_KUBELET" 2>/dev/null || true
         fi
         if [[ -n "${RKE2I_SELINUX_EQUIV_PVC:-}" ]] && command -v semanage >/dev/null 2>&1; then
             echo "  Removing the SELinux file-context equivalence for $RKE2I_SELINUX_EQUIV_PVC..."

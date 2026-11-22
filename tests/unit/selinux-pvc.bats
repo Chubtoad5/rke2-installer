@@ -42,3 +42,32 @@ teardown() { rm -rf "$T"; }
   run grep -n -A3 'RKE2I_SELINUX_EQUIV_PVC:-' "$BATS_TEST_DIRNAME/../../rke2_installer.sh"
   [[ "$output" == *'semanage fcontext -d -e /opt/local-path-provisioner "$RKE2I_SELINUX_EQUIV_PVC"'* ]]
 }
+
+# V15 (spec 31): a custom KUBELET_DATA was default_t on an SELinux-enforcing host, so Velero's node-agent couldn't read
+# its pods directory and crash-looped. It gets /var/lib/kubelet's labels, recorded for uninstall.
+@test "V15: a custom KUBELET_DATA gets /var/lib/kubelet's labels, recorded for uninstall" {
+  KUBELET_DATA=$T/kubelet/
+  stub matchpathcon 'echo "$2 system_u:object_r:default_t:s0"; exit 1'
+  run label_custom_data_dir
+  [ "$status" -eq 0 ]
+  called "semanage fcontext -a -e /var/lib/kubelet $T/kubelet"
+  called "restorecon -R $T/kubelet"
+  grep -qx "RKE2I_SELINUX_EQUIV_KUBELET=\"$T/kubelet\"" "$T/state"
+}
+
+@test "V15: nothing for the default KUBELET_DATA, or one already labelled container_var_lib_t" {
+  KUBELET_DATA=/var/lib/kubelet
+  stub matchpathcon 'exit 0'
+  label_custom_data_dir
+  ! called "semanage fcontext -a -e /var/lib/kubelet" || false
+  KUBELET_DATA=$T/kubelet
+  stub matchpathcon '[ "$1" = -n ] && echo "system_u:object_r:container_var_lib_t:s0"; exit 0'
+  run label_custom_data_dir
+  [[ "$output" == *"already has /var/lib/kubelet's SELinux labels"* ]]
+  ! called "semanage fcontext -a -e /var/lib/kubelet" || false
+}
+
+@test "V15: uninstall removes the kubelet equivalence install recorded" {
+  run grep -n -A3 'RKE2I_SELINUX_EQUIV_KUBELET:-' "$BATS_TEST_DIRNAME/../../rke2_installer.sh"
+  [[ "$output" == *'semanage fcontext -d -e /var/lib/kubelet "$RKE2I_SELINUX_EQUIV_KUBELET"'* ]]
+}
