@@ -389,7 +389,7 @@ Velero provides cluster backup and restore using an S3-compatible object store a
 #### Install Velero CLI
 
 ```bash
-VELERO_VERSION="v1.17.1"
+VELERO_VERSION="v1.18.4"
 curl -L "https://github.com/vmware-tanzu/velero/releases/download/${VELERO_VERSION}/velero-${VELERO_VERSION}-linux-amd64.tar.gz" \
   -o "velero-${VELERO_VERSION}-linux-amd64.tar.gz"
 tar -xzf "velero-${VELERO_VERSION}-linux-amd64.tar.gz"
@@ -440,7 +440,7 @@ EOF
 ```bash
 velero install \
   --provider aws \
-  --plugins velero/velero-plugin-for-aws:v1.13.0 \
+  --plugins velero/velero-plugin-for-aws:v1.14.4 \
   --bucket velero \
   --backup-location-config \
     region=us-east-1,s3ForcePathStyle=true,s3Url=https://s3.example.com:8333,checksumAlgorithm="",insecureSkipTLSVerify=true \
@@ -584,7 +584,7 @@ helm upgrade --install kube-prometheus-stack \
   prometheus-community/kube-prometheus-stack \
   --namespace monitoring \
   --values /tmp/prom-values.yaml \
-  --version 69.8.0 \
+  --version 92.22.0 \
   --wait --timeout 10m
 
 rm -f /tmp/prom-values.yaml
@@ -600,7 +600,7 @@ kind: DaemonSet
 
 image:
   repository: cr.fluentbit.io/fluent/fluent-bit
-  tag: "4.2.2"
+  tag: "5.1.5"
 
 tolerations:
   - operator: Exists
@@ -728,7 +728,7 @@ helm upgrade --install fluent-bit \
   fluent/fluent-bit \
   --namespace monitoring \
   --values /tmp/fb-values.yaml \
-  --version 0.55.0 \
+  --version 0.58.3 \
   --wait --timeout 5m
 
 rm -f /tmp/fb-values.yaml
@@ -936,7 +936,7 @@ curl -sfL "https://raw.githubusercontent.com/kubernetes/website/main/content/en/
   -o rke2-offline/dnsutils.yaml
 
 # Velero CLI
-VELERO_VERSION="v1.17.1"
+VELERO_VERSION="v1.18.4"
 curl -L "https://github.com/vmware-tanzu/velero/releases/download/${VELERO_VERSION}/velero-${VELERO_VERSION}-linux-amd64.tar.gz" \
   -o rke2-offline/velero-${VELERO_VERSION}-linux-amd64.tar.gz
 
@@ -949,8 +949,8 @@ curl -fsSLo "rke2-offline/helm-v${HELM_VERSION}-linux-amd64.tar.gz" \
 helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
 helm repo add fluent https://fluent.github.io/helm-charts
 helm repo update
-helm pull prometheus-community/kube-prometheus-stack --version 69.8.0 -d rke2-offline/
-helm pull fluent/fluent-bit --version 0.55.0 -d rke2-offline/
+helm pull prometheus-community/kube-prometheus-stack --version 92.22.0 -d rke2-offline/
+helm pull fluent/fluent-bit --version 0.58.3 -d rke2-offline/
 ```
 
 #### Create the Archive
@@ -1025,14 +1025,14 @@ systemctl start rke2-server.service
 
   # Install kube-prometheus-stack from local chart
   helm upgrade --install kube-prometheus-stack \
-    rke2-offline/kube-prometheus-stack-69.8.0.tgz \
+    rke2-offline/kube-prometheus-stack-92.22.0.tgz \
     --namespace monitoring --create-namespace \
     --values /tmp/prom-values.yaml \
     --wait --timeout 10m
 
   # Install Fluent Bit from local chart
   helm upgrade --install fluent-bit \
-    rke2-offline/fluent-bit-0.55.0.tgz \
+    rke2-offline/fluent-bit-0.58.3.tgz \
     --namespace monitoring \
     --values /tmp/fb-values.yaml \
     --wait --timeout 5m

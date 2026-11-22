@@ -76,7 +76,9 @@ was checked with. Each was checked on Ubuntu 24.04, Ubuntu 24.04 minimal, Rocky 
 
 Any other version still installs, with no warning, but hasn't been checked. The upgrade from v1.34.5 to v1.35.10 to
 v1.36.6 was tested once, by hand, when 1.36 became the default: with a workload and a volume, with the ingress on and
-off, on all four distros. The Velero and monitoring add-ons haven't been checked on 1.35 or 1.36.
+off, on all four distros. The Velero and monitoring add-ons, CIS, Cilium, three servers and an air-gapped upgrade from
+1.35 were checked once on 1.36.6, by hand, on Ubuntu 24.04 and Rocky 10 (since v2.1.0; spec 31 in the project that
+maintains this installer). The add-ons weren't checked on 1.35.
 
 **RKE2 1.37 removes ingress-nginx.** A cluster that still runs it has to move to Traefik first, using Rancher's
 [migration guide](https://docs.rke2.io/reference/ingress_migration); RKE2 says a 1.37 server
@@ -202,8 +204,8 @@ All configuration is done by editing the `USER DEFINED VARIABLES` section at the
 
 | Variable | Default | Description |
 |---|---|---|
-| `VELERO_VERSION` | `v1.17.1` | Velero CLI/server version |
-| `VELERO_AWS_PLUGIN_VERSION` | `v1.13.0` | Velero AWS plugin version (used for S3 backend) |
+| `VELERO_VERSION` | `v1.18.4` | Velero CLI/server version |
+| `VELERO_AWS_PLUGIN_VERSION` | `v1.14.4` | Velero AWS plugin version (used for S3 backend) |
 | `VELERO_BUCKET` | `velero` | S3 bucket name for backup storage. In a multi-cluster environment set this per cluster (e.g. `VELERO_BUCKET=$CLUSTER_NAME`) to avoid backup collision. The installer prints a warning if `VELERO_BUCKET` is left at the default `velero` while `CLUSTER_NAME` has been customised. |
 | `VELERO_S3_URL` | *(required)* | S3 endpoint URL, e.g. `https://s3.example.com:8333` |
 | `VELERO_S3_ACCESS_KEY` | *(required)* | S3 access key. Velero reads it from an AWS credentials file, so a key that file would change is refused: see below |
@@ -225,9 +227,9 @@ All configuration is done by editing the `USER DEFINED VARIABLES` section at the
 | `MONITORING_PROMETHEUS_PORT` | `9090` | Prometheus remote-write receiver port |
 | `CLUSTER_NAME` | `edge-lab` | Cluster label applied to all metrics and logs for multi-cluster filtering |
 | `HELM_VERSION` | `4.0.1` | Helm version to install if not already present (default bumped from 3.12.0; still overridable) |
-| `KUBE_PROMETHEUS_STACK_VERSION` | `69.8.0` | kube-prometheus-stack Helm chart version |
-| `FLUENT_BIT_CHART_VERSION` | `0.55.0` | Fluent Bit Helm chart version |
-| `FLUENT_BIT_VERSION` | `4.2.2` | Fluent Bit application/image version |
+| `KUBE_PROMETHEUS_STACK_VERSION` | `92.22.0` | kube-prometheus-stack Helm chart version |
+| `FLUENT_BIT_CHART_VERSION` | `0.58.3` | Fluent Bit Helm chart version |
+| `FLUENT_BIT_VERSION` | `5.1.5` | Fluent Bit application/image version |
 | `PROMETHEUS_RETENTION` | `48h` | In-cluster Prometheus retention (short-term; long-term is on the external host) |
 | `PROMETHEUS_STORAGE_SIZE` | `50Gi` | PVC size for the in-cluster Prometheus |
 | `PROMETHEUS_STORAGE_CLASS` | `longhorn` | StorageClass used for Prometheus PVCs |

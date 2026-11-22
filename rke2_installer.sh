@@ -5,7 +5,7 @@ set -o errexit
 set -o nounset
 set -o pipefail
 
-SCRIPT_VERSION="2.0.0"
+SCRIPT_VERSION="2.1.0"
 
 # --- USER DEFINED VARIABLES ---#
 RKE2_VERSION_GIVEN=${RKE2_VERSION:-}                                          # what the caller set, before the default (spec 29, R23)
@@ -44,8 +44,8 @@ RKE2_SELINUX_FALLBACK=${RKE2_SELINUX_FALLBACK:-}                              # 
 DEBUG=${DEBUG:-"1"}
 
 # Velero Backup Configuration
-VELERO_VERSION=${VELERO_VERSION:-"v1.17.1"}
-VELERO_AWS_PLUGIN_VERSION=${VELERO_AWS_PLUGIN_VERSION:-"v1.13.0"}
+VELERO_VERSION=${VELERO_VERSION:-"v1.18.4"}
+VELERO_AWS_PLUGIN_VERSION=${VELERO_AWS_PLUGIN_VERSION:-"v1.14.4"}
 VELERO_BUCKET=${VELERO_BUCKET:-"velero"}
 VELERO_S3_URL=${VELERO_S3_URL:-""}                                   # S3 endpoint URL, e.g. https://s3.example.com:8333
 VELERO_S3_ACCESS_KEY=${VELERO_S3_ACCESS_KEY:-""}                     # S3 access key
@@ -63,9 +63,9 @@ MONITORING_LOKI_PORT=${MONITORING_LOKI_PORT:-"3100"}                 # Loki HTTP
 MONITORING_PROMETHEUS_PORT=${MONITORING_PROMETHEUS_PORT:-"9090"}     # Prometheus remote-write receiver port on the monitoring host
 CLUSTER_NAME=${CLUSTER_NAME:-"edge-lab"}                             # Cluster label applied to all metrics and logs
 HELM_VERSION=${HELM_VERSION:-"4.0.1"}                                # Helm version to download if not already installed
-KUBE_PROMETHEUS_STACK_VERSION=${KUBE_PROMETHEUS_STACK_VERSION:-"69.8.0"}  # kube-prometheus-stack Helm chart version
-FLUENT_BIT_CHART_VERSION=${FLUENT_BIT_CHART_VERSION:-"0.55.0"}       # Fluent Bit Helm chart version (fluent/fluent-bit, uses 0.x.x versioning)
-FLUENT_BIT_VERSION=${FLUENT_BIT_VERSION:-"4.2.2"}                    # Fluent Bit application/image version (appVersion in the chart above)
+KUBE_PROMETHEUS_STACK_VERSION=${KUBE_PROMETHEUS_STACK_VERSION:-"92.22.0"}  # kube-prometheus-stack Helm chart version
+FLUENT_BIT_CHART_VERSION=${FLUENT_BIT_CHART_VERSION:-"0.58.3"}       # Fluent Bit Helm chart version (fluent/fluent-bit, uses 0.x.x versioning)
+FLUENT_BIT_VERSION=${FLUENT_BIT_VERSION:-"5.1.5"}                    # Fluent Bit application/image version (appVersion in the chart above)
 PROMETHEUS_RETENTION=${PROMETHEUS_RETENTION:-"48h"}                  # In-cluster Prometheus retention (short; long-term lives on external host)
 PROMETHEUS_STORAGE_SIZE=${PROMETHEUS_STORAGE_SIZE:-"50Gi"}           # PVC size for in-cluster Prometheus
 PROMETHEUS_STORAGE_CLASS=${PROMETHEUS_STORAGE_CLASS:-"longhorn"}     # StorageClass for Prometheus and Alertmanager PVCs

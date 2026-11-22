@@ -1,5 +1,43 @@
 # Changelog — rke2-installer
 
+## v2.1.0 — 2026-11-22 — 1.36's add-ons, CIS, Cilium, taint and air-gapped upgrades fixed; newer add-on defaults
+
+Spec 31 (chubtoad-automation): a one-time bench of what CI doesn't run on 1.36 (monitoring, Velero, CIS, Cilium, the
+data paths and network settings, three servers, an air-gapped upgrade). A minor version, because the add-on defaults
+move. RKE2's own default stays v1.36.6+rke2r1.
+
+### Changed
+- **Add-on defaults move to newer releases:** Velero v1.18.4 with velero-plugin-for-aws v1.14.4 (were v1.17.1 and
+  v1.13.0), kube-prometheus-stack 92.22.0 (was 69.8.0, from early 2025), fluent-bit chart 0.58.3 with Fluent Bit 5.1.5
+  (were 0.55.0 and 4.2.2). Each is the newest release of a line that has had its fixes; checked on 1.36.6 on Ubuntu 24.04
+  and Rocky 10, online and air-gapped. A re-run of `install monitoring` or `install velero` moves a cluster to them (V3,
+  V4). `ap-tools` passes its own versions, so it doesn't move.
+
+### Fixed
+- **`install velero` with a custom kubelet root** (V1): the node-agent mounted `/var/lib/kubelet/pods` and crash-looped
+  ("unexpected directory structure for host-pods volume"), so the install failed. The root now comes from the node's
+  `config.yaml` (then `KUBELET_DATA`) and reaches `--kubelet-root-dir`; a node-agent made with the wrong path is replaced.
+- **`install monitoring` with SELinux enforcing** (V2, Rocky and RHEL by default): Fluent Bit couldn't create its
+  position databases in `/var/log` and crash-looped, so the install failed. It runs as `spc_t` there now.
+- **A re-run of `install velero` with a newer `VELERO_VERSION` upgrades the server** (V3), through Velero's upgrade
+  steps. Before, the new CLI ran beside the old server.
+- **`install monitoring` applies the chart's CRDs before upgrading** (V4). A newer chart's operator ran on the old CRDs.
+- **`ENABLE_CIS=true` installs finish** (V6): Pod Security `restricted` refused the DNS utility pod and the install exited
+  1 at its last step. Under CIS it gets a compliant security context, and a refused DNS utility only warns.
+- **Single-node `CNI_TYPE=cilium` installs finish** (V8): the second `cilium-operator` replica can't be placed on one
+  node, and the pod wait failed after 300 s. It no longer counts while one replica is ready.
+- **Air-gapped `install monitoring` can pull kube-prometheus-stack's webhook image** (V9), which comes from `ghcr.io`
+  since 84.x. A new `registries.yaml` mirrors `ghcr.io`; an existing one is kept as it is unless `RKE2_RECONFIGURE=true`.
+- **A first server with `CONTROL_PLANE_TAINT=true` finishes its install** (V10): RKE2's add-on charts and
+  local-path-provisioner wait for an agent there, and the pod wait failed after 300 s.
+- **An air-gapped upgrade can't take the server down because of a partial push** (V11): the preflight now needs
+  `rancher/rke2-runtime` for the target version as well as `rke2-upgrade`, and `push` sends RKE2's images before the
+  add-ons'. A push stopped by an add-on image had left the runtime out, and the upgraded server didn't start.
+
+### Docs
+- README: the Velero CLI's `--insecure-skip-tls-verify` with a self-signed S3 endpoint (V5); the Harbor projects a push
+  needs (V7); what was checked on 1.36.
+
 ## v2.0.0 — 2026-11-20 — RKE2 v1.36.6 by default (Traefik); v1.35.10 verified; one minor version at a time
 
 Spec 29 (chubtoad-automation). A major version: a plain `install` now gives Kubernetes 1.36 with Traefik, and re-runs
