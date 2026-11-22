@@ -2088,6 +2088,49 @@ write_velero_credentials () {
     ( umask 077; printf '[default]\naws_access_key_id=%s\naws_secret_access_key=%s\n' "$VELERO_S3_ACCESS_KEY" "$VELERO_S3_SECRET_KEY" > "$1" )
 }
 
+# velero_converge_versions: V3 (spec 31). 'velero install' over a running Velero leaves its Deployment and DaemonSet as they
+# are, so a re-run with a newer VELERO_VERSION used to put the new CLI beside the old server and say nothing. When the
+# running images differ from the requested ones, this takes Velero's documented upgrade steps: the CRDs, then the images.
+velero_converge_versions () {
+  local want_server="velero/velero:${VELERO_VERSION}" want_plugin="velero/velero-plugin-for-aws:${VELERO_AWS_PLUGIN_VERSION}"
+  local have_server have_plugin plugin_name
+  have_server=$(kubectl -n velero get deploy velero -o jsonpath='{.spec.template.spec.containers[?(@.name=="velero")].image}' 2>/dev/null)
+  [[ -n "$have_server" ]] || return 0
+  plugin_name=$(kubectl -n velero get deploy velero -o jsonpath='{range .spec.template.spec.initContainers[*]}{.name}={.image}{"\n"}{end}' 2>/dev/null \
+    | awk -F= '$2 ~ /velero-plugin-for-aws/ {print $1; exit}')
+  have_plugin=$(kubectl -n velero get deploy velero -o jsonpath="{.spec.template.spec.initContainers[?(@.name==\"$plugin_name\")].image}" 2>/dev/null)
+  if [[ "$have_server" == "$want_server" && ( -z "$plugin_name" || "$have_plugin" == "$want_plugin" ) ]]; then
+    return 0
+  fi
+  echo "  Velero runs ${have_server}${plugin_name:+ with $have_plugin}; moving it to $want_server with $want_plugin (Velero's upgrade steps)."
+  if ! velero install --crds-only --dry-run -o yaml | kubectl apply --server-side --force-conflicts -f - >/dev/null; then
+    echo "Error: couldn't update Velero's CRDs to ${VELERO_VERSION}. Velero still runs $have_server."
+    exit 1
+  fi
+  kubectl -n velero set image deployment/velero "velero=$want_server" ${plugin_name:+"$plugin_name=$want_plugin"} >/dev/null || exit 1
+  if kubectl -n velero get daemonset node-agent &>/dev/null; then
+    kubectl -n velero set image daemonset/node-agent "node-agent=$want_server" >/dev/null || exit 1
+    kubectl -n velero rollout status daemonset/node-agent --timeout="${POD_WAIT_TIMEOUT}s" >/dev/null || true
+  fi
+  kubectl -n velero rollout status deployment/velero --timeout="${POD_WAIT_TIMEOUT}s" >/dev/null || true
+}
+
+# velero_kubelet_root: the kubelet root directory Velero's node-agent must mount (spec 31, V1). The node's config.yaml
+# (kubelet-arg root-dir=) wins, because that's what the kubelet runs with; then KUBELET_DATA; then the default. A
+# node-agent that mounts the wrong pods directory crash-loops with "unexpected directory structure for host-pods volume".
+RKE2_CONFIG_YAML=${RKE2_CONFIG_YAML:-/etc/rancher/rke2/config.yaml}
+velero_kubelet_root () {
+  local root=""
+  if [[ -r "$RKE2_CONFIG_YAML" ]]; then
+    root=$(sed -n 's/^[[:space:]]*-[[:space:]]*"\{0,1\}root-dir=\([^"]*\)"\{0,1\}[[:space:]]*$/\1/p' "$RKE2_CONFIG_YAML" | head -1)
+  fi
+  if [[ -z "$root" && -n "$KUBELET_DATA" && "$KUBELET_DATA" != "default" ]]; then
+    root=$KUBELET_DATA
+  fi
+  root=${root%/}
+  echo "${root:-/var/lib/kubelet}"
+}
+
 run_install_velero () {
   export KUBECONFIG=/root/.kube/config
   export PATH=$PATH:$RKE2_DATA/bin
@@ -2142,9 +2185,24 @@ SNAPEOF
   local velero_creds="$TMP_DIR/credentials-velero"
   write_velero_credentials "$velero_creds"
 
-  # Install Velero into the cluster
+  # Install Velero into the cluster. The node-agent mounts <kubelet root>/pods, so a custom kubelet root must reach it (V1).
+  local kubelet_root kubelet_args=()
+  kubelet_root=$(velero_kubelet_root)
+  if [[ "$kubelet_root" != "/var/lib/kubelet" ]]; then
+    echo "  The kubelet root is $kubelet_root: the node-agent mounts its pods directory."
+    kubelet_args=(--kubelet-root-dir "$kubelet_root")
+  fi
+  # 'velero install' leaves an existing DaemonSet as it is, so a node-agent made with the wrong pods directory (any install
+  # before V1 on a custom root) would keep crash-looping. It holds no state: remove it, and the install below makes it again.
+  local mounted
+  mounted=$(kubectl -n velero get daemonset node-agent -o jsonpath='{.spec.template.spec.volumes[?(@.name=="host-pods")].hostPath.path}' 2>/dev/null)
+  if [[ -n "$mounted" && "${mounted%/}" != "$kubelet_root/pods" ]]; then
+    echo "  The node-agent mounts $mounted, not $kubelet_root/pods: replacing it."
+    kubectl -n velero delete daemonset node-agent --wait=true >/dev/null
+  fi
   echo "  Installing Velero server into the cluster..."
   velero install \
+    "${kubelet_args[@]}" \
     --provider aws \
     --plugins velero/velero-plugin-for-aws:${VELERO_AWS_PLUGIN_VERSION} \
     --bucket ${VELERO_BUCKET} \
@@ -2158,6 +2216,9 @@ SNAPEOF
 
   # Clean up credentials file
   rm -f "$velero_creds"
+
+  # A re-run over an older Velero moves it to the requested versions (V3)
+  velero_converge_versions
 
   # Verify installation
   echo "  Verifying Velero installation..."
@@ -2403,6 +2464,22 @@ kubeStateMetrics:
 alertmanager:
   enabled: false
 PROMEOF
+  # V4 (spec 31): Helm installs a chart's CRDs on the first install only, so a re-run with a newer chart used to leave the
+  # new operator on the old CRDs (seen: operator v0.94.2 on v0.90.1 CRDs). kube-prometheus-stack's upgrade notes apply
+  # them first, server-side because they're too large for a client-side apply's annotation.
+  local prom_crds; prom_crds=$(mktemp)
+  # shellcheck disable=SC2086
+  if helm show crds "$PROM_CHART_REF" $prom_version_flag > "$prom_crds" 2>/dev/null && [[ -s "$prom_crds" ]]; then
+    echo "  Applying kube-prometheus-stack's CRDs..."
+    if ! kubectl apply --server-side --force-conflicts -f "$prom_crds" >/dev/null; then
+      rm -f "$prom_crds" "$prom_values"
+      echo "Error: couldn't apply kube-prometheus-stack ${KUBE_PROMETHEUS_STACK_VERSION}'s CRDs; nothing was upgraded."
+      exit 1
+    fi
+  else
+    echo "  WARNING: couldn't read kube-prometheus-stack's CRDs from the chart; Helm adds them on a first install only."
+  fi
+  rm -f "$prom_crds"
   # shellcheck disable=SC2086
   helm upgrade --install kube-prometheus-stack "$PROM_CHART_REF" \
     --namespace monitoring \
@@ -2543,6 +2620,19 @@ resources:
     cpu: 500m
     memory: 256Mi
 FBEOF
+  # V2 (spec 31): with SELinux enforcing (Rocky and RHEL by default), Fluent Bit as container_t can't create its position
+  # databases in /var/log (var_log_t), so it crash-looped with "cannot open database" and this install failed. A log
+  # collector reads every pod's logs and the journal anyway; spc_t is the type container-selinux gives such host agents.
+  # RKE2's own policy has no log-reader type (Rancher's rke_logreader_t comes with rancher-selinux, which RKE2 doesn't install).
+  if [[ "$SELINUX_ENFORCING" == "true" ]]; then
+    echo "  SELinux is enforcing: Fluent Bit runs as spc_t, so it can keep its read positions in /var/log."
+    cat >> "$fb_values" <<'FBSEL'
+
+podSecurityContext:
+  seLinuxOptions:
+    type: spc_t
+FBSEL
+  fi
   # shellcheck disable=SC2086
   helm upgrade --install fluent-bit "$FB_CHART_REF" \
     --namespace monitoring \
